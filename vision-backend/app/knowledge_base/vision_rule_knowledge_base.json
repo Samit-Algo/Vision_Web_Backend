@@ -1,0 +1,185 @@
+{
+    "rules": [
+      {
+        "rule_id": "class_presence",
+        "rule_name": "Class Presence",
+        "description": "Triggers when at least one object of a specific class is detected.",
+        "intent_examples": [
+          "Notify me when my son comes home",
+          "Alert if a person appears",
+          "Tell me if someone enters"
+        ],
+  
+        "model": "yolov8n.pt",
+  
+        "detectable_classes": [
+          "person",
+          "person_without_helmet",
+          "dog",
+          "car"
+        ],
+  
+        "required_fields_from_user": [
+          "class",
+          "start_time",
+          "end_time"
+        ],
+
+        "optional_fields": [
+          "confidence"    
+        ],
+
+        "rules_config_fields": [
+          "class",
+          "label"
+        ],
+
+        "requires_zone": false,
+  
+        "defaults": {
+          "fps": 15,
+          "frames_per_minute_required": 30,
+          "confidence": 0.7
+        },
+  
+        "limitations": [
+          "False positives possible if confidence is low",
+          "Lighting conditions affect accuracy"
+        ]
+      },
+  
+      {
+        "rule_id": "object_enter_zone",
+        "rule_name": "Object Enter Zone",
+        "description": "Triggers when an object enters a defined zone.",
+        "intent_examples": [
+          "Alert if someone enters restricted area",
+          "Notify when a car enters the gate"
+        ],
+  
+        "model": "YOLO-Objects-v2",
+  
+        "detectable_classes": [
+          "person",
+          "car",
+          "truck"
+        ],
+  
+        "required_fields_from_user": [
+          "class",
+          "start_time",
+          "end_time"
+        ],
+
+        "optional_fields": [
+          "confidence"
+        ],
+
+        "rules_config_fields": [
+          "class",
+          "label"
+        ],
+
+        "requires_zone": true,
+  
+        "defaults": {
+          "fps": 10,
+          "confidence": 0.7
+        },
+  
+        "limitations": [
+          "Zone must be accurately drawn",
+          "Camera shake may reduce accuracy"
+        ]
+      },
+  
+      {
+        "rule_id": "gesture_detected",
+        "rule_name": "Gesture Detected",
+        "description": "Triggers when a gesture or action is detected.",
+        "intent_examples": [
+          "Alert if someone falls down",
+          "Notify when fighting happens"
+        ],
+  
+        "model": "YOLO-Gestures-v1",
+  
+        "detectable_gestures": [
+          "falling_down",
+          "fighting",
+          "running",
+          "carrying_weapon"
+        ],
+  
+        "required_fields_from_user": [
+          "gesture",
+          "start_time",
+          "end_time"
+        ],
+
+        "optional_fields": [
+          "confidence"
+        ],
+
+        "rules_config_fields": [
+          "gesture"
+        ],
+
+        "requires_zone": false,
+  
+        "defaults": {
+          "fps": 20,
+          "confidence": 0.7
+        },
+  
+        "limitations": [
+          "Gesture accuracy drops with occlusion",
+          "Overlapping people may confuse detection"
+        ]
+      },
+  
+      {
+        "rule_id": "proximity_detection",
+        "rule_name": "Proximity Detection",
+        "description": "Triggers when object A comes too close to object B.",
+        "intent_examples": [
+          "Alert if a person gets close to excavator",
+          "Notify when forklift approaches worker"
+        ],
+  
+        "model": "YOLO-Safety-v1",
+  
+        "detectable_classes": [
+          "person",
+          "excavator",
+          "machinery"
+        ],
+  
+        "required_fields_from_user": [
+          "class_a",
+          "class_b",
+          "distance",
+          "start_time",
+          "end_time"
+        ],
+
+        "optional_fields": [],
+
+        "rules_config_fields": [
+          "class_a",
+          "class_b",
+          "distance"
+        ],
+
+        "requires_zone": false,
+  
+        "defaults": {
+          "fps": 15
+        },
+  
+        "limitations": [
+          "Distance accuracy depends on camera perspective"
+        ]
+      }
+    ]
+  }

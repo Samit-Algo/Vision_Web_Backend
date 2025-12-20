@@ -1,0 +1,19 @@
+from pydantic import BaseModel
+from typing import Optional, Dict, Any
+
+
+class ChatMessageRequest(BaseModel):
+    """Request model for chat message"""
+    message: str
+    session_id: Optional[str] = None
+    zone_data: Optional[Dict[str, Any]] = None  # Zone data from UI drawing
+
+
+class ChatMessageResponse(BaseModel):
+    """Response model for chat message"""
+    response: str
+    session_id: str
+    status: Optional[str] = None
+    # Zone UI control signals
+    zone_required: bool = False  # Computed from state: requires_zone && zone is None
+    awaiting_zone_input: bool = False  # LLM is currently asking for zone input
