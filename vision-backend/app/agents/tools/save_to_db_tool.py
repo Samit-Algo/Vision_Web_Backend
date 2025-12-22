@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict, Any, Optional
 from datetime import datetime
 import asyncio
+from dataclasses import asdict
 
 from ..session_state.agent_state import get_agent_state, reset_agent_state
 from ...domain.models.agent import Agent
@@ -167,135 +168,51 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
     }
 
 
-async def _convert_agent_to_vision_core_format(
-    agent: Agent,
-    camera_stream_url: str
-) -> Dict[str, Any]:
-    """
-    Convert vision-backend agent format to vision_core format.
-    
-    Args:
-        agent: Agent domain model from vision-backend
-        camera_stream_url: RTSP stream URL from camera
-        
-    Returns:
-        Dictionary in vision_core AgentCreate format
-    """
-    # Map vision-backend rules to vision_core rules format
-    vision_core_rules = []
-    for rule in agent.rules:
-        if isinstance(rule, dict):
-            vision_core_rules.append(rule)
-        else:
-            vision_core_rules.append(rule.dict() if hasattr(rule, 'dict') else rule)
-    
-    # Determine task_type from model or rules
-    task_type = "object_detection"  # Default
-    if agent.rules:
-        first_rule = agent.rules[0] if agent.rules else {}
-        if isinstance(first_rule, dict):
-            rule_type = first_rule.get("type", "")
-            if "classification" in rule_type.lower():
-                task_type = "classification"
-            elif "tracking" in rule_type.lower():
-                task_type = "object_tracking"
-    
-    # Convert status
-    status = agent.status.lower() if agent.status else "pending"
-    if status == "active":
-        status = "running"
-    elif status == "created":
-        status = "pending"
-    
-    # Ensure start_time and end_time are datetime objects
-    start_at = agent.start_time or datetime.now()
-    end_at = agent.end_time or datetime.now()
-    
-    return {
-        "agent_id": agent.id or "",
-        "task_name": agent.name,
-        "task_type": task_type,
-        "camera_id": agent.camera_id,
-        "source_uri": camera_stream_url,
-        "model_ids": [agent.model] if agent.model else [],
-        "fps": agent.fps or 5,
-        "run_mode": agent.run_mode or "continuous",
-        "rules": vision_core_rules,
-        "status": status,
-        "start_at": start_at,
-        "end_at": end_at,
-    }
-
-
 async def _register_agent_with_jetson(agent: Agent) -> None:
     """
     Register agent with Jetson backend.
     
     This function:
-    1. Gets the camera to find device_id and stream_url
+    1. Gets the camera to find device_id
     2. Gets the device to find jetson_backend_url
     3. Creates a JetsonClient with the device-specific URL
-    4. Converts agent to vision_core format
-    5. Sends agent config to Jetson backend
+    4. Sends agent config to Jetson backend in the same format as stored in database
+    5. Gets and stores stream config for the agent
     """
     import logging
     logger = logging.getLogger(__name__)
     
-    if not _camera_repository or not _jetson_client:
+    if not _jetson_client:
         logger.warning(
-            f"Camera repository or JetsonClient not initialized. "
+            f"JetsonClient not initialized. "
             f"Skipping Jetson registration for agent {agent.id}"
         )
         return  # Dependencies not set, skip registration
     
-    # Get camera to find device_id and stream_url
-    try:
-        camera = await _camera_repository.find_by_id(agent.camera_id)
-        if not camera:
-            logger.warning(
-                f"Camera {agent.camera_id} not found. Skipping Jetson registration for agent {agent.id}"
-            )
-            return
-        
-        if not camera.stream_url:
-            logger.warning(
-                f"Camera {agent.camera_id} has no stream_url. Skipping Jetson registration for agent {agent.id}"
-            )
-            return
-    except Exception as e:
-        logger.error(
-            f"Error fetching camera {agent.camera_id} for agent {agent.id}: {e}",
-            exc_info=True
-        )
-        return
-    
-    # Get device backend URL if camera has device_id
+    # Get camera to find device_id
     jetson_backend_url = None
-    if camera.device_id:
-        if not _device_repository:
-            logger.warning(
-                f"Device repository not initialized. Cannot get Jetson backend URL for device {camera.device_id}. "
-                f"Using default JetsonClient for agent {agent.id}"
+    if _camera_repository:
+        try:
+            camera = await _camera_repository.find_by_id(agent.camera_id)
+            if camera and camera.device_id and _device_repository:
+                try:
+                    device = await _device_repository.find_by_id(camera.device_id)
+                    if device:
+                        jetson_backend_url = device.jetson_backend_url
+                        logger.info(
+                            f"Found device {camera.device_id} with Jetson backend at {jetson_backend_url} "
+                            f"for agent {agent.id}"
+                        )
+                except Exception as e:
+                    logger.error(
+                        f"Error fetching device {camera.device_id} for agent {agent.id}: {e}",
+                        exc_info=True
+                    )
+        except Exception as e:
+            logger.error(
+                f"Error fetching camera {agent.camera_id} for agent {agent.id}: {e}",
+                exc_info=True
             )
-        else:
-            try:
-                device = await _device_repository.find_by_id(camera.device_id)
-                if device:
-                    jetson_backend_url = device.jetson_backend_url
-                    logger.info(
-                        f"Found device {camera.device_id} with Jetson backend at {jetson_backend_url} "
-                        f"for agent {agent.id}"
-                    )
-                else:
-                    logger.warning(
-                        f"Device {camera.device_id} not found. Using default JetsonClient for agent {agent.id}"
-                    )
-            except Exception as e:
-                logger.error(
-                    f"Error fetching device {camera.device_id} for agent {agent.id}: {e}",
-                    exc_info=True
-                )
-                # Continue with default client
     
     # Create JetsonClient with device-specific URL if available
     from ...infrastructure.external.jetson_client import JetsonClient
@@ -310,44 +227,73 @@ async def _register_agent_with_jetson(agent: Agent) -> None:
             f"Using default Jetson backend URL: {jetson_client.base_url} for agent {agent.id}"
         )
     
-    # Convert to vision_core format
+    # Convert agent to dict (same format as stored in database)
     try:
-        vision_core_payload = await _convert_agent_to_vision_core_format(
-            agent,
-            camera.stream_url
-        )
+        agent_dict = asdict(agent)
+        # Remove stream_config from payload - we'll get it from Jetson after registration
+        agent_dict.pop("stream_config", None)
+        # Convert datetime objects to ISO format strings for JSON serialization
+        if agent_dict.get("start_time") and isinstance(agent_dict["start_time"], datetime):
+            agent_dict["start_time"] = agent_dict["start_time"].isoformat()
+        if agent_dict.get("end_time") and isinstance(agent_dict["end_time"], datetime):
+            agent_dict["end_time"] = agent_dict["end_time"].isoformat()
+        if agent_dict.get("created_at") and isinstance(agent_dict["created_at"], datetime):
+            agent_dict["created_at"] = agent_dict["created_at"].isoformat()
+        
+        # Transform rules: convert "class" to "class_name" for Jetson backend
+        # (class is a Python reserved keyword, so Jetson uses class_name)
+        if agent_dict.get("rules"):
+            transformed_rules = []
+            for rule in agent_dict["rules"]:
+                if isinstance(rule, dict):
+                    transformed_rule = rule.copy()
+                    # Convert "class" to "class_name" if it exists
+                    if "class" in transformed_rule:
+                        transformed_rule["class_name"] = transformed_rule.pop("class")
+                    transformed_rules.append(transformed_rule)
+                else:
+                    transformed_rules.append(rule)
+            agent_dict["rules"] = transformed_rules
     except Exception as e:
         logger.error(
-            f"Error converting agent {agent.id} to vision_core format: {e}",
+            f"Error converting agent {agent.id} to dict: {e}",
             exc_info=True
         )
         return
     
-    # Register agent with Jetson backend
+    # Register agent with Jetson backend using raw agent config
     try:
         logger.info(
             f"Registering agent {agent.id} with Jetson backend at {jetson_client.base_url}"
         )
-        success = await jetson_client.register_agent(
-            agent_id=vision_core_payload["agent_id"],
-            task_name=vision_core_payload["task_name"],
-            task_type=vision_core_payload["task_type"],
-            camera_id=vision_core_payload["camera_id"],
-            source_uri=vision_core_payload["source_uri"],
-            model_ids=vision_core_payload["model_ids"],
-            fps=vision_core_payload["fps"],
-            run_mode=vision_core_payload["run_mode"],
-            rules=vision_core_payload["rules"],
-            status=vision_core_payload["status"],
-            start_at=vision_core_payload["start_at"],
-            end_at=vision_core_payload["end_at"],
-        )
+        success = await jetson_client.register_agent_raw(agent_dict)
         
         if success:
             logger.info(
                 f"Successfully registered agent {agent.id} with Jetson backend. "
-                f"Agent will be processed by runner on next poll."
+                f"Fetching stream config..."
             )
+            
+            # Get stream config for this specific agent
+            config_dict = await jetson_client.get_stream_config_for_agent(
+                agent_id=agent.id,
+                camera_id=agent.camera_id,
+                user_id=agent.owner_user_id or ""
+            )
+            
+            if config_dict and _agent_repository:
+                # Store stream config in agent
+                agent.stream_config = config_dict
+                updated_agent = await _agent_repository.save(agent)
+                logger.info(
+                    f"Successfully registered agent {agent.id} with Jetson backend "
+                    f"and stored stream config"
+                )
+            else:
+                logger.warning(
+                    f"Agent {agent.id} registered with Jetson backend but failed to get stream config. "
+                    f"Agent will work but stream viewing may not be available."
+                )
         else:
             logger.warning(
                 f"Failed to register agent {agent.id} with Jetson backend. "

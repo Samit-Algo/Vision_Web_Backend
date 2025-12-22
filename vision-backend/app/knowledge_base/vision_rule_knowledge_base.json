@@ -16,7 +16,8 @@
           "person",
           "person_without_helmet",
           "dog",
-          "car"
+          "car",
+          "chair"
         ],
   
         "required_fields_from_user": [
@@ -37,7 +38,7 @@
         "requires_zone": false,
   
         "defaults": {
-          "fps": 15,
+          "fps": 1,
           "frames_per_minute_required": 30,
           "confidence": 0.7
         },
@@ -83,7 +84,7 @@
         "requires_zone": true,
   
         "defaults": {
-          "fps": 10,
+          "fps": 1,
           "confidence": 0.7
         },
   
@@ -128,7 +129,7 @@
         "requires_zone": false,
   
         "defaults": {
-          "fps": 20,
+          "fps": 2,
           "confidence": 0.7
         },
   
@@ -174,7 +175,7 @@
         "requires_zone": false,
   
         "defaults": {
-          "fps": 15
+          "fps": 1
         },
   
         "limitations": [

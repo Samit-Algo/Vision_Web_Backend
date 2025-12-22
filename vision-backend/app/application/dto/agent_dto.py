@@ -21,4 +21,5 @@ class AgentResponse(BaseModel):
     status: str = "ACTIVE"
     created_at: Optional[datetime] = None
     owner_user_id: Optional[str] = None
+    stream_config: Optional[Dict[str, Any]] = None
 

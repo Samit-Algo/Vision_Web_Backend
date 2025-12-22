@@ -43,6 +43,7 @@ class ListAgentsByCameraUseCase:
                 status=agent.status,
                 created_at=agent.created_at,
                 owner_user_id=agent.owner_user_id,
+                stream_config=agent.stream_config,
             )
             for agent in agents
         ]

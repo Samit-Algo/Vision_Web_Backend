@@ -156,6 +156,7 @@ class MongoAgentRepository(AgentRepository):
                 status=document.get("status", "ACTIVE"),
                 created_at=document.get("created_at"),
                 owner_user_id=document.get("owner_user_id"),
+                stream_config=document.get("stream_config"),
             )
         except Exception as e:
             raise ValueError(f"Error converting document to Agent: {str(e)}")
@@ -181,6 +182,7 @@ class MongoAgentRepository(AgentRepository):
             "status": agent.status,
             "created_at": agent.created_at,
             "owner_user_id": agent.owner_user_id,
+            "stream_config": agent.stream_config,
         }
         
         # Only include _id if agent.id is valid

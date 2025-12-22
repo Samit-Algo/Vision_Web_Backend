@@ -231,6 +231,89 @@ class JetsonClient:
                 )
                 return None
     
+    async def get_stream_config_for_agent(
+        self, 
+        agent_id: str,
+        camera_id: str,
+        user_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get stream configuration for a specific agent.
+        
+        This retrieves agent-specific stream config from Jetson backend.
+        The stream includes bounding boxes and agent-specific annotations.
+        
+        Args:
+            agent_id: Agent ID to get stream configuration for
+            camera_id: Camera ID which the agent is monitoring
+            user_id: User ID who owns the agent
+            
+        Returns:
+            Dictionary with stream configuration (signaling_url, viewer_id, ice_servers, etc.), 
+            or None if error
+        """
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                logger.info(
+                    f"Fetching stream config for agent {agent_id} "
+                    f"(user {user_id}) for camera {camera_id} from Jetson backend"
+                )
+                
+                response = await client.get(
+                    f"{self.base_url}/api/agents/{agent_id}/stream-config"
+                )
+                response.raise_for_status()
+                
+                config = response.json()
+                
+                # Add viewer_id for compatibility (derived from signaling_url)
+                signaling_url = config.get("signaling_url", "")
+                viewer_id = None
+                
+                # Extract viewer_id from signaling_url
+                # Jetson backend format (similar to camera):
+                # AWS: ws://aws-url:8000/ws/viewer:{user_id}:{camera_id}:{agent_id} -> viewer_id: viewer:{user_id}:{camera_id}:{agent_id}
+                # Local: ws://localhost:8765/viewer:{user_id}/{camera_id}/{agent_id} -> viewer_id: viewer:{user_id}/{camera_id}/{agent_id}
+                if signaling_url:
+                    # Check for AWS format first (colon separator)
+                    if f"viewer:{user_id}:{camera_id}:{agent_id}" in signaling_url:
+                        viewer_id = f"viewer:{user_id}:{camera_id}:{agent_id}"
+                    # Check for local format (slash separator)
+                    elif f"viewer:{user_id}/{camera_id}/{agent_id}" in signaling_url:
+                        viewer_id = f"viewer:{user_id}/{camera_id}/{agent_id}"
+                    # Fallback: construct from known format (prefer AWS format)
+                    else:
+                        viewer_id = f"viewer:{user_id}:{camera_id}:{agent_id}"
+                        logger.warning(
+                            f"Could not extract viewer_id from signaling_url format for agent {agent_id} for camera {camera_id}. "
+                            f"Using constructed format: {viewer_id}"
+                        )
+                
+                config["viewer_id"] = viewer_id
+                
+                logger.info(
+                    f"Successfully retrieved stream config for agent {agent_id} for camera {camera_id}"
+                )
+                return config
+                
+            except httpx.TimeoutException:
+                logger.error(
+                    f"Timeout while fetching stream config for agent {agent_id} for camera {camera_id} from Jetson backend"
+                )
+                return None
+            except httpx.HTTPStatusError as e:
+                logger.error(
+                    f"HTTP error fetching stream config for agent {agent_id} for camera {camera_id}: "
+                    f"{e.response.status_code} - {e.response.text}"
+                )
+                return None
+            except Exception as e:
+                logger.error(
+                    f"Unexpected error fetching stream config for agent {agent_id} for camera {camera_id}: {e}",
+                    exc_info=True
+                )
+                return None
+    
     async def register_agent(
         self,
         agent_id: str,
@@ -297,6 +380,7 @@ class JetsonClient:
                 logger.info(
                     f"Registering agent {agent_id} for camera {camera_id} with Jetson backend at {self.base_url}"
                 )
+                print(payload)
                 
                 response = await client.post(
                     f"{self.base_url}/api/agents",
@@ -321,6 +405,59 @@ class JetsonClient:
             except Exception as e:
                 logger.error(
                     f"Unexpected error registering agent {agent_id} with Jetson backend: {e}",
+                    exc_info=True
+                )
+                return False
+    
+    async def register_agent_raw(self, agent_config: Dict[str, Any]) -> bool:
+        """
+        Register agent with Jetson backend using raw agent config from database.
+        
+        This method sends the agent configuration exactly as stored in the database
+        to the Jetson backend without any format conversion.
+        
+        Args:
+            agent_config: Dictionary containing agent configuration (same format as database)
+            
+        Returns:
+            True if registration successful, False otherwise
+            
+        Note:
+            This method logs errors but doesn't raise exceptions to prevent
+            agent creation from failing if Jetson backend is temporarily unavailable.
+        """
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                agent_id = agent_config.get("id", "")
+                
+                logger.info(
+                    f"Registering agent {agent_id} with Jetson backend at {self.base_url} "
+                    f"(using raw agent config from database)"
+                )
+                
+                response = await client.post(
+                    f"{self.base_url}/api/agents",
+                    json=agent_config
+                )
+                response.raise_for_status()
+                
+                logger.info(f"Successfully registered agent {agent_id} with Jetson backend")
+                return True
+                
+            except httpx.TimeoutException:
+                logger.error(
+                    f"Timeout while registering agent {agent_config.get('id', 'unknown')} with Jetson backend"
+                )
+                return False
+            except httpx.HTTPStatusError as e:
+                logger.error(
+                    f"HTTP error registering agent {agent_config.get('id', 'unknown')} with Jetson backend: "
+                    f"{e.response.status_code} - {e.response.text}"
+                )
+                return False
+            except Exception as e:
+                logger.error(
+                    f"Unexpected error registering agent {agent_config.get('id', 'unknown')} with Jetson backend: {e}",
                     exc_info=True
                 )
                 return False
