@@ -36,6 +36,12 @@ class Settings:
             "JETSON_BACKEND_URL",
             "http://localhost:8001"
         )
+        
+        # Web Backend Configuration (for Jetson backend to connect back)
+        self.web_backend_url: Final[str] = os.getenv(
+            "WEB_BACKEND_URL",
+            "http://localhost:8000"
+        )
 
 
 # Global settings instance (singleton pattern)

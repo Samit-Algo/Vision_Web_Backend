@@ -18,3 +18,5 @@ __pycache__/
 .venv/
 .venv/
 .venv/
+events/
+agent/

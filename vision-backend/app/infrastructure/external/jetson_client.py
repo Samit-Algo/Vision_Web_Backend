@@ -33,6 +33,87 @@ class JetsonClient:
         self.base_url = base_url or settings.jetson_backend_url
         self.timeout = timeout
     
+    async def check_connection(self) -> bool:
+        """
+        Check if Jetson backend is reachable.
+        
+        Returns:
+            True if connection successful, False otherwise
+        """
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            try:
+                response = await client.get(f"{self.base_url}/health")
+                return response.status_code == 200
+            except Exception as e:
+                logger.debug(f"Connection check failed: {e}")
+                return False
+    
+    async def register_device(
+        self,
+        device_id: str,
+        web_backend_url: str,
+        user_id: str,
+        name: Optional[str] = None
+    ) -> bool:
+        """
+        Register device with Jetson backend.
+        
+        This method sends device configuration to the Jetson backend so it can
+        store the web backend URL and establish bidirectional communication.
+        
+        Args:
+            device_id: Unique device ID
+            web_backend_url: Web backend URL for this device
+            user_id: User ID who owns this device
+            name: Optional device name
+            
+        Returns:
+            True if registration successful, False otherwise
+            
+        Note:
+            This method logs errors but doesn't raise exceptions to prevent
+            device creation from failing if Jetson backend is temporarily unavailable.
+        """
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                payload = {
+                    "device_id": device_id,
+                    "web_backend_url": web_backend_url,
+                    "user_id": user_id,
+                    "name": name
+                }
+                
+                logger.info(
+                    f"Registering device {device_id} with Jetson backend at {self.base_url}"
+                )
+                
+                response = await client.post(
+                    f"{self.base_url}/api/devices",
+                    json=payload
+                )
+                response.raise_for_status()
+                
+                logger.info(f"Successfully registered device {device_id} with Jetson backend")
+                return True
+                
+            except httpx.TimeoutException:
+                logger.error(
+                    f"Timeout while registering device {device_id} with Jetson backend"
+                )
+                return False
+            except httpx.HTTPStatusError as e:
+                logger.error(
+                    f"HTTP error registering device {device_id} with Jetson backend: "
+                    f"{e.response.status_code} - {e.response.text}"
+                )
+                return False
+            except Exception as e:
+                logger.error(
+                    f"Unexpected error registering device {device_id} with Jetson backend: {e}",
+                    exc_info=True
+                )
+                return False
+    
     async def register_camera(
         self,
         camera_id: str,
@@ -47,11 +128,13 @@ class JetsonClient:
         This method sends camera configuration to the Jetson device so it can
         start processing the RTSP stream and make it available via WebRTC.
         
+        Uses same field names as web backend (no mapping/conversion).
+        
         Args:
             camera_id: Unique camera ID (e.g., "CAM-43C1E6AFB726")
             owner_user_id: User ID who owns this camera
             name: Camera name
-            stream_url: RTSP stream URL
+            stream_url: Stream URL
             device_id: Optional device ID
             
         Returns:
@@ -63,13 +146,12 @@ class JetsonClient:
         """
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
-                # Map vision-backend fields to Jetson backend format
-                # Jetson expects: camera_id, rtsp_url, camera_name, user_id, device_id
+                # Use same field names as web backend (no mapping)
                 payload = {
-                    "camera_id": camera_id,
-                    "rtsp_url": stream_url,
-                    "camera_name": name,
-                    "user_id": owner_user_id,
+                    "id": camera_id,
+                    "owner_user_id": owner_user_id,
+                    "name": name,
+                    "stream_url": stream_url,
                     "device_id": device_id
                 }
                 
