@@ -5,6 +5,7 @@ from bson import ObjectId
 from bson.errors import InvalidId
 from ...domain.repositories.agent_repository import AgentRepository
 from ...domain.models.agent import Agent
+from ...domain.constants import AgentFields
 from .mongo_connection import get_agent_collection
 
 
@@ -25,7 +26,7 @@ class MongoAgentRepository(AgentRepository):
             return None
         
         try:
-            document = await self.agent_collection.find_one({"_id": object_id})
+            document = await self.agent_collection.find_one({AgentFields.MONGO_ID: object_id})
             if document is None:
                 return None
             return self._document_to_agent(document)
@@ -39,7 +40,7 @@ class MongoAgentRepository(AgentRepository):
             return []
         
         try:
-            cursor = self.agent_collection.find({"owner_user_id": user_id})
+            cursor = self.agent_collection.find({AgentFields.OWNER_USER_ID: user_id})
             agents = []
             async for document in cursor:
                 agents.append(self._document_to_agent(document))
@@ -55,11 +56,11 @@ class MongoAgentRepository(AgentRepository):
         
         try:
             # Build query filter
-            query_filter = {"camera_id": camera_id}
+            query_filter = {AgentFields.CAMERA_ID: camera_id}
             
             # Optionally filter by user_id if provided
             if user_id:
-                query_filter["owner_user_id"] = user_id
+                query_filter[AgentFields.OWNER_USER_ID] = user_id
             
             cursor = self.agent_collection.find(query_filter)
             agents = []
@@ -87,8 +88,8 @@ class MongoAgentRepository(AgentRepository):
                 
                 # Update the document
                 update_result = await self.agent_collection.update_one(
-                    {"_id": object_id},
-                    {"$set": {k: v for k, v in agent_dict.items() if k != "_id"}}
+                    {AgentFields.MONGO_ID: object_id},
+                    {"$set": {k: v for k, v in agent_dict.items() if k != AgentFields.MONGO_ID}}
                 )
                 
                 # Check if the document was actually updated
@@ -96,7 +97,7 @@ class MongoAgentRepository(AgentRepository):
                     raise ValueError(f"Agent with ID {agent.id} not found")
                 
                 # Fetch and return the updated document from database
-                updated_document = await self.agent_collection.find_one({"_id": object_id})
+                updated_document = await self.agent_collection.find_one({AgentFields.MONGO_ID: object_id})
                 if updated_document is None:
                     raise RuntimeError(f"Agent {agent.id} was updated but could not be retrieved")
                 
@@ -104,14 +105,14 @@ class MongoAgentRepository(AgentRepository):
             else:
                 # Create new agent
                 # Remove id from dict if it's None or invalid
-                if "_id" in agent_dict:
-                    del agent_dict["_id"]
+                if AgentFields.MONGO_ID in agent_dict:
+                    del agent_dict[AgentFields.MONGO_ID]
                 
                 # Insert the new document
                 result = await self.agent_collection.insert_one(agent_dict)
                 
                 # Fetch and return the newly created document from database
-                new_document = await self.agent_collection.find_one({"_id": result.inserted_id})
+                new_document = await self.agent_collection.find_one({AgentFields.MONGO_ID: result.inserted_id})
                 if new_document is None:
                     raise RuntimeError("Agent was created but could not be retrieved")
                 
@@ -125,12 +126,12 @@ class MongoAgentRepository(AgentRepository):
     
     def _document_to_agent(self, document: dict) -> Agent:
         """Convert MongoDB document to Agent domain model"""
-        if not document or "_id" not in document:
+        if not document or AgentFields.MONGO_ID not in document:
             raise ValueError("Invalid document: missing _id field")
         
         # Convert start_time and end_time to datetime if they are strings (for backward compatibility)
-        start_time = document.get("start_time")
-        end_time = document.get("end_time")
+        start_time = document.get(AgentFields.START_TIME)
+        end_time = document.get(AgentFields.END_TIME)
         
         if start_time and isinstance(start_time, str):
             start_time = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
@@ -140,23 +141,23 @@ class MongoAgentRepository(AgentRepository):
         
         try:
             return Agent(
-                id=str(document["_id"]),
-                name=document.get("name", ""),
-                camera_id=document.get("camera_id", ""),
-                model=document.get("model", ""),
-                fps=document.get("fps"),
-                rules=document.get("rules", []),
-                run_mode=document.get("run_mode"),
-                interval_minutes=document.get("interval_minutes"),
-                check_duration_seconds=document.get("check_duration_seconds"),
+                id=str(document[AgentFields.MONGO_ID]),
+                name=document.get(AgentFields.NAME, ""),
+                camera_id=document.get(AgentFields.CAMERA_ID, ""),
+                model=document.get(AgentFields.MODEL, ""),
+                fps=document.get(AgentFields.FPS),
+                rules=document.get(AgentFields.RULES, []),
+                run_mode=document.get(AgentFields.RUN_MODE),
+                interval_minutes=document.get(AgentFields.INTERVAL_MINUTES),
+                check_duration_seconds=document.get(AgentFields.CHECK_DURATION_SECONDS),
                 start_time=start_time,
                 end_time=end_time,
-                zone=document.get("zone"),
-                requires_zone=document.get("requires_zone", False),
-                status=document.get("status", "ACTIVE"),
-                created_at=document.get("created_at"),
-                owner_user_id=document.get("owner_user_id"),
-                stream_config=document.get("stream_config"),
+                zone=document.get(AgentFields.ZONE),
+                requires_zone=document.get(AgentFields.REQUIRES_ZONE, False),
+                status=document.get(AgentFields.STATUS, "ACTIVE"),
+                created_at=document.get(AgentFields.CREATED_AT),
+                owner_user_id=document.get(AgentFields.OWNER_USER_ID),
+                stream_config=document.get(AgentFields.STREAM_CONFIG),
             )
         except Exception as e:
             raise ValueError(f"Error converting document to Agent: {str(e)}")
@@ -167,28 +168,28 @@ class MongoAgentRepository(AgentRepository):
             raise ValueError("Agent cannot be None")
         
         agent_dict = {
-            "name": agent.name,
-            "camera_id": agent.camera_id,
-            "model": agent.model,
-            "fps": agent.fps,
-            "rules": agent.rules,
-            "run_mode": agent.run_mode,
-            "interval_minutes": agent.interval_minutes,
-            "check_duration_seconds": agent.check_duration_seconds,
-            "start_time": agent.start_time,
-            "end_time": agent.end_time,
-            "zone": agent.zone,
-            "requires_zone": agent.requires_zone,
-            "status": agent.status,
-            "created_at": agent.created_at,
-            "owner_user_id": agent.owner_user_id,
-            "stream_config": agent.stream_config,
+            AgentFields.NAME: agent.name,
+            AgentFields.CAMERA_ID: agent.camera_id,
+            AgentFields.MODEL: agent.model,
+            AgentFields.FPS: agent.fps,
+            AgentFields.RULES: agent.rules,
+            AgentFields.RUN_MODE: agent.run_mode,
+            AgentFields.INTERVAL_MINUTES: agent.interval_minutes,
+            AgentFields.CHECK_DURATION_SECONDS: agent.check_duration_seconds,
+            AgentFields.START_TIME: agent.start_time,
+            AgentFields.END_TIME: agent.end_time,
+            AgentFields.ZONE: agent.zone,
+            AgentFields.REQUIRES_ZONE: agent.requires_zone,
+            AgentFields.STATUS: agent.status,
+            AgentFields.CREATED_AT: agent.created_at,
+            AgentFields.OWNER_USER_ID: agent.owner_user_id,
+            AgentFields.STREAM_CONFIG: agent.stream_config,
         }
         
         # Only include _id if agent.id is valid
         if agent.id:
             try:
-                agent_dict["_id"] = ObjectId(agent.id)
+                agent_dict[AgentFields.MONGO_ID] = ObjectId(agent.id)
             except (InvalidId, ValueError, TypeError):
                 # If ID is invalid, don't include it (will create new document)
                 pass

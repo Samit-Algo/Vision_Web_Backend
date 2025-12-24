@@ -8,6 +8,7 @@ import httpx
 
 # Local application imports
 from .base_jetson_client import BaseJetsonClient
+from ...domain.constants import AgentFields
 
 logger = logging.getLogger(__name__)
 
@@ -69,18 +70,18 @@ class AgentClient(BaseJetsonClient):
                 end_at_str = end_at.isoformat() if isinstance(end_at, datetime) else end_at
                 
                 payload = {
-                    "agent_id": agent_id,
-                    "task_name": task_name,
-                    "task_type": task_type,
-                    "camera_id": camera_id,
-                    "source_uri": source_uri,
-                    "model_ids": model_ids,
-                    "fps": fps,
-                    "run_mode": run_mode,
-                    "rules": [rule if isinstance(rule, dict) else rule.dict() if hasattr(rule, 'dict') else rule for rule in rules],
-                    "status": status,
-                    "start_at": start_at_str,
-                    "end_at": end_at_str,
+                    "agent_id": agent_id,  # Maps to AgentFields.ID, but Jetson API expects "agent_id"
+                    "task_name": task_name,  # Not an Agent field, Jetson API parameter
+                    "task_type": task_type,  # Not an Agent field, Jetson API parameter
+                    AgentFields.CAMERA_ID: camera_id,
+                    "source_uri": source_uri,  # Not an Agent field, Jetson API parameter
+                    "model_ids": model_ids,  # Not an Agent field, Jetson API parameter (plural)
+                    AgentFields.FPS: fps,
+                    AgentFields.RUN_MODE: run_mode,
+                    AgentFields.RULES: [rule if isinstance(rule, dict) else rule.dict() if hasattr(rule, 'dict') else rule for rule in rules],
+                    AgentFields.STATUS: status,
+                    "start_at": start_at_str,  # Maps to AgentFields.START_TIME, but Jetson API expects "start_at"
+                    "end_at": end_at_str,  # Maps to AgentFields.END_TIME, but Jetson API expects "end_at"
                 }
                 
                 logger.info(
@@ -134,7 +135,7 @@ class AgentClient(BaseJetsonClient):
         """
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
-                agent_id = agent_config.get("id", "")
+                agent_id = agent_config.get(AgentFields.ID, "")
                 
                 logger.info(
                     f"Registering agent {agent_id} with Jetson backend at {self.base_url} "
@@ -152,18 +153,18 @@ class AgentClient(BaseJetsonClient):
                 
             except httpx.TimeoutException:
                 logger.error(
-                    f"Timeout while registering agent {agent_config.get('id', 'unknown')} with Jetson backend"
+                    f"Timeout while registering agent {agent_config.get(AgentFields.ID, 'unknown')} with Jetson backend"
                 )
                 return False
             except httpx.HTTPStatusError as e:
                 logger.error(
-                    f"HTTP error registering agent {agent_config.get('id', 'unknown')} with Jetson backend: "
+                    f"HTTP error registering agent {agent_config.get(AgentFields.ID, 'unknown')} with Jetson backend: "
                     f"{e.response.status_code} - {e.response.text}"
                 )
                 return False
             except Exception as e:
                 logger.error(
-                    f"Unexpected error registering agent {agent_config.get('id', 'unknown')} with Jetson backend: {e}",
+                    f"Unexpected error registering agent {agent_config.get(AgentFields.ID, 'unknown')} with Jetson backend: {e}",
                     exc_info=True
                 )
                 return False

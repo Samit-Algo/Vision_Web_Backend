@@ -7,6 +7,7 @@ import httpx
 
 # Local application imports
 from .base_jetson_client import BaseJetsonClient
+from ...domain.constants import DeviceFields
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +63,10 @@ class DeviceClient(BaseJetsonClient):
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
                 payload = {
-                    "device_id": device_id,
-                    "web_backend_url": web_backend_url,
-                    "user_id": user_id,
-                    "name": name
+                    "device_id": device_id,  # Maps to DeviceFields.ID, but Jetson API expects "device_id"
+                    "web_backend_url": web_backend_url,  # Not a Device field, Jetson API parameter
+                    "user_id": user_id,  # Maps to DeviceFields.OWNER_USER_ID, but Jetson API expects "user_id"
+                    DeviceFields.NAME: name  # Use constant for name field
                 }
                 
                 logger.info(

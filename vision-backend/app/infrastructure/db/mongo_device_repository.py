@@ -9,6 +9,7 @@ from bson.errors import InvalidId
 # Local application imports
 from ...domain.repositories.device_repository import DeviceRepository
 from ...domain.models.device import Device
+from ...domain.constants import DeviceFields
 from .mongo_connection import get_device_collection
 
 
@@ -26,9 +27,9 @@ class MongoDeviceRepository(DeviceRepository):
         try:
             try:
                 object_id = ObjectId(device_id)
-                document = await self.device_collection.find_one({"_id": object_id})
+                document = await self.device_collection.find_one({DeviceFields.MONGO_ID: object_id})
             except (InvalidId, ValueError, TypeError):
-                document = await self.device_collection.find_one({"id": device_id})
+                document = await self.device_collection.find_one({DeviceFields.ID: device_id})
             
             if document is None:
                 return None
@@ -43,7 +44,7 @@ class MongoDeviceRepository(DeviceRepository):
             return []
         
         try:
-            cursor = self.device_collection.find({"owner_user_id": owner_user_id})
+            cursor = self.device_collection.find({DeviceFields.OWNER_USER_ID: owner_user_id})
             devices = []
             async for document in cursor:
                 devices.append(self._document_to_device(document))
@@ -63,28 +64,28 @@ class MongoDeviceRepository(DeviceRepository):
                 try:
                     object_id = ObjectId(device.id)
                     update_result = await self.device_collection.update_one(
-                        {"_id": object_id},
-                        {"$set": {k: v for k, v in device_dict.items() if k != "_id"}}
+                        {DeviceFields.MONGO_ID: object_id},
+                        {"$set": {k: v for k, v in device_dict.items() if k != DeviceFields.MONGO_ID}}
                     )
                     if update_result.matched_count > 0:
-                        updated_document = await self.device_collection.find_one({"_id": object_id})
+                        updated_document = await self.device_collection.find_one({DeviceFields.MONGO_ID: object_id})
                         if updated_document:
                             return self._document_to_device(updated_document)
                 except (InvalidId, ValueError, TypeError):
                     update_result = await self.device_collection.update_one(
-                        {"id": device.id},
-                        {"$set": {k: v for k, v in device_dict.items() if k not in ["_id", "id"]}}
+                        {DeviceFields.ID: device.id},
+                        {"$set": {k: v for k, v in device_dict.items() if k not in [DeviceFields.MONGO_ID, DeviceFields.ID]}}
                     )
                     if update_result.matched_count > 0:
-                        updated_document = await self.device_collection.find_one({"id": device.id})
+                        updated_document = await self.device_collection.find_one({DeviceFields.ID: device.id})
                         if updated_document:
                             return self._document_to_device(updated_document)
                 
-                if "_id" in device_dict:
-                    del device_dict["_id"]
+                if DeviceFields.MONGO_ID in device_dict:
+                    del device_dict[DeviceFields.MONGO_ID]
             
             result = await self.device_collection.insert_one(device_dict)
-            new_document = await self.device_collection.find_one({"_id": result.inserted_id})
+            new_document = await self.device_collection.find_one({DeviceFields.MONGO_ID: result.inserted_id})
             if new_document is None:
                 raise RuntimeError("Device was created but could not be retrieved")
             
@@ -100,16 +101,16 @@ class MongoDeviceRepository(DeviceRepository):
             raise ValueError("Invalid document: document is None or empty")
         
         device_id = None
-        if "id" in document:
-            device_id = document["id"]
-        elif "_id" in document:
-            device_id = str(document["_id"])
+        if DeviceFields.ID in document:
+            device_id = document[DeviceFields.ID]
+        elif DeviceFields.MONGO_ID in document:
+            device_id = str(document[DeviceFields.MONGO_ID])
         
         return Device(
             id=device_id,
-            owner_user_id=document.get("owner_user_id", ""),
-            name=document.get("name", ""),
-            jetson_backend_url=document.get("jetson_backend_url", ""),
+            owner_user_id=document.get(DeviceFields.OWNER_USER_ID, ""),
+            name=document.get(DeviceFields.NAME, ""),
+            jetson_backend_url=document.get(DeviceFields.JETSON_BACKEND_URL, ""),
         )
     
     def _device_to_dict(self, device: Device) -> Dict[str, Any]:
@@ -118,16 +119,16 @@ class MongoDeviceRepository(DeviceRepository):
             raise ValueError("Device cannot be None")
         
         device_dict: Dict[str, Any] = {
-            "owner_user_id": device.owner_user_id,
-            "name": device.name,
-            "jetson_backend_url": device.jetson_backend_url,
+            DeviceFields.OWNER_USER_ID: device.owner_user_id,
+            DeviceFields.NAME: device.name,
+            DeviceFields.JETSON_BACKEND_URL: device.jetson_backend_url,
         }
         
         if device.id:
             try:
-                device_dict["_id"] = ObjectId(device.id)
+                device_dict[DeviceFields.MONGO_ID] = ObjectId(device.id)
             except (InvalidId, ValueError, TypeError):
-                device_dict["id"] = device.id
+                device_dict[DeviceFields.ID] = device.id
         
         return device_dict
 
