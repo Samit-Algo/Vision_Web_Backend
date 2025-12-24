@@ -7,7 +7,7 @@ from ....domain.repositories.device_repository import DeviceRepository
 from ....domain.models.device import Device
 from ...dto.device_dto import DeviceCreateRequest, DeviceResponse
 from ....core.config import get_settings
-from ....infrastructure.external.jetson_client import JetsonClient
+from ....infrastructure.external.device_client import DeviceClient
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ class CreateDeviceUseCase:
     def __init__(
         self,
         device_repository: DeviceRepository,
-        jetson_client: Optional["JetsonClient"] = None,
+        jetson_client: Optional["DeviceClient"] = None,
     ) -> None:
         self.device_repository = device_repository
         self.jetson_client = jetson_client
@@ -51,9 +51,8 @@ class CreateDeviceUseCase:
         
         # Check connection to Jetson backend before saving
         if self.jetson_client:
-            # Create JetsonClient with device-specific URL
-           
-            jetson_client = JetsonClient(base_url=request.jetson_backend_url)
+            # Create DeviceClient with device-specific URL
+            jetson_client = DeviceClient(base_url=request.jetson_backend_url)
             
             logger.info(f"Checking connection to Jetson backend at {request.jetson_backend_url}")
             connection_ok = await jetson_client.check_connection()
@@ -85,9 +84,8 @@ class CreateDeviceUseCase:
         
         # Register device with Jetson backend (send web backend URL)
         if self.jetson_client and saved_device.id:
-            # Create JetsonClient with device-specific URL
-            from ....infrastructure.external.jetson_client import JetsonClient
-            jetson_client = JetsonClient(base_url=request.jetson_backend_url)
+            # Create DeviceClient with device-specific URL
+            jetson_client = DeviceClient(base_url=request.jetson_backend_url)
             
             # Get web backend URL from settings
             settings = get_settings()

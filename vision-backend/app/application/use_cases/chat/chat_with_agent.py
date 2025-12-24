@@ -20,7 +20,7 @@ from ....agents.tools.save_to_db_tool import (
     set_device_repository,
     set_jetson_client
 )
-from ....infrastructure.external.jetson_client import JetsonClient
+from ....infrastructure.external.agent_client import AgentClient
 
 
 def _detect_zone_request(response_text: str, missing_fields: List[str]) -> bool:
@@ -78,7 +78,7 @@ class ChatWithAgentUseCase:
         agent_repository: Optional[AgentRepository] = None,
         camera_repository: Optional[CameraRepository] = None,
         device_repository: Optional[DeviceRepository] = None,
-        jetson_client: Optional[JetsonClient] = None,
+        jetson_client: Optional[AgentClient] = None,
     ) -> None:
         # Use shared session service to persist sessions across requests
         if ChatWithAgentUseCase._shared_session_service is None:

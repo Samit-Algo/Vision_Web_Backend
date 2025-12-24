@@ -3,6 +3,7 @@ from typing import Optional
 
 # Local application imports
 from ....domain.repositories.user_repository import UserRepository
+from ....domain.constants import UserFields
 from ....core.security import decode_jwt_token
 from ...dto.user_dto import UserResponse
 

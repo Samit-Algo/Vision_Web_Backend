@@ -3,7 +3,7 @@ from ...domain.repositories.device_repository import DeviceRepository
 from ...application.use_cases.device.create_device import CreateDeviceUseCase
 from ...application.use_cases.device.list_devices import ListDevicesUseCase
 from ...application.use_cases.device.get_device import GetDeviceUseCase
-from ...infrastructure.external.jetson_client import JetsonClient
+from ...infrastructure.external.device_client import DeviceClient
 
 if TYPE_CHECKING:
     from ..base_container import BaseContainer
@@ -18,20 +18,20 @@ class DeviceProvider:
         Register all device use cases.
         Use cases are created on-demand via factories.
         """
-        # Register JetsonClient as singleton if not already registered
+        # Register DeviceClient as singleton if not already registered
         try:
-            container.get(JetsonClient)
+            container.get(DeviceClient)
         except ValueError:
             # Not registered yet, register it now
-            jetson_client = JetsonClient()
-            container.register_singleton(JetsonClient, jetson_client)
+            device_client = DeviceClient()
+            container.register_singleton(DeviceClient, device_client)
         
         # Register CreateDeviceUseCase
         container.register_factory(
             CreateDeviceUseCase,
             lambda: CreateDeviceUseCase(
                 device_repository=container.get(DeviceRepository),
-                jetson_client=container.get(JetsonClient),
+                jetson_client=container.get(DeviceClient),
             )
         )
         

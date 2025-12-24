@@ -12,9 +12,7 @@ from ....domain.repositories.user_repository import UserRepository
 from ....domain.repositories.device_repository import DeviceRepository
 from ....domain.models.camera import Camera
 from ...dto.camera_dto import CameraCreateRequest, CameraResponse, WebRTCConfig
-
-if TYPE_CHECKING:
-    from ....infrastructure.external.jetson_client import JetsonClient
+from ....infrastructure.external.camera_client import CameraClient
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +25,7 @@ class CreateCameraUseCase:
         camera_repository: CameraRepository,
         user_repository: UserRepository,
         device_repository: DeviceRepository,
-        jetson_client: Optional["JetsonClient"] = None,
+        jetson_client: Optional["CameraClient"] = None,
     ) -> None:
         self.camera_repository = camera_repository
         self.user_repository = user_repository
@@ -96,8 +94,7 @@ class CreateCameraUseCase:
             if jetson_backend_url:
                 if self.jetson_client:
                     # Create a new client instance with device-specific URL
-                    from ....infrastructure.external.jetson_client import JetsonClient
-                    jetson_client = JetsonClient(base_url=jetson_backend_url)
+                    jetson_client = CameraClient(base_url=jetson_backend_url)
                     logger.info(
                         f"Using device-specific Jetson backend URL: {jetson_backend_url} for camera {saved_camera.id}"
                     )

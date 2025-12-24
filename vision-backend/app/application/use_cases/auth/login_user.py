@@ -3,6 +3,7 @@ from typing import Optional
 
 # Local application imports
 from ....domain.repositories.user_repository import UserRepository
+from ....domain.constants import UserFields
 from ....core.security import verify_password, create_jwt_token
 from ...dto.auth_dto import UserLoginRequest, TokenResponse
 
@@ -34,8 +35,8 @@ class LoginUserUseCase:
         
         # Generate JWT token
         token = create_jwt_token({
-            "sub": user.id or "",
-            "email": user.email,
+            "sub": user.id or "",  # JWT standard claim (subject)
+            UserFields.EMAIL: user.email,
         })
         
         return TokenResponse(access_token=token)

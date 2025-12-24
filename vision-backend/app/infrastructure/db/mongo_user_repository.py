@@ -9,6 +9,7 @@ from bson.errors import InvalidId
 # Local application imports
 from ...domain.repositories.user_repository import UserRepository
 from ...domain.models.user import User
+from ...domain.constants import UserFields
 from .mongo_connection import get_user_collection
 
 
@@ -32,7 +33,7 @@ class MongoUserRepository(UserRepository):
             return None
         
         try:
-            document = await self.user_collection.find_one({"email": email})
+            document = await self.user_collection.find_one({UserFields.EMAIL: email})
             if document is None:
                 return None
             return self._document_to_user(document)
@@ -58,7 +59,7 @@ class MongoUserRepository(UserRepository):
             return None
         
         try:
-            document = await self.user_collection.find_one({"_id": object_id})
+            document = await self.user_collection.find_one({UserFields.MONGO_ID: object_id})
             if document is None:
                 return None
             return self._document_to_user(document)
@@ -86,15 +87,15 @@ class MongoUserRepository(UserRepository):
                 try:
                     object_id = ObjectId(user.id)
                     update_result = await self.user_collection.update_one(
-                        {"_id": object_id},
-                        {"$set": {k: v for k, v in user_dict.items() if k != "_id"}}
+                        {UserFields.MONGO_ID: object_id},
+                        {"$set": {k: v for k, v in user_dict.items() if k != UserFields.MONGO_ID}}
                     )
                     
                     if update_result.matched_count == 0:
                         raise ValueError(f"User with ID {user.id} not found")
                     
                     # Fetch and return updated document
-                    updated_document = await self.user_collection.find_one({"_id": object_id})
+                    updated_document = await self.user_collection.find_one({UserFields.MONGO_ID: object_id})
                     if updated_document is None:
                         raise RuntimeError(f"User {user.id} was updated but could not be retrieved")
                     
@@ -103,13 +104,13 @@ class MongoUserRepository(UserRepository):
                     raise ValueError(f"Invalid user ID format: {user.id}")
             else:
                 # Create new user
-                if "_id" in user_dict:
-                    del user_dict["_id"]
+                if UserFields.MONGO_ID in user_dict:
+                    del user_dict[UserFields.MONGO_ID]
                 
                 result = await self.user_collection.insert_one(user_dict)
                 
                 # Fetch and return the newly created document
-                new_document = await self.user_collection.find_one({"_id": result.inserted_id})
+                new_document = await self.user_collection.find_one({UserFields.MONGO_ID: result.inserted_id})
                 if new_document is None:
                     raise RuntimeError("User was created but could not be retrieved")
                 
@@ -129,14 +130,14 @@ class MongoUserRepository(UserRepository):
         Returns:
             User domain model
         """
-        if not document or "_id" not in document:
+        if not document or UserFields.MONGO_ID not in document:
             raise ValueError("Invalid document: missing _id field")
         
         return User(
-            id=str(document["_id"]),
-            full_name=document.get("full_name", ""),
-            email=document.get("email", ""),
-            hashed_password=document.get("hashed_password", ""),
+            id=str(document[UserFields.MONGO_ID]),
+            full_name=document.get(UserFields.FULL_NAME, ""),
+            email=document.get(UserFields.EMAIL, ""),
+            hashed_password=document.get(UserFields.HASHED_PASSWORD, ""),
         )
     
     def _user_to_dict(self, user: User) -> dict:
@@ -153,15 +154,15 @@ class MongoUserRepository(UserRepository):
             raise ValueError("User cannot be None")
         
         user_dict = {
-            "full_name": user.full_name,
-            "email": user.email,
-            "hashed_password": user.hashed_password,
+            UserFields.FULL_NAME: user.full_name,
+            UserFields.EMAIL: user.email,
+            UserFields.HASHED_PASSWORD: user.hashed_password,
         }
         
         # Only include _id if user.id is valid
         if user.id:
             try:
-                user_dict["_id"] = ObjectId(user.id)
+                user_dict[UserFields.MONGO_ID] = ObjectId(user.id)
             except (InvalidId, ValueError, TypeError):
                 # If ID is invalid, don't include it (will create new document)
                 pass

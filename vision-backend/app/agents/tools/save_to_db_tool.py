@@ -7,6 +7,7 @@ from dataclasses import asdict
 
 from ..session_state.agent_state import get_agent_state, reset_agent_state
 from ...domain.models.agent import Agent
+from ...infrastructure.external.agent_client import AgentClient
 
 # Enable nested event loops to allow asyncio.run() from within async contexts
 import nest_asyncio
@@ -214,11 +215,10 @@ async def _register_agent_with_jetson(agent: Agent) -> None:
                 exc_info=True
             )
     
-    # Create JetsonClient with device-specific URL if available
-    from ...infrastructure.external.jetson_client import JetsonClient
+    # Create AgentClient with device-specific URL if available
     jetson_client = _jetson_client
     if jetson_backend_url:
-        jetson_client = JetsonClient(base_url=jetson_backend_url)
+        jetson_client = AgentClient(base_url=jetson_backend_url)
         logger.info(
             f"Using device-specific Jetson backend URL: {jetson_backend_url} for agent {agent.id}"
         )
@@ -240,20 +240,8 @@ async def _register_agent_with_jetson(agent: Agent) -> None:
         if agent_dict.get("created_at") and isinstance(agent_dict["created_at"], datetime):
             agent_dict["created_at"] = agent_dict["created_at"].isoformat()
         
-        # Transform rules: convert "class" to "class_name" for Jetson backend
-        # (class is a Python reserved keyword, so Jetson uses class_name)
-        if agent_dict.get("rules"):
-            transformed_rules = []
-            for rule in agent_dict["rules"]:
-                if isinstance(rule, dict):
-                    transformed_rule = rule.copy()
-                    # Convert "class" to "class_name" if it exists
-                    if "class" in transformed_rule:
-                        transformed_rule["class_name"] = transformed_rule.pop("class")
-                    transformed_rules.append(transformed_rule)
-                else:
-                    transformed_rules.append(rule)
-            agent_dict["rules"] = transformed_rules
+        # Rules are already in correct format (no conversion needed)
+        # Keep rules as-is to maintain same structure
     except Exception as e:
         logger.error(
             f"Error converting agent {agent.id} to dict: {e}",

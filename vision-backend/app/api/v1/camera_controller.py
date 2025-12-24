@@ -12,7 +12,7 @@ from ...application.use_cases.camera.create_camera import CreateCameraUseCase
 from ...application.use_cases.camera.list_cameras import ListCamerasUseCase
 from ...application.use_cases.camera.get_camera import GetCameraUseCase
 from ...application.use_cases.agent.list_agents_by_camera import ListAgentsByCameraUseCase
-from ...infrastructure.external.jetson_client import JetsonClient
+from ...infrastructure.external.camera_client import CameraClient
 from ...di.container import get_container
 from .dependencies import get_current_user
 
@@ -154,10 +154,10 @@ async def get_webrtc_config(
         HTTPException: If Jetson backend is unavailable or user has no cameras
     """
     container = get_container()
-    jetson_client = container.get(JetsonClient)
+    camera_client = container.get(CameraClient)
     
     # Get WebRTC configuration from Jetson backend
-    config = await jetson_client.get_webrtc_config(current_user.id)
+    config = await camera_client.get_webrtc_config(current_user.id)
     
     if not config:
         raise HTTPException(

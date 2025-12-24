@@ -22,8 +22,10 @@ from .tools.save_to_db_tool import save_to_db as save_to_db_impl
 KB_PATH = Path(__file__).resolve().parent.parent / "knowledge_base" / "vision_rule_knowledge_base.json"
 
 # Load environment variables and ensure GROQ_API_KEY is set
+# Use the same path pattern as main.py to find .env file
 try:
-    load_dotenv()
+    env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+    load_dotenv(env_path)
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
     # Set environment variable for LiteLlm to use Groq
@@ -320,8 +322,9 @@ def create_agent_for_session(session_id: str = "default", user_id: Optional[str]
     # Ensure GROQ_API_KEY is set before creating the agent
     groq_api_key = os.getenv("GROQ_API_KEY")
     if not groq_api_key:
-        # Try loading from .env again
-        load_dotenv()
+        # Try loading from .env again with explicit path
+        env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+        load_dotenv(env_path)
         groq_api_key = os.getenv("GROQ_API_KEY")
         if groq_api_key:
             os.environ["GROQ_API_KEY"] = groq_api_key
@@ -417,6 +420,7 @@ def create_agent_for_session(session_id: str = "default", user_id: Optional[str]
 
     return main_agent
 
-
 # Default agent instance (for backward compatibility)
 default_agent = create_agent_for_session()
+
+
