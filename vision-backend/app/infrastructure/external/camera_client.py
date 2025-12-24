@@ -7,6 +7,7 @@ import httpx
 
 # Local application imports
 from .base_jetson_client import BaseJetsonClient
+from ...domain.constants import CameraFields
 
 logger = logging.getLogger(__name__)
 
@@ -53,11 +54,11 @@ class CameraClient(BaseJetsonClient):
             try:
                 # Use same field names as web backend (no mapping)
                 payload = {
-                    "id": camera_id,
-                    "owner_user_id": owner_user_id,
-                    "name": name,
-                    "stream_url": stream_url,
-                    "device_id": device_id
+                    CameraFields.ID: camera_id,
+                    CameraFields.OWNER_USER_ID: owner_user_id,
+                    CameraFields.NAME: name,
+                    CameraFields.STREAM_URL: stream_url,
+                    CameraFields.DEVICE_ID: device_id
                 }
                 
                 logger.info(
