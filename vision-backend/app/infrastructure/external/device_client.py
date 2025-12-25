@@ -74,7 +74,7 @@ class DeviceClient(BaseJetsonClient):
                 )
                 
                 response = await client.post(
-                    f"{self.base_url}/api/devices",
+                    f"{self.base_url}/api/v1/devices/create",
                     json=payload
                 )
                 response.raise_for_status()

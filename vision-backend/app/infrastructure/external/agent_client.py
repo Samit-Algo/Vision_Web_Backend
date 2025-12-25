@@ -90,7 +90,7 @@ class AgentClient(BaseJetsonClient):
                 print(payload)
                 
                 response = await client.post(
-                    f"{self.base_url}/api/agents",
+                    f"{self.base_url}/api/v1/agents/create",
                     json=payload
                 )
                 response.raise_for_status()
@@ -143,7 +143,7 @@ class AgentClient(BaseJetsonClient):
                 )
                 
                 response = await client.post(
-                    f"{self.base_url}/api/agents",
+                    f"{self.base_url}/api/v1/agents/create",
                     json=agent_config
                 )
                 response.raise_for_status()
@@ -198,7 +198,7 @@ class AgentClient(BaseJetsonClient):
                 )
                 
                 response = await client.get(
-                    f"{self.base_url}/api/agents/{agent_id}/stream-config"
+                    f"{self.base_url}/api/v1/agents/{agent_id}/stream-config"
                 )
                 response.raise_for_status()
                 

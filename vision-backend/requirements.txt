@@ -11,6 +11,7 @@ litellm>=1.75.5
 parsedatetime
 nest-asyncio>=1.6.0
 httpx>=0.24.0
+kafka-python>=2.0.2
 pytest>=7.0.0
 pytest-asyncio>=0.21.0
 

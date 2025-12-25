@@ -42,6 +42,28 @@ class Settings:
             "WEB_BACKEND_URL",
             "http://localhost:8000"
         )
+        
+        # Kafka Configuration
+        self.kafka_bootstrap_servers: Final[str] = os.getenv(
+            "KAFKA_BOOTSTRAP_SERVERS",
+            "localhost:9092"
+        )
+        self.kafka_topic: Final[str] = os.getenv(
+            "KAFKA_TOPIC",
+            "vision-events"
+        )
+        self.kafka_consumer_group_id: Final[str] = os.getenv(
+            "KAFKA_CONSUMER_GROUP_ID",
+            "vision-backend-consumer"
+        )
+        self.kafka_auto_offset_reset: Final[str] = os.getenv(
+            "KAFKA_AUTO_OFFSET_RESET",
+            "latest"
+        )
+        self.kafka_enable_auto_commit: Final[bool] = os.getenv(
+            "KAFKA_ENABLE_AUTO_COMMIT",
+            "true"
+        ).lower() == "true"
 
 
 # Global settings instance (singleton pattern)

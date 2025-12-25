@@ -66,7 +66,7 @@ class CameraClient(BaseJetsonClient):
                 )
                 
                 response = await client.post(
-                    f"{self.base_url}/api/cameras",
+                    f"{self.base_url}/api/v1/cameras/create",
                     json=payload
                 )
                 response.raise_for_status()
@@ -110,7 +110,7 @@ class CameraClient(BaseJetsonClient):
                 logger.info(f"Fetching WebRTC config for user {user_id} from Jetson backend")
                 
                 response = await client.get(
-                    f"{self.base_url}/api/stream-config",
+                    f"{self.base_url}/api/v1/cameras/stream-config",
                     params={"user_id": user_id}
                 )
                 response.raise_for_status()
@@ -163,7 +163,7 @@ class CameraClient(BaseJetsonClient):
                 )
                 
                 response = await client.get(
-                    f"{self.base_url}/api/cameras/{camera_id}/stream-config",
+                    f"{self.base_url}/api/v1/cameras/{camera_id}/stream-config",
                     params={"user_id": user_id}
                 )
                 response.raise_for_status()
