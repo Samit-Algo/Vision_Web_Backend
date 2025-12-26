@@ -38,9 +38,32 @@ class NotificationService:
             frame_info = event_payload.get("frame", {})
             metadata_info = event_payload.get("metadata", {})
             
+            # Extract or construct session_id
+            # Session ID format: "{agent_id}_{rule_index}_{timestamp}"
+            session_id = metadata_info.get("session_id")
+            if not session_id:
+                # Construct session_id from available information
+                agent_id = agent_info.get("agent_id", "")
+                rule_index = event_info.get("rule_index", 0)
+                event_timestamp = event_info.get("timestamp", "")
+                # Extract timestamp part (remove timezone and special chars for filename-safe format)
+                if event_timestamp:
+                    try:
+                        # Parse ISO timestamp and format as Unix timestamp or use original
+                        dt_obj = datetime.fromisoformat(event_timestamp.replace("Z", "+00:00"))
+                        timestamp_str = str(int(dt_obj.timestamp()))
+                    except:
+                        # Fallback: use sanitized timestamp string
+                        timestamp_str = event_timestamp.replace(":", "").replace("-", "").replace("T", "_").split(".")[0]
+                else:
+                    timestamp_str = str(int(datetime.utcnow().timestamp()))
+                
+                session_id = f"{agent_id}_{rule_index}_{timestamp_str}"
+            
             # Build notification payload
             notification = {
                 "type": "event_notification",
+                "session_id": session_id,  # Include session_id for frontend to fetch video chunks
                 "event": {
                     "label": event_info.get("label", "Unknown event"),
                     "timestamp": event_info.get("timestamp"),
@@ -61,6 +84,7 @@ class NotificationService:
                 },
                 "metadata": {
                     **metadata_info,  # Include all metadata fields
+                    "session_id": session_id,  # Ensure session_id is in metadata too
                 },
                 "received_at": datetime.utcnow().isoformat() + "Z",
             }

@@ -1,11 +1,21 @@
 """Notifications API endpoints for real-time event notifications via WebSocket"""
 
 import logging
-from typing import Optional
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, HTTPException, status
+import base64
+from pathlib import Path
+from typing import Optional, List, Dict, Any
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, HTTPException, status, Depends, Response
+from fastapi.responses import FileResponse
 
 from ...core.security import decode_jwt_token
 from ...infrastructure.notifications import WebSocketManager
+from ...utils.event_storage import (
+    get_video_chunk_path,
+    get_video_chunk_metadata_path,
+    list_video_chunks_for_session
+)
+from .dependencies import get_current_user
+from ...application.dto.user_dto import UserResponse
 
 logger = logging.getLogger(__name__)
 
@@ -144,4 +154,162 @@ async def websocket_notifications(
             logger.info(f"WebSocket connection cleaned up for user {user_id}")
         except Exception as e:
             logger.error(f"Error cleaning up WebSocket connection for user {user_id}: {e}", exc_info=True)
+
+
+@router.get("/video-chunks/{session_id}")
+async def list_video_chunks(
+    session_id: str,
+    current_user: UserResponse = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    List all video chunks for a specific session.
+    
+    Returns metadata about all available video chunks for the given session_id.
+    This allows the frontend to know which chunks are available before requesting them.
+    
+    Args:
+        session_id: The session identifier (format: agent_id_rule_index_timestamp)
+        current_user: Current authenticated user (from dependency)
+        
+    Returns:
+        Dictionary containing:
+        {
+            "session_id": "...",
+            "chunks": [
+                {
+                    "chunk_number": 0,
+                    "metadata": {...},
+                    "video_path": "...",
+                    "metadata_path": "..."
+                },
+                ...
+            ]
+        }
+        
+    Raises:
+        HTTPException: If session not found or access denied
+    """
+    try:
+        chunks = list_video_chunks_for_session(session_id)
+        
+        if not chunks:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No video chunks found for session_id: {session_id}"
+            )
+        
+        return {
+            "session_id": session_id,
+            "chunks": chunks
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing video chunks for session {session_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error listing video chunks: {str(e)}"
+        )
+
+
+@router.get("/video-chunks/{session_id}/{chunk_number}")
+async def get_video_chunk(
+    session_id: str,
+    chunk_number: int,
+    current_user: UserResponse = Depends(get_current_user),
+) -> FileResponse:
+    """
+    Get a specific video chunk by session_id and chunk_number.
+    
+    Returns the MP4 video file for the requested chunk.
+    
+    Args:
+        session_id: The session identifier (format: agent_id_rule_index_timestamp)
+        chunk_number: The chunk number (0-indexed)
+        current_user: Current authenticated user (from dependency)
+        
+    Returns:
+        FileResponse with the MP4 video file
+        
+    Raises:
+        HTTPException: If chunk not found or access denied
+    """
+    try:
+        video_path = get_video_chunk_path(session_id, chunk_number)
+        
+        if not video_path or not Path(video_path).exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Video chunk not found: session_id={session_id}, chunk_number={chunk_number}"
+            )
+        
+        return FileResponse(
+            path=video_path,
+            media_type="video/mp4",
+            filename=f"chunk_{chunk_number}.mp4",
+            headers={
+                "Content-Disposition": f'attachment; filename="chunk_{chunk_number}.mp4"'
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            f"Error retrieving video chunk: session_id={session_id}, chunk_number={chunk_number}, error={e}",
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error retrieving video chunk: {str(e)}"
+        )
+
+
+@router.get("/video-chunks/{session_id}/{chunk_number}/metadata")
+async def get_video_chunk_metadata(
+    session_id: str,
+    chunk_number: int,
+    current_user: UserResponse = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Get metadata for a specific video chunk.
+    
+    Returns the JSON metadata associated with the video chunk, including
+    event information, timestamps, and video properties.
+    
+    Args:
+        session_id: The session identifier (format: agent_id_rule_index_timestamp)
+        chunk_number: The chunk number (0-indexed)
+        current_user: Current authenticated user (from dependency)
+        
+    Returns:
+        Dictionary containing chunk metadata
+        
+    Raises:
+        HTTPException: If metadata not found or access denied
+    """
+    try:
+        metadata_path = get_video_chunk_metadata_path(session_id, chunk_number)
+        
+        if not metadata_path or not Path(metadata_path).exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Video chunk metadata not found: session_id={session_id}, chunk_number={chunk_number}"
+            )
+        
+        import json
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+        
+        return metadata
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            f"Error retrieving video chunk metadata: session_id={session_id}, chunk_number={chunk_number}, error={e}",
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error retrieving video chunk metadata: {str(e)}"
+        )
 

@@ -20,7 +20,7 @@ except ImportError:
     KafkaError = Exception
 
 from ...core.config import get_settings
-from ...utils.event_storage import save_event_from_payload
+from ...utils.event_storage import save_event_from_payload, save_video_chunk_from_payload
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +85,10 @@ class KafkaEventConsumer:
         """
         Process a single Kafka message.
         
+        Handles two types of messages:
+        1. event_notification: Immediate notification with single frame (sent via WebSocket)
+        2. event_video: Video chunk (stored only, not sent via WebSocket)
+        
         Args:
             message: Kafka message object with value, topic, partition, offset
         """
@@ -94,8 +98,12 @@ class KafkaEventConsumer:
             print("event is received")
             
             if not payload:
+                print("received empty message")
                 logger.warning(f"Received empty message from {message.topic}[{message.partition}]:{message.offset}")
                 return
+            
+            # Determine message type
+            message_type = payload.get("type", "event_notification")  # Default to event_notification for backward compatibility
             
             # Extract metadata for logging
             agent_info = payload.get("agent", {})
@@ -104,54 +112,82 @@ class KafkaEventConsumer:
             event_label = payload.get("event", {}).get("label", "unknown")
             
             logger.info(
-                f"Received event from Kafka: topic={message.topic}, "
+                f"Received {message_type} from Kafka: topic={message.topic}, "
                 f"partition={message.partition}, offset={message.offset}, "
                 f"agent_id={agent_id}, camera_id={camera_id}, label={event_label}"
             )
             
-            # Save event using existing storage utility
-            saved_paths = save_event_from_payload(payload)
-            
-            logger.info(
-                f"Event saved successfully: agent_id={agent_id}, "
-                f"camera_id={camera_id}, paths={saved_paths}"
-            )
-            
-            # Broadcast notification to WebSocket clients if manager and service are available
-            if self.websocket_manager and self.notification_service:
+            # Handle different message types
+            if message_type == "event_video":
+                # Video chunk: Store only, do NOT send via WebSocket
                 try:
-                    # Extract owner_user_id from payload
-                    owner_user_id = self.notification_service.extract_owner_user_id(payload)
+                    saved_paths = save_video_chunk_from_payload(payload)
+                    session_id = saved_paths.get("session_id", "unknown")
+                    chunk_number = saved_paths.get("chunk_number", "unknown")
                     
-                    if owner_user_id:
-                        # Format notification payload
-                        notification = self.notification_service.format_event_notification(
-                            payload, saved_paths
-                        )
-                        
-                        # Queue notification for WebSocket broadcast
-                        # The notification queue will be processed by the main event loop
-                        if self._notification_queue:
-                            try:
-                                self._notification_queue.put((owner_user_id, notification), block=False)
-                                logger.info(
-                                    f"Notification queued for user {owner_user_id} for event: agent_id={agent_id}, "
-                                    f"camera_id={camera_id}, label={event_label}"
-                                )
-                            except queue.Full:
-                                logger.warning(f"Notification queue full, dropping notification for user {owner_user_id}")
-                            except Exception as e:
-                                logger.error(f"Error queueing notification: {e}", exc_info=True)
-                    else:
-                        logger.warning(
-                            f"Could not extract owner_user_id from event payload. "
-                            f"Notification not sent. agent_id={agent_id}, camera_id={camera_id}"
-                        )
-                        
+                    logger.info(
+                        f"Video chunk saved successfully: session_id={session_id}, "
+                        f"chunk_number={chunk_number}, paths={saved_paths}"
+                    )
                 except Exception as e:
-                    # Log error but don't fail event processing
                     logger.error(
-                        f"Error preparing WebSocket notification for event: {e}",
+                        f"Failed to save video chunk: {e}",
+                        exc_info=True
+                    )
+                # Do not send video chunks via WebSocket
+                return
+            
+            else:
+                # event_notification: Save and send via WebSocket
+                try:
+                    # Save event using existing storage utility
+                    saved_paths = save_event_from_payload(payload)
+                    
+                    logger.info(
+                        f"Event saved successfully: agent_id={agent_id}, "
+                        f"camera_id={camera_id}, paths={saved_paths}"
+                    )
+                    
+                    # Broadcast notification to WebSocket clients if manager and service are available
+                    if self.websocket_manager and self.notification_service:
+                        try:
+                            # Extract owner_user_id from payload
+                            owner_user_id = self.notification_service.extract_owner_user_id(payload)
+                            
+                            if owner_user_id:
+                                # Format notification payload
+                                notification = self.notification_service.format_event_notification(
+                                    payload, saved_paths
+                                )
+                                
+                                # Queue notification for WebSocket broadcast
+                                # The notification queue will be processed by the main event loop
+                                if self._notification_queue:
+                                    try:
+                                        self._notification_queue.put((owner_user_id, notification), block=False)
+                                        logger.info(
+                                            f"Notification queued for user {owner_user_id} for event: agent_id={agent_id}, "
+                                            f"camera_id={camera_id}, label={event_label}"
+                                        )
+                                    except queue.Full:
+                                        logger.warning(f"Notification queue full, dropping notification for user {owner_user_id}")
+                                    except Exception as e:
+                                        logger.error(f"Error queueing notification: {e}", exc_info=True)
+                            else:
+                                logger.warning(
+                                    f"Could not extract owner_user_id from event payload. "
+                                    f"Notification not sent. agent_id={agent_id}, camera_id={camera_id}"
+                                )
+                                
+                        except Exception as e:
+                            # Log error but don't fail event processing
+                            logger.error(
+                                f"Error preparing WebSocket notification for event: {e}",
+                                exc_info=True
+                            )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to save event notification: {e}",
                         exc_info=True
                     )
             
