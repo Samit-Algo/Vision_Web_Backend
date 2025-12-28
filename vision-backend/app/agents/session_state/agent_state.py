@@ -15,9 +15,11 @@ class AgentState:
     rule_id: Optional[str] = None
     fields: Dict[str, Any] = field(default_factory=dict)
     missing_fields: List[str] = field(default_factory=list)
-    # COLLECTING -> CONFIRMATION -> DONE
+    # COLLECTING -> CONFIRMATION -> SAVED
     status: str = "COLLECTING"
     user_id: Optional[str] = None  # Track which user this state belongs to
+    saved_agent_id: Optional[str] = None  # Store saved agent ID
+    saved_agent_name: Optional[str] = None  # Store saved agent name
 
 
 # Module-level store so the ADK-managed session can share state across turns.

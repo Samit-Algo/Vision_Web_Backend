@@ -1,49 +1,10 @@
 from __future__ import annotations
 
 import json
-import os
-from typing import Dict, List
-from pathlib import Path
+from typing import Dict
 
 from ..session_state.agent_state import AgentState, get_agent_state
-
-
-# Load knowledge base once
-KB_PATH = Path(__file__).resolve().parent.parent.parent / "knowledge_base" / "vision_rule_knowledge_base.json"
-
-with open(KB_PATH, "r", encoding="utf-8") as f:
-    _KB_RULES: List[Dict] = json.load(f)["rules"]
-
-
-def _get_rule(rule_id: str) -> Dict:
-    for rule in _KB_RULES:
-        if rule.get("rule_id") == rule_id:
-            return rule
-    raise ValueError(f"Unknown rule_id: {rule_id}")
-
-
-def _compute_missing_fields(agent: AgentState, rule: Dict) -> None:
-    """
-    Deterministic computation of missing fields.
-    """
-    required_fields = set(rule.get("required_fields_from_user", []))
-    required_fields.add("camera_id")
-
-    requires_zone = bool(rule.get("requires_zone", False))
-    agent.fields["requires_zone"] = requires_zone
-
-    run_mode = agent.fields.get("run_mode")
-    if run_mode is None:
-        required_fields.add("run_mode")
-
-    if run_mode == "patrol":
-        required_fields.update({"interval_minutes", "check_duration_seconds", "zone"})
-    elif requires_zone:
-        required_fields.add("zone")
-
-    agent.missing_fields = [
-        field for field in required_fields if agent.fields.get(field) is None
-    ]
+from .kb_utils import get_rule, compute_missing_fields
 
 
 def set_field_value(field_values_json: str, session_id: str = "default") -> Dict:
@@ -64,44 +25,105 @@ def set_field_value(field_values_json: str, session_id: str = "default") -> Dict
     """
     try:
         field_values = json.loads(field_values_json) if field_values_json else {}
-    except json.JSONDecodeError:
-        raise ValueError("field_values_json must be valid JSON")
+    except json.JSONDecodeError as e:
+        return {
+            "error": f"Invalid JSON in field_values_json: {str(e)}",
+            "updated_fields": [],
+            "status": "COLLECTING",
+            "message": "Failed to parse field values. Please check the format."
+        }
 
     if not isinstance(field_values, dict):
-        raise ValueError("field_values_json must decode to an object/dict")
+        return {
+            "error": "field_values_json must decode to an object/dict",
+            "updated_fields": [],
+            "status": "COLLECTING",
+            "message": "Invalid field values format."
+        }
 
-    agent = get_agent_state(session_id)
-    if not agent.rule_id:
-        raise ValueError("Cannot set fields before rule selection. Call initialize_state first.")
+    print(f"[set_field_value] Called with session_id={session_id}, field_values_json={field_values_json}")
+    try:
+        agent = get_agent_state(session_id)
+        print(f"[set_field_value] Current agent state - status: {agent.status}, rule_id: {agent.rule_id}, missing_fields: {agent.missing_fields}")
+        
+        if not agent.rule_id:
+            return {
+                "error": "Cannot set fields before rule selection. Call initialize_state first.",
+                "updated_fields": [],
+                "status": "COLLECTING",
+                "message": "Agent state not initialized."
+            }
 
-    rule = _get_rule(agent.rule_id)
+        rule = get_rule(agent.rule_id)
 
-    # Apply user-provided fields (LLM should already convert times to ISO 8601 format)
-    updated_fields = []
-    for key, value in field_values.items():
-        agent.fields[key] = value
-        updated_fields.append(key)
+        # Ensure run_mode has a default (should already be set during initialization, but be safe)
+        if agent.fields.get("run_mode") is None:
+            agent.fields["run_mode"] = "continuous"
 
-    # Update rules array when relevant fields are set
-    # Check if any field in rules_config_fields was updated
-    rules_config_fields = rule.get("rules_config_fields", [])
-    if any(key in field_values for key in rules_config_fields):
+        # Apply user-provided fields (LLM should already convert times to ISO 8601 format)
+        updated_fields = []
+        for key, value in field_values.items():
+            agent.fields[key] = value
+            updated_fields.append(key)
+
+        # Always re-sync rules after any field update, not conditionally
+        # This ensures rules array always mirrors current state
         _update_rules_field(agent, rule)
 
-    # Auto-generate agent name if not set and we have enough information
-    if not agent.fields.get("name"):
-        agent.fields["name"] = f"{rule.get('rule_name')} Agent"
+        # Auto-generate agent name ONLY when all required fields are collected
+        # This prevents early name locking and ensures name matches final configuration
+        if not agent.fields.get("name"):
+            # Recompute missing fields first to check if we're ready
+            compute_missing_fields(agent, rule)
+            if not agent.missing_fields:
+                # Generate descriptive name based on rule and collected fields
+                rule_name = rule.get("rule_name", "Agent")
+                class_name = agent.fields.get("class") or agent.fields.get("gesture") or ""
+                if class_name:
+                    class_display = class_name.replace("_", " ").title()
+                    agent.fields["name"] = f"{class_display} {rule_name} Agent"
+                else:
+                    agent.fields["name"] = f"{rule_name} Agent"
 
-    # Recompute missing fields and progress state
-    # Note: Defaults are already applied during initialization, so we don't apply them again here
-    _compute_missing_fields(agent, rule)
-    agent.status = "CONFIRMATION" if not agent.missing_fields else "COLLECTING"
+        # Recompute missing fields and progress state
+        compute_missing_fields(agent, rule)
+        
+        print(f"[set_field_value] After updating fields - updated_fields: {updated_fields}, missing_fields: {agent.missing_fields}, current_status: {agent.status}")
+        
+        # Only switch to confirmation if fields were actually updated AND no fields are missing
+        # This prevents premature confirmation on greetings or meta questions
+        if updated_fields and not agent.missing_fields:
+            agent.status = "CONFIRMATION"
+            print(f"[set_field_value] Status changed to CONFIRMATION - all fields collected")
+        elif not updated_fields:
+            # No fields updated - keep previous status (don't flip to confirmation)
+            print(f"[set_field_value] No fields updated - keeping status: {agent.status}")
+            pass
+        else:
+            agent.status = "COLLECTING"
+            print(f"[set_field_value] Status set to COLLECTING - still missing fields: {agent.missing_fields}")
 
-    return {
-        "updated_fields": updated_fields,
-        "status": agent.status,
-        "message": f"Updated {len(updated_fields)} field(s). Check CURRENT AGENT STATE in instruction for current missing_fields.",
-    }
+        result = {
+            "updated_fields": updated_fields,
+            "status": agent.status,
+            "message": f"Updated {len(updated_fields)} field(s). Check CURRENT AGENT STATE in instruction for current missing_fields.",
+        }
+        print(f"[set_field_value] Returning result: {result}")
+        return result
+    except ValueError as e:
+        return {
+            "error": str(e),
+            "updated_fields": [],
+            "status": agent.status if 'agent' in locals() else "COLLECTING",
+            "message": f"Error: {str(e)}"
+        }
+    except Exception as e:
+        return {
+            "error": f"Unexpected error: {str(e)}",
+            "updated_fields": [],
+            "status": agent.status if 'agent' in locals() else "COLLECTING",
+            "message": f"An error occurred while updating fields: {str(e)}"
+        }
 
 
 def _update_rules_field(agent: AgentState, rule: Dict) -> None:

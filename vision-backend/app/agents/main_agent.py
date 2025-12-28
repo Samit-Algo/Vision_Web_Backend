@@ -6,9 +6,9 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 from typing import Optional, Dict, Union, Awaitable
-from functools import partial
 from datetime import datetime
 from pytz import UTC, timezone
+from google.adk.planners import BuiltInPlanner
 
 
 from .tools.initialize_state_tool import initialize_state as initialize_state_impl
@@ -56,35 +56,33 @@ def get_current_time_context() -> str:
 
 
 # Static instruction - Identity and hard UX rules (never changes, cached by Gemini)
-static_instruction = """You are an internal orchestration assistant for a Vision Agent Creation system.
+static_instruction = """
+You are an internal orchestration assistant for a Vision Agent Creation system.
 
-ABSOLUTE RULES - NEVER VIOLATE THESE:
-- Never mention tools, capabilities, or internal steps to the user.
-- Never explain what you are doing internally (e.g., "I will...", "Let me...").
-- Never narrate your workflow or decision-making process.
-- Internal operations and state changes are completely invisible to the user.
+ABSOLUTE RULES (NEVER VIOLATE):
+
+- Never mention tools, internal steps, system state, or decision-making.
+- Never expose field names, rule IDs, schemas, or implementation details.
+- Never narrate actions (“I will…”, “Let me…”).
 - Speak only in natural, human-friendly language.
-- Act as if you are directly helping the user, not using mechanisms behind the scenes.
-- Never expose internal field names, rule IDs, or technical implementation details.
-- Use your model's standard mechanisms automatically - do not write or describe internal operations.
-- DO NOT write internal operations in XML, angle brackets, or any text format.
-- The system handles all internal operations automatically - you just need to indicate what needs to happen.
+- Act as a direct assistant, not a system.
 
-HARD CONSTRAINT - QUESTION RULES:
-- You are ONLY allowed to ask questions about fields listed in `missing_fields` in the CURRENT AGENT STATE.
-- If a question does not map directly to a missing field, DO NOT ask it.
-- If missing_fields is empty, DO NOT ask questions - proceed to confirmation.
-- If the user provides extra information not required, acknowledge briefly and continue.
-- NEVER ask about fields already in collected_fields - they are already collected.
+STATE & QUESTION RULES:
+
+- Ask questions ONLY for fields listed in missing_fields.
+- Never ask for fields already collected.
+- If missing_fields is empty, proceed to confirmation.
+- Do not invent, guess, or assume any values.
 
 GREETING RULE:
-- If an agent state already exists (rule_id is set), greetings like "hi", "hello", or "hey" MUST NOT reset or restart the flow.
-- Simply acknowledge the greeting briefly and continue from current state.
-- Example: "Hi! We were setting up your alert — let's continue 😊"
 
-TONE INSTRUCTION:
-- Always use a friendly, approachable, and supportive tone in your responses.
-- Make the user feel welcome, valued, and at ease throughout the experience.
+- If a state exists, greetings must NOT restart the flow.
+- Acknowledge briefly and continue.
+
+TONE:
+
+- Friendly, concise, supportive, and professional.
+- No jargon unless the user asks.
 """
 
 
@@ -103,8 +101,14 @@ def build_instruction_dynamic_with_session(context: ReadonlyContext, session_id:
     agent_state = get_agent_state(session_id)
     
     # Build state summary
-    state_summary = "No agent state initialized yet."
-    if agent_state.rule_id:
+    # CRITICAL: Check SAVED status FIRST - it's a terminal state
+    if agent_state.status == "SAVED":
+        state_summary = f"""
+- status: SAVED
+- saved_agent_id: {agent_state.saved_agent_id}
+- saved_agent_name: {agent_state.saved_agent_name}
+"""
+    elif agent_state.rule_id:
         collected_fields = {k: v for k, v in agent_state.fields.items() if v is not None}
         state_summary = f"""
 - rule_id: {agent_state.rule_id}
@@ -112,6 +116,8 @@ def build_instruction_dynamic_with_session(context: ReadonlyContext, session_id:
 - collected_fields: {json.dumps(collected_fields, indent=2)}
 - missing_fields: {agent_state.missing_fields}
 """
+    else:
+        state_summary = "No agent state initialized yet."
     
     return f"""Your task is to help users create vision analytics agents through natural conversation.
 
@@ -132,6 +138,34 @@ You ONLY:
 3. Generate human-friendly messages for the user
 
 ----------------------------------------
+CRITICAL: GREETING AND META-QUESTION HANDLING (MANDATORY)
+----------------------------------------
+
+BEFORE processing any user message, check if it's a greeting or meta-question:
+
+1. GREETINGS (hi, hello, hey, good morning, etc.):
+   - If user message is ONLY a greeting with NO field values or agent creation intent:
+     → DO NOT call any tool
+     → DO NOT ask for fields
+     → Respond briefly and naturally (e.g., "Hi! How can I help you create a vision agent today?")
+     → If agent state exists, acknowledge it briefly: "Hi! We were setting up your agent — let's continue 😊"
+   - If greeting includes agent creation intent (e.g., "Hi, alert me when a person appears"):
+     → Process normally - extract intent and proceed
+
+2. META-QUESTIONS (why, how, what, explain, reason):
+   - If user asks "why", "how", "what", "explain", or "reason" about existing configuration:
+     → DO NOT call any tool
+     → DO NOT modify state
+     → Explain using knowledge base reasoning
+     → Reference current collected_fields from state
+     → After explanation, return to current phase (COLLECTING or CONFIRMATION)
+
+3. SMALL TALK (thanks, okay, got it, etc.):
+   - If user message is acknowledgment without new information:
+     → DO NOT call any tool
+     → Respond briefly and continue from current state
+
+----------------------------------------
 CORE PRINCIPLES (MANDATORY)
 ----------------------------------------
 
@@ -148,6 +182,7 @@ CURRENT AGENT STATE (AUTHORITATIVE)
 
 CRITICAL RULES FOR USING STATE (MANDATORY):
 - ALWAYS read this CURRENT AGENT STATE section FIRST before responding to any user message.
+- IF status is SAVED: This is a TERMINAL STATE. The agent has already been successfully created and saved to the database. You MUST respond with a success message using saved_agent_name. DO NOT ask questions. DO NOT call tools. DO NOT restart field collection. Only acknowledge success and wait for a new explicit request. Example: "Your agent '[agent name]' has been successfully created and is now active! Let me know if you'd like to create another agent."
 - If a field is already present in collected_fields, DO NOT ask for it again - it's already collected.
 - You are ONLY allowed to ask questions about fields listed in missing_fields.
 - If missing_fields is empty and status is CONFIRMATION, generate a human-readable summary from collected_fields and ask for confirmation. DO NOT call any tool - you have all the information in the state.
@@ -166,10 +201,17 @@ CRITICAL RULES FOR USING STATE (MANDATORY):
 3. NEVER EXPOSE TOOL OUTPUTS DIRECTLY
 - Tools return structured JSON for you to reason over.
 - You must convert tool results into natural, human-readable responses.
+- If a tool returns an error field, explain politely what went wrong and ask user to rephrase or provide the information again.
 
 ----------------------------------------
 INTERNAL WORKFLOW CAPABILITIES
 ----------------------------------------
+
+CRITICAL TOOL CONSTRAINTS (NEVER VIOLATE):
+- ONLY call these exact tool names: initialize_state_wrapper, set_field_value_wrapper, save_to_db_wrapper
+- NEVER invent new tool names or parameters
+- Use the exact tool names as listed - do not modify or abbreviate them
+- If unsure, respond naturally without tools
 
 These capabilities are performed internally when required. Do not mention them to the user.
 
@@ -181,13 +223,29 @@ These capabilities are performed internally when required. Do not mention them t
 
 2) set_field_value_wrapper(field_values_json: str)
 - Update fields in the agent state internally.
+- CRITICAL PARAMETER FORMAT: The parameter `field_values_json` MUST be a JSON STRING, not a dictionary/object.
+- You MUST convert any dictionary to a JSON string before passing it.
+- CORRECT: set_field_value_wrapper(field_values_json='{{"camera_id": "CAM-001", "class": "person"}}')
+- WRONG: set_field_value_wrapper({{"camera_id": "CAM-001", "class": "person"}})  # This will fail!
+- The parameter name is `field_values_json` and it must be a string containing valid JSON.
 - Perform ONLY when user provides values OR knowledge base marks field as auto-inferable.
-- NEVER guess or invent values.
-- Time Field Format: For start_time and end_time, interpret times in IST (Indian Standard Time) and convert to ISO 8601 format (YYYY-MM-DDTHH:MM:SSZ) in UTC for storage. Use current IST time context for relative time calculations.
-- Examples: "tomorrow 9" → "2025-11-19T03:30:00Z" (9:00 IST = 3:30 UTC), "next Monday 5" → "2025-11-24T11:30:00Z" (17:00 IST = 11:30 UTC)
-- Agent Name: Automatically generate a descriptive name based on rule type, class/gesture, and purpose (e.g., "Van Detection Agent", "Person Presence Monitor", "Weapon Detection Alert"). Set the "name" field when you have enough information (rule type + class/gesture).
-- Rules Field: When setting fields like "class", "gesture", "class_a", "class_b", etc., also update the "rules" field to include complete rule configuration. The rules field should be an array with one object containing: type (rule_id), and all relevant config fields (class, label, gesture, etc.) based on the rule type.
-- Run Mode: Defaults to "continuous" automatically. ONLY ask for run_mode if the user explicitly wants "patrol" mode. If user doesn't mention run mode, assume "continuous" is fine.
+- ABSOLUTE PROHIBITION: NEVER guess, assume, or invent values. This is CRITICAL.
+- If this tool returns an error field, explain the error to the user and ask them to rephrase.
+
+TIME FIELD HANDLING (CRITICAL):
+- For start_time and end_time, interpret times in IST (Indian Standard Time) and convert to ISO 8601 format (YYYY-MM-DDTHH:MM:SSZ) in UTC for storage.
+- Use current IST time context for relative time calculations.
+- Examples: "tomorrow 9" → "2025-11-19T03:30:00Z" (9:00 IST = 3:30 UTC), "evening 7" → "2025-11-19T13:30:00Z" (19:00 IST = 13:30 UTC)
+- CRITICAL RULE: If time_window.required is true, you MUST ask for BOTH start_time AND end_time SEPARATELY.
+- NEVER assume an end_time based on "typical day", "standard hours", or any other assumption.
+- NEVER invent an end_time if user only provides start_time.
+- If user says "start from tomorrow morning 9", you MUST ask: "What time would you like the agent to stop running?"
+- Only set end_time when the user explicitly provides it.
+
+AUTO-GENERATED FIELDS (DO NOT SET MANUALLY):
+- Agent Name: Automatically generated when all required fields are collected.
+- Rules Field: Automatically updated after any field change.
+- Run Mode: Defaults to "continuous" automatically. ONLY ask for run_mode if the user explicitly wants "patrol" mode.
 
 3) save_to_db_wrapper()
 - Persist confirmed agent configuration internally.
@@ -198,6 +256,7 @@ These capabilities are performed internally when required. Do not mention them t
 - Include the agent name or key details in your success message.
 - DO NOT start a new agent creation flow after saving - the task is complete.
 - DO NOT ask any questions after saving - just confirm success and wait for user's next request.
+- If this tool returns an error field, explain the error and ask user to try again.
 
 ----------------------------------------
 STATE-DRIVEN BEHAVIOR RULES
@@ -225,7 +284,30 @@ B. FIELD COLLECTION PHASE (status = COLLECTING)
 - Never ask about fields already inferred by the rule.
 - NEVER ask about fields that have defaults in the knowledge base (e.g., confidence, fps) - these are automatically filled.
 - run_mode defaults to "continuous" - DO NOT ask for it unless the user explicitly wants "patrol" mode.
-- Only ask for fields listed in "required_fields_from_user" in the knowledge base.
+
+TIME WINDOW FIELD COLLECTION (CRITICAL):
+- If time_window.required is true in the knowledge base, BOTH start_time AND end_time are required.
+- These are SEPARATE fields - you MUST ask for BOTH explicitly.
+- NEVER assume or invent an end_time based on:
+  * "Typical day" or "standard hours"
+  * "Morning" implying evening end time
+  * Any other assumption
+
+EXAMPLE - CORRECT BEHAVIOR:
+User: "start from tomorrow morning 9"
+❌ WRONG: Set start_time=9am, assume end_time=6pm, proceed to confirmation
+✅ CORRECT: Set start_time=9am, ask "What time would you like the agent to stop running tomorrow?"
+
+User: "start from tomorrow morning 9 and end at evening 7"
+✅ CORRECT: Extract both, set start_time=9am IST, end_time=7pm IST, proceed
+
+- If user provides only start_time:
+  → Set start_time correctly
+  → Ask explicitly: "What time would you like the agent to stop running?"
+  → DO NOT proceed to confirmation without end_time
+- If user provides both times, extract and set both.
+- These fields are separate from run_mode - they determine WHEN the agent runs, not HOW it behaves.
+- Only ask for fields listed in "required_fields_from_user" in the knowledge base, execution_modes[run_mode].required_fields, OR start_time/end_time if time_window.required is true.
 
 C. CONFIRMATION PHASE (status = CONFIRMATION)
 - When missing_fields is empty and status is CONFIRMATION:
@@ -247,21 +329,52 @@ D. CHANGE REQUESTS
 E. FINALIZATION
 - ONLY when the user explicitly confirms ("yes", "proceed", "save", "confirm"):
   → Call save_to_db_wrapper() to persist the configuration internally
-  → After the tool returns successfully, respond with a clear success message:
+  → After the tool returns successfully, the state will be set to SAVED
+  → When status is SAVED, respond with a clear success message:
     "Your agent '[agent name]' has been successfully created and is now active!"
   → Include key details like agent name, camera ID, and what it will detect
   → DO NOT start a new agent creation flow - the task is complete
-  → If the user wants to create another agent, they will explicitly ask
+  → DO NOT ask any questions - just confirm success
+  → If the user wants to create another agent, they will explicitly ask, and you should then call initialize_state_wrapper
+
+F. SAVED STATE HANDLING (TERMINAL STATE)
+- If status is SAVED:
+  → DO NOT call any tools
+  → DO NOT ask any questions
+  → DO NOT restart field collection
+  → Respond with success message using saved_agent_name from state
+  → Wait for user's next request
+  → If user wants to create a new agent, detect their intent and call initialize_state_wrapper to start fresh
 
 ----------------------------------------
 FIELD-SPECIFIC RULES
 ----------------------------------------
 
-- Run Mode: ONLY accepts "continuous" or "patrol". If "continuous", ignore interval_minutes and check_duration_seconds (these are only for "patrol" mode).
-- Zone Field: Only include zone field if the rule's requires_zone is true. If requires_zone is false, do NOT add zone field to state.
-- Rules Array: Must include complete configuration. For class_presence/object_enter_zone: include "type", "class", and "label". For gesture_detected: include "type" and "gesture". For proximity_detection: include "type", "class_a", "class_b", "distance".
-- Agent Name: Generate automatically based on rule type and detection target (e.g., "Van Detection Agent", "Person Presence Monitor").
-- Defaults: Fields with defaults in the knowledge base (e.g., confidence, fps, run_mode) are AUTOMATICALLY filled - DO NOT ask the user for these fields. Only ask for fields in "required_fields_from_user".
+CRITICAL DISTINCTION - Run Mode vs Time Window:
+
+1. RUN MODE (HOW the agent behaves):
+   - "continuous": Agent runs continuously, checking every frame
+   - "patrol": Agent runs periodically at intervals
+   - This is about BEHAVIOR, not timing
+   - Determined by execution_modes in knowledge base
+   - Defaults to "continuous" from KB defaults
+   - Each mode has its own required_fields (e.g., patrol needs interval_minutes)
+
+2. TIME WINDOW (WHEN the agent runs):
+   - start_time: When the agent should START running
+   - end_time: When the agent should STOP running
+   - This is about SCHEDULING, not behavior
+   - Determined by time_window.required in knowledge base
+   - If time_window.required is TRUE, you MUST ask for BOTH start_time AND end_time SEPARATELY
+   - CRITICAL: NEVER assume or invent an end_time - always ask the user explicitly
+   - If time_window.required is FALSE but supported is TRUE, times are optional (only ask if user mentions scheduling)
+   - These fields are SEPARATE from run_mode - an agent can be "continuous" but only run from 9am to 5pm
+   - Example: User says "start from tomorrow morning 9" → You MUST ask "What time would you like it to stop?" DO NOT assume 6pm or any other time.
+
+- Zone Field: Determined by zone_support.required in knowledge base OR execution_modes[run_mode].zone_required. If neither requires zone, do NOT add zone field to state.
+- Rules Array: Automatically updated after any field change - includes complete configuration based on rule type.
+- Agent Name: Automatically generated when all required fields are collected - based on rule type and detection target.
+- Defaults: Fields with defaults in the knowledge base (e.g., confidence, fps, run_mode) are AUTOMATICALLY filled - DO NOT ask the user for these fields. Only ask for fields in "required_fields_from_user", execution_modes[run_mode].required_fields, OR start_time/end_time if time_window.required is true.
 
 ----------------------------------------
 ZONE FIELD HANDLING
@@ -273,21 +386,32 @@ When zone is required (requires_zone is true and zone is in missing_fields):
   or "Define the area where you want detection to happen"
   or "Select the region on the camera where you want to monitor"
 - When user provides zone data (as JSON in message like "Zone data: ..."), extract it and 
-  call set_field_value_wrapper with {{"zone": zone_data}}
+  call set_field_value_wrapper with field_values_json='{{"zone": zone_data}}'
 - Zone data format: {{"type": "polygon", "coordinates": [[x1,y1], [x2,y2], [x3,y3], ...]}}
 - If user says "I'll draw it" or "let me select the area", acknowledge and wait for zone data
 - Once zone is set, it will automatically be removed from missing_fields
 
 ----------------------------------------
-STRICT PROHIBITIONS
+STRICT PROHIBITIONS (NEVER VIOLATE)
 ----------------------------------------
 
+ABSOLUTE PROHIBITIONS:
+- Do NOT invent, assume, or guess ANY field values - this is CRITICAL
 - Do NOT invent: rule types, models, thresholds, zones, FPS, run mode names
+- Do NOT assume end_time based on start_time (e.g., "morning 9" does NOT mean "evening 6")
+- Do NOT use "typical day" or "standard hours" to invent end_time
 - Do NOT ask irrelevant questions
 - Do NOT repeat questions already answered
 - Do NOT change state silently
 - Do NOT skip confirmation
 - Do NOT use run mode names other than "continuous" or "patrol"
+- Do NOT call tools for greetings or meta-questions
+
+TIME FIELD SPECIFIC PROHIBITIONS:
+- NEVER set end_time without explicit user input
+- NEVER assume end_time = start_time + X hours
+- NEVER invent end_time based on "morning" implying "evening"
+- If time_window.required is true and user provides only start_time, you MUST ask for end_time explicitly
 
 ----------------------------------------
 COMMUNICATION STYLE
@@ -343,30 +467,111 @@ def create_agent_for_session(session_id: str = "default", user_id: Optional[str]
         """Create tool wrappers with session context injected"""
         
         def initialize_state_wrapper(rule_id: str) -> Dict:
-            """Initialize agent state for the selected rule.
+            """
+            Initialize agent state for the selected rule.
+            
+            This function MUST be called first before setting any field values.
+            It sets up the agent state based on the rule type from the knowledge base.
             
             Args:
-                rule_id: The rule ID to initialize (e.g., "class_presence", "gesture_detected")
+                rule_id (str): The rule ID to initialize. Must be a valid rule ID from the knowledge base.
+                    Examples: "object_enter_zone", "class_presence", "gesture_detected", "loitering_detected"
+            
+            Returns:
+                Dict: A dictionary with status and message indicating if initialization was successful.
+            
+            Example:
+                initialize_state_wrapper(rule_id="object_enter_zone")
             """
             return initialize_state_impl(rule_id=rule_id, session_id=current_session_id)
         
         def set_field_value_wrapper(field_values_json: str) -> Dict:
-            """Update one or more fields in the agent state.
+            """
+            Update one or more fields in the agent state.
+            
+            CRITICAL: The parameter MUST be a JSON STRING, not a dictionary object.
+            You MUST convert any dictionary/object to a JSON string before passing it.
             
             Args:
-                field_values_json: JSON string mapping field name -> value (e.g., '{"camera_id": "CAM-001", "class": "Van"}')
+                field_values_json (str): A JSON STRING containing field name -> value mappings.
+                    This parameter is a STRING, not a dictionary. You must serialize dictionaries to JSON strings.
+                    The JSON string should contain key-value pairs where keys are field names and values are the field values.
+            
+            Returns:
+                Dict: A dictionary with updated_fields, status, and message indicating the result.
+            
+            Examples:
+                # Single field:
+                set_field_value_wrapper(field_values_json='{"camera_id": "CAM-001"}')
+                
+                # Multiple fields:
+                set_field_value_wrapper(field_values_json='{"camera_id": "CAM-001", "class": "person", "start_time": "2025-12-27T14:00:00Z"}')
+                
+                # Zone field (polygon coordinates):
+                set_field_value_wrapper(field_values_json='{"zone": {"type": "polygon", "coordinates": [[100, 200], [300, 400], [500, 600]]}}')
+            
+            IMPORTANT:
+                - Always pass a JSON STRING, never a raw dictionary/object
+                - Use json.dumps() or equivalent to convert dictionaries to JSON strings
+                - Field names must match exactly: camera_id, class, gesture, start_time, end_time, zone, etc.
             """
             return set_field_value_impl(field_values_json=field_values_json, session_id=current_session_id)
         
         def save_to_db_wrapper() -> Dict:
-            """Save the confirmed agent configuration to the database."""
-            return save_to_db_impl(session_id=current_session_id, user_id=current_user_id)
+            """
+            Save the confirmed agent configuration to the database.
+            
+            This function persists the agent configuration after all required fields have been collected
+            and the user has confirmed the configuration. It should ONLY be called when:
+            - Agent state status is CONFIRMATION
+            - All required fields are collected (missing_fields is empty)
+            - User has explicitly confirmed (e.g., "yes", "proceed", "save", "confirm")
+            
+            Args:
+                None: This function takes no parameters. Do not pass any arguments.
+            
+            Returns:
+                Dict: A dictionary with status ("SAVED" or error), saved (bool), agent_id, and agent_name.
+                    On success: {"status": "SAVED", "saved": True, "agent_id": "...", "agent_name": "..."}
+                    On error: {"error": "...", "status": "...", "saved": False, "message": "..."}
+            
+            Example:
+                save_to_db_wrapper()
+                # Do NOT call with arguments: save_to_db_wrapper() is correct
+                # Do NOT call like: save_to_db_wrapper({}) or save_to_db_wrapper(None)
+            
+            IMPORTANT:
+                - Call this function with NO parameters: save_to_db_wrapper()
+                - Only call after user confirms the configuration
+                - Do not call if missing_fields is not empty
+                - Do not call if status is not CONFIRMATION
+            """
+            print(f"[save_to_db_wrapper] Called with session_id={current_session_id}, user_id={current_user_id}")
+            result = save_to_db_impl(session_id=current_session_id, user_id=current_user_id)
+            print(f"[save_to_db_wrapper] Result: {result}")
+            return result
         
+        # Explicitly set function names to ensure they match what Groq expects
+        # This prevents name mangling issues with LiteLLM/Groq compatibility
+        initialize_state_wrapper.__name__ = "initialize_state_wrapper"
+        set_field_value_wrapper.__name__ = "set_field_value_wrapper"
+        save_to_db_wrapper.__name__ = "save_to_db_wrapper"
+        
+        # Create FunctionTool instances with explicitly named functions
         tools = [
             FunctionTool(initialize_state_wrapper),
             FunctionTool(set_field_value_wrapper),
             FunctionTool(save_to_db_wrapper),
         ]
+        
+        # Verify tool names match expected names
+        print(f"[create_tool_wrappers] Created tools with names: {[tool.name for tool in tools]}")
+        for tool in tools:
+            decl = tool._get_declaration()
+            if decl:
+                print(f"[create_tool_wrappers] Tool '{tool.name}' declaration name: '{decl.name}'")
+                if tool.name != decl.name:
+                    print(f"[create_tool_wrappers] WARNING: Tool name mismatch! Tool.name='{tool.name}' but decl.name='{decl.name}'")
         
         # Debug: Verify tools are properly wrapped (only if DEBUG_ADK env var is set)
         if os.getenv("DEBUG_ADK") == "true":
@@ -411,7 +616,7 @@ def create_agent_for_session(session_id: str = "default", user_id: Optional[str]
         instruction=dynamic_instruction,  # Dynamic workflow logic - rebuilt each time
         tools=wrapped_tools,
         model="groq/llama-3.3-70b-versatile"
-    )
+            )
     
     # Debug: Verify agent has tools (only if DEBUG_ADK env var is set)
     if os.getenv("DEBUG_ADK") == "true":

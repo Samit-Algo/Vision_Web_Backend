@@ -51,20 +51,54 @@ def _detect_zone_request(response_text: str, missing_fields: List[str]) -> bool:
     return any(keyword in response_lower for keyword in zone_keywords)
 
 
-def _compute_zone_required(agent_state) -> bool:
+def _compute_zone_required(agent_state, response_text: str = "") -> bool:
     """
-    Compute if zone is required based on state.
+    Compute if zone is required based on state and knowledge base.
     Deterministic - never manually set.
     
     Args:
         agent_state: The current agent state
+        response_text: Optional response text to infer rule if state not initialized
         
     Returns:
-        True if zone is required (requires_zone is True and zone is None)
+        True if zone is required (requires_zone is True from KB and zone is None)
     """
-    requires_zone = agent_state.fields.get("requires_zone", False)
-    zone = agent_state.fields.get("zone")
-    return bool(requires_zone and zone is None)
+    # If state is initialized, compute from KB
+    if agent_state.rule_id:
+        # Compute requires_zone from knowledge base (derived state, not stored)
+        from ....agents.tools.kb_utils import get_rule, compute_requires_zone
+        try:
+            rule = get_rule(agent_state.rule_id)
+            run_mode = agent_state.fields.get("run_mode", "continuous")
+            requires_zone = compute_requires_zone(rule, run_mode)
+        except (ValueError, KeyError):
+            # Rule not found or error - assume zone not required
+            requires_zone = False
+        
+        # Zone is required if KB says so AND zone is not yet set
+        zone = agent_state.fields.get("zone")
+        return bool(requires_zone and zone is None)
+    
+    # State not initialized - check if agent is asking for zone in response
+    # If agent mentions "object_enter_zone" rule, zone is required
+    if response_text:
+        response_lower = response_text.lower()
+        # Check if response mentions object_enter_zone rule
+        if "object_enter_zone" in response_lower or "object enter zone" in response_lower:
+            # This rule always requires zone
+            from ....agents.tools.kb_utils import get_rule, compute_requires_zone
+            try:
+                rule = get_rule("object_enter_zone")
+                requires_zone = compute_requires_zone(rule, "continuous")  # Default to continuous
+                return requires_zone
+            except (ValueError, KeyError):
+                pass
+        
+        # Also check if zone is in missing_fields (agent might have initialized but we're checking before state update)
+        if "zone" in agent_state.missing_fields:
+            return True
+    
+    return False
 
 
 class ChatWithAgentUseCase:
@@ -200,6 +234,26 @@ class ChatWithAgentUseCase:
             zone_json = json.dumps(request.zone_data)
             user_message = user_message + "\n\nZone data: " + zone_json
         
+        # Handle camera_id if provided from UI
+        # Strategy: 
+        # - If state is NOT initialized: Include camera_id in message so LLM can extract it during initialization
+        # - If state IS initialized: Set camera_id directly in state
+        if request.camera_id:
+            from ....agents.session_state.agent_state import get_agent_state
+            agent_state = get_agent_state(session_id)
+            
+            if agent_state.rule_id:
+                # State is already initialized - set camera_id directly
+                agent_state.fields["camera_id"] = request.camera_id
+                # Remove camera_id from missing_fields if it's there
+                if "camera_id" in agent_state.missing_fields:
+                    agent_state.missing_fields.remove("camera_id")
+            else:
+                # State not initialized yet - include camera_id in message
+                # LLM will extract it when user provides agent creation intent
+                # This way greetings work normally without premature state setting
+                user_message = user_message + f"\n\nCamera ID: {request.camera_id}"
+        
         # Create Content object from user message
         user_content = types.Content(
             role="user",
@@ -266,9 +320,11 @@ class ChatWithAgentUseCase:
             agent_state = get_agent_state(session_id)
             
             # Compute zone signals
-            zone_required = _compute_zone_required(agent_state)
+            # Pass response text to help infer zone requirement if state not initialized
+            response_text_for_zone = response_to_return if response_to_return else last_model_response
+            zone_required = _compute_zone_required(agent_state, response_text_for_zone)
             awaiting_zone_input = _detect_zone_request(
-                response_to_return if response_to_return else last_model_response,
+                response_text_for_zone,
                 agent_state.missing_fields
             )
             
@@ -284,7 +340,8 @@ class ChatWithAgentUseCase:
             try:
                 from ....agents.session_state.agent_state import get_agent_state
                 agent_state = get_agent_state(session_id)
-                zone_required = _compute_zone_required(agent_state)
+                # Pass empty string for response text in error case
+                zone_required = _compute_zone_required(agent_state, "")
                 awaiting_zone_input = False  # Error state, not asking for input
             except:
                 zone_required = False

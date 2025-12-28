@@ -7,6 +7,7 @@ class ChatMessageRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
     zone_data: Optional[Dict[str, Any]] = None  # Zone data from UI drawing
+    camera_id: Optional[str] = None  # Camera ID passed from UI when user clicks "Add Agent" on a camera
 
 
 class ChatMessageResponse(BaseModel):
