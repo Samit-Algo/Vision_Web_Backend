@@ -18,7 +18,9 @@ class NotificationService:
     @staticmethod
     def format_event_notification(
         event_payload: Dict[str, Any],
-        saved_paths: Optional[Dict[str, str]] = None
+        saved_paths: Optional[Dict[str, str]] = None,
+        event_id: Optional[str] = None,
+        include_frame_base64: bool = False,
     ) -> Dict[str, Any]:
         """
         Format an event payload into a notification message.
@@ -63,6 +65,7 @@ class NotificationService:
             # Build notification payload
             notification = {
                 "type": "event_notification",
+                "event_id": event_id,
                 "session_id": session_id,  # Include session_id for frontend to fetch video chunks
                 "event": {
                     "label": event_info.get("label", "Unknown event"),
@@ -79,7 +82,7 @@ class NotificationService:
                     "device_id": camera_info.get("device_id"),
                 },
                 "frame": {
-                    "image_base64": frame_info.get("image_base64"),
+                    "image_base64": frame_info.get("image_base64") if include_frame_base64 else None,
                     "format": frame_info.get("format", "jpeg"),
                 },
                 "metadata": {

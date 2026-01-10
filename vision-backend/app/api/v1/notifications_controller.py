@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from ...core.security import decode_jwt_token
 from ...infrastructure.notifications import WebSocketManager
 from ...utils.event_storage import (
+    EVENTS_BASE_DIR,
     get_video_chunk_path,
     get_video_chunk_metadata_path,
     list_video_chunks_for_session
@@ -262,6 +263,34 @@ async def get_video_chunk(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error retrieving video chunk: {str(e)}"
         )
+
+
+@router.get("/event-image")
+async def get_event_image(
+    path: str = Query(..., description="Path to a saved event image under the events directory"),
+    current_user: UserResponse = Depends(get_current_user),
+) -> FileResponse:
+    """
+    Serve a saved event image file (JPG/PNG/WEBP) from the events directory.
+    The Electron UI uses this to show real event thumbnails/cards.
+    """
+    base_dir = EVENTS_BASE_DIR.resolve()
+    try:
+        resolved = Path(path).resolve()
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid image path")
+
+    # Prevent path traversal: must be under events/
+    if base_dir not in resolved.parents and resolved != base_dir:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
+    if not resolved.exists() or not resolved.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image not found")
+
+    if resolved.suffix.lower() not in [".jpg", ".jpeg", ".png", ".webp"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported image type")
+
+    return FileResponse(path=str(resolved))
 
 
 @router.get("/video-chunks/{session_id}/{chunk_number}/metadata")

@@ -5,6 +5,7 @@ motor>=3.3.2
 bcrypt>=4.0.1
 PyJWT>=2.8.0
 python-dotenv>=1.0.0
+python-multipart>=0.0.6
 pytz
 google-adk>=1.21.0
 litellm>=1.75.5

@@ -20,7 +20,7 @@ class Settings:
         self.jwt_secret_key: Final[str] = os.getenv("JWT_SECRET_KEY", "change_this_secret_in_production")
         self.jwt_algorithm: Final[str] = os.getenv("JWT_ALGORITHM", "HS256")
         self.access_token_expire_minutes: Final[int] = int(
-            os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60")
+            os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440")
         )
         
         # Chat/LLM Configuration
@@ -30,6 +30,10 @@ class Settings:
         self.memory_recent_limit: Final[int] = int(os.getenv("MEMORY_RECENT_LIMIT", "12"))
         self.memory_max_chars: Final[int] = int(os.getenv("MEMORY_MAX_CHARS", "1000"))
         self.local_timezone: Final[str] = os.getenv("LOCAL_TIMEZONE", "Asia/Kolkata")
+        
+        # Groq TTS Configuration
+        self.groq_tts_model: Final[str] = os.getenv("GROQ_TTS_MODEL", "canopylabs/orpheus-v1-english")
+        self.groq_tts_voice: Final[str] = os.getenv("GROQ_TTS_VOICE", "autumn")
         
         # Jetson Backend Configuration
         self.jetson_backend_url: Final[str] = os.getenv(

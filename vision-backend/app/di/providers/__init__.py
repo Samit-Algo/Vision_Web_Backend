@@ -4,6 +4,8 @@ from .auth_provider import AuthProvider
 from .camera_provider import CameraProvider
 from .chat_provider import ChatProvider
 from .device_provider import DeviceProvider
+from .streaming_provider import StreamingProvider
+from .events_provider import EventsProvider
 
 
 __all__ = [
@@ -13,5 +15,7 @@ __all__ = [
     "CameraProvider",
     "ChatProvider",
     "DeviceProvider",
+    "StreamingProvider",
+    "EventsProvider",
 ]
 

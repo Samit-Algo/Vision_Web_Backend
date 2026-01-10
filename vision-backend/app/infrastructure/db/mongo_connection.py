@@ -69,3 +69,13 @@ def get_device_collection() -> AsyncIOMotorCollection:
         MongoDB collection for devices
     """
     return get_database()["devices"]
+
+
+def get_event_collection() -> AsyncIOMotorCollection:
+    """
+    Get events collection from MongoDB
+
+    Returns:
+        MongoDB collection for events
+    """
+    return get_database()["events"]

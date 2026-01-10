@@ -7,6 +7,8 @@ from .providers import (
     DatabaseProvider,
     DeviceProvider,
     RepositoryProvider,
+    StreamingProvider,
+    EventsProvider,
 )
 
 
@@ -41,6 +43,10 @@ class DIContainer(BaseContainer):
         CameraProvider.register(self)
         ChatProvider.register(self)
         DeviceProvider.register(self)
+        EventsProvider.register(self)
+        
+        # Step 4: Register infrastructure services
+        StreamingProvider.register(self)
         
         # Future providers can be added here:
         # VideoProvider.register(self)

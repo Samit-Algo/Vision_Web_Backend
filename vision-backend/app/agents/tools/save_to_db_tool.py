@@ -8,6 +8,7 @@ from dataclasses import asdict
 from ..session_state.agent_state import get_agent_state, reset_agent_state
 from ...domain.models.agent import Agent
 from ...infrastructure.external.agent_client import AgentClient
+from .flow_diagram_utils import generate_agent_flow_diagram
 
 # Enable nested event loops to allow asyncio.run() from within async contexts
 import nest_asyncio
@@ -289,12 +290,23 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
         
         print(f"[save_to_db] Agent state updated to SAVED with agent_id={saved_agent.id}, agent_name={saved_agent.name}")
         
+        # Generate flow diagram data for the saved agent
+        flow_diagram = None
+        try:
+            flow_diagram = generate_agent_flow_diagram(saved_agent)
+            print(f"[save_to_db] Generated flow diagram with {len(flow_diagram.get('nodes', []))} nodes and {len(flow_diagram.get('links', []))} links")
+        except Exception as e:
+            print(f"[save_to_db] WARNING: Failed to generate flow diagram: {e}")
+            import traceback
+            print(f"[save_to_db] Traceback: {traceback.format_exc()}")
+        
         result = {
             "status": "SAVED",
             "saved": True,
             "message": "Agent configuration saved. Tell user agent is successfully created",
             "agent_id": saved_agent.id if saved_agent else None,
             "agent_name": saved_agent.name if saved_agent else None,
+            "flow_diagram": flow_diagram,  # Include Sankey diagram data
         }
         print(f"[save_to_db] Returning success result: {result}")
         return result

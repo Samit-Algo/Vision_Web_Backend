@@ -155,16 +155,10 @@ class KafkaEventConsumer:
                             owner_user_id = self.notification_service.extract_owner_user_id(payload)
                             
                             if owner_user_id:
-                                # Format notification payload
-                                notification = self.notification_service.format_event_notification(
-                                    payload, saved_paths
-                                )
-                                
-                                # Queue notification for WebSocket broadcast
-                                # The notification queue will be processed by the main event loop
+                                # Queue raw payload for DB persistence + WS broadcast in main async loop.
                                 if self._notification_queue:
                                     try:
-                                        self._notification_queue.put((owner_user_id, notification), block=False)
+                                        self._notification_queue.put((owner_user_id, payload, saved_paths), block=False)
                                         logger.info(
                                             f"Notification queued for user {owner_user_id} for event: agent_id={agent_id}, "
                                             f"camera_id={camera_id}, label={event_label}"
@@ -174,10 +168,20 @@ class KafkaEventConsumer:
                                     except Exception as e:
                                         logger.error(f"Error queueing notification: {e}", exc_info=True)
                             else:
+                                # Dev-friendly fallback: broadcast to all connected users.
+                                # Later you can tighten this by ensuring Jetson includes camera.owner_user_id
+                                # or by looking up owner_user_id from DB using camera_id.
                                 logger.warning(
                                     f"Could not extract owner_user_id from event payload. "
-                                    f"Notification not sent. agent_id={agent_id}, camera_id={camera_id}"
+                                    f"Broadcasting to all users. agent_id={agent_id}, camera_id={camera_id}"
                                 )
+                                if self._notification_queue:
+                                    try:
+                                        self._notification_queue.put((None, payload, saved_paths), block=False)
+                                    except queue.Full:
+                                        logger.warning("Notification queue full, dropping broadcast notification")
+                                    except Exception as e:
+                                        logger.error(f"Error queueing broadcast notification: {e}", exc_info=True)
                                 
                         except Exception as e:
                             # Log error but don't fail event processing

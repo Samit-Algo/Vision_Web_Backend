@@ -5,6 +5,8 @@ from typing import Optional, Tuple, Dict, Any
 import logging
 import asyncio
 import queue
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # External package imports
 from dotenv import load_dotenv
@@ -12,10 +14,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # Local application imports
-from .api.v1 import auth_router, camera_router, chat_router, general_chat_router, device_router, notifications_router
+from .api.v1 import auth_router, camera_router, chat_router, general_chat_router, device_router, notifications_router, streaming_router, events_router
 from .api.v1.notifications_controller import set_websocket_manager
 from .infrastructure.messaging import KafkaEventConsumer
 from .infrastructure.notifications import WebSocketManager, NotificationService
+from .infrastructure.streaming import WsFmp4Service
+from .di.container import get_container
+from .domain.models.event import Event
+from .domain.repositories.event_repository import EventRepository
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +66,87 @@ async def process_notification_queue():
                 await asyncio.sleep(0.1)  # Small sleep to avoid busy-waiting
                 continue
             
-            user_id, notification = result
-            
-            # Send notification to user's WebSocket connections
-            sent_count = await _websocket_manager.send_to_user(user_id, notification)
+            user_id, payload, saved_paths = result
+
+            # Persist event to DB (Mongo) in the main async loop (safe for Motor)
+            event_id = None
+            try:
+                container = get_container()
+                event_repo: EventRepository = container.get(EventRepository)
+
+                # Build a preview notification to reuse session_id construction logic
+                preview = _notification_service.format_event_notification(
+                    payload,
+                    saved_paths=saved_paths,
+                    event_id=None,
+                    include_frame_base64=False,
+                )
+
+                session_id = preview.get("session_id") or (payload.get("metadata", {}) or {}).get("session_id") or ""
+                label = (payload.get("event", {}) or {}).get("label", "Event")
+                rule_index = (payload.get("event", {}) or {}).get("rule_index")
+                camera_id = (payload.get("agent", {}) or {}).get("camera_id")
+                agent_id = (payload.get("agent", {}) or {}).get("agent_id")
+                agent_name = (payload.get("agent", {}) or {}).get("agent_name")
+                device_id = (payload.get("camera", {}) or {}).get("device_id")
+
+                # Parse event timestamp
+                event_ts = None
+                ts_raw = (payload.get("event", {}) or {}).get("timestamp")
+                try:
+                    if ts_raw:
+                        event_ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                except Exception:
+                    event_ts = None
+
+                # Simple backend severity inference (kept in sync with frontend heuristic)
+                sev_label = str(label or "").lower()
+                if any(k in sev_label for k in ["weapon", "fire", "fall", "intrusion"]):
+                    severity = "critical"
+                elif any(k in sev_label for k in ["violation", "restricted", "collision", "alert"]):
+                    severity = "warning"
+                else:
+                    severity = "info"
+
+                ev = Event(
+                    id=None,
+                    owner_user_id=user_id,
+                    session_id=session_id,
+                    label=label,
+                    severity=severity,
+                    rule_index=rule_index,
+                    camera_id=camera_id,
+                    agent_id=agent_id,
+                    agent_name=agent_name,
+                    device_id=device_id,
+                    event_ts=event_ts,
+                    received_at=datetime.utcnow(),
+                    image_path=saved_paths.get("image_path") if isinstance(saved_paths, dict) else None,
+                    json_path=saved_paths.get("json_path") if isinstance(saved_paths, dict) else None,
+                    metadata={
+                        **((payload.get("metadata", {}) or {})),
+                        **({"image_path": saved_paths.get("image_path")} if isinstance(saved_paths, dict) and saved_paths.get("image_path") else {}),
+                        **({"json_path": saved_paths.get("json_path")} if isinstance(saved_paths, dict) and saved_paths.get("json_path") else {}),
+                    },
+                )
+                event_id = await event_repo.create(ev)
+            except Exception as e:
+                logger.error(f"Error persisting event to DB: {e}", exc_info=True)
+
+            # Format notification payload (now includes event_id)
+            notification = _notification_service.format_event_notification(
+                payload,
+                saved_paths=saved_paths,
+                event_id=event_id,
+                include_frame_base64=False,
+            )
+
+            # If user_id is missing (e.g., Jetson payload didn't include owner_user_id),
+            # fall back to broadcasting to all connected clients (dev-friendly default).
+            if not user_id:
+                sent_count = await _websocket_manager.broadcast_to_all(notification)
+            else:
+                sent_count = await _websocket_manager.send_to_user(user_id, notification)
             
             if sent_count > 0:
                 logger.debug(f"Sent notification to {sent_count} connection(s) for user {user_id}")
@@ -133,6 +216,15 @@ async def lifespan(app: FastAPI):
     
     yield
     
+    # Shutdown: Clean up live WS streams
+    try:
+        container = get_container()
+        ws_service: WsFmp4Service = container.get(WsFmp4Service)
+        await ws_service.cleanup_all_streams()
+        logger.info("All live WS streams stopped during application shutdown")
+    except Exception as e:
+        logger.error(f"Error stopping live WS streams: {e}", exc_info=True)
+    
     # Shutdown: Stop background tasks and services
     if notification_task:
         try:
@@ -185,6 +277,7 @@ def create_application() -> FastAPI:
         allow_origins=[
             "http://localhost:5173",
             "http://localhost:3000",
+            "http://127.0.0.1:3000",  # Desktop app (Electron)
             "http://localhost:8081",
             "https://spicy-garlics-wonder.loca.lt",
         ],
@@ -200,6 +293,8 @@ def create_application() -> FastAPI:
     application.include_router(general_chat_router, prefix="/api/v1/general-chat")
     application.include_router(device_router, prefix="/api/v1/devices")
     application.include_router(notifications_router, prefix="/api/v1/notifications")
+    application.include_router(events_router, prefix="/api/v1/events")
+    application.include_router(streaming_router, prefix="/api/v1/streams")
     
     return application
 

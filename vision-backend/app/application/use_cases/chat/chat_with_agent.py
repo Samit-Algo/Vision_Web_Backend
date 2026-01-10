@@ -1,4 +1,6 @@
 # Standard library imports
+import base64
+import html
 import json
 import uuid
 from typing import Optional, List
@@ -315,9 +317,61 @@ class ChatWithAgentUseCase:
             # Use final response if available, otherwise use last model response
             response_to_return = final_response_text.strip() if final_response_text.strip() else last_model_response.strip()
             
-            # Get current agent state for zone signals
+            # Get current agent state for zone signals / flow diagram.
+            # IMPORTANT: tools store state keyed by our internal session_id, but ADK can also key by adk_session.id.
+            # We defensively check both so flow diagram always attaches after a real save.
             from ....agents.session_state.agent_state import get_agent_state
-            agent_state = get_agent_state(session_id)
+            agent_state_primary = get_agent_state(session_id)
+            agent_state_adk = get_agent_state(getattr(adk_session, "id", session_id))
+
+            agent_state = agent_state_primary
+            if (not agent_state.saved_agent_id) and agent_state_adk.saved_agent_id:
+                agent_state = agent_state_adk
+
+            # Check if agent was just saved and append flow diagram
+            if agent_state.saved_agent_id:
+                try:
+                    # Fetch the saved agent to generate Sankey diagram
+                    from ....di.container import get_container
+                    container = get_container()
+                    agent_repository = container.get(AgentRepository)
+                    saved_agent = await agent_repository.find_by_id(agent_state.saved_agent_id)
+                    
+                    if saved_agent:
+                        from ....agents.tools.flow_diagram_utils import generate_agent_flow_diagram
+                        import json as json_lib
+                        
+                        flow_diagram = generate_agent_flow_diagram(saved_agent)
+                        flow_json = json_lib.dumps(flow_diagram, separators=(',', ':'))
+                        
+                        print(f"[ChatWithAgentUseCase] Generated flow diagram with {len(flow_diagram.get('nodes', []))} nodes and {len(flow_diagram.get('links', []))} links")
+                        
+                        # Append flow diagram HTML to response
+                        # Use base64 encoding for JSON to avoid escaping issues in HTML attributes
+                        flow_json_b64 = base64.b64encode(flow_json.encode('utf-8')).decode('utf-8')
+                        
+                        flow_html = f"""
+
+---
+
+## Processing Flow Diagram
+
+Here's how your agent **"{agent_state.saved_agent_name or 'Agent'}"** processes video:
+
+<!-- FLOW_DIAGRAM_START -->
+<div id="flow-container-{agent_state.saved_agent_id}" 
+     data-flow-data-b64="{flow_json_b64}"
+     style="width: 100%; height: 500px; margin-top: 1rem; margin-bottom: 1rem; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 0.5rem;"></div>
+<!-- FLOW_DIAGRAM_END -->
+
+*This diagram shows the complete processing pipeline from camera stream to notifications.*
+"""
+                        response_to_return += flow_html
+                except Exception as e:
+                    # If diagram generation fails, just continue without it
+                    print(f"[ChatWithAgentUseCase] Failed to append flow diagram: {e}")
+                    import traceback
+                    print(f"[ChatWithAgentUseCase] Traceback: {traceback.format_exc()}")
             
             # Compute zone signals
             # Pass response text to help infer zone requirement if state not initialized
