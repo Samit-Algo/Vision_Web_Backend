@@ -4,11 +4,13 @@ from google.adk.agents.callback_context import CallbackContext
 from google.adk.tools import FunctionTool
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
+import logging
 import json
 import os
 from pathlib import Path
+from functools import lru_cache
 from dotenv import load_dotenv
-from typing import Optional, Dict, Union, Awaitable
+from typing import Optional, Dict
 from datetime import datetime
 from pytz import UTC, timezone
 from google.adk.planners import BuiltInPlanner
@@ -22,24 +24,38 @@ from .tools.save_to_db_tool import save_to_db as save_to_db_impl
 
 
 
+logger = logging.getLogger(__name__)
+
+
+def _debug_adk_enabled() -> bool:
+    return os.getenv("DEBUG_ADK") == "true"
+
+
+@lru_cache(maxsize=1)
+def _load_env() -> None:
+    """Load environment variables once (no stdout prints)."""
+    try:
+        env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+        load_dotenv(env_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to load .env: %s", exc)
+
+
+def _ensure_groq_api_key() -> str:
+    """Ensure GROQ_API_KEY is present; return it."""
+    _load_env()
+    groq_api_key = os.getenv("GROQ_API_KEY", "")
+    if not groq_api_key:
+        raise ValueError(
+            "GROQ_API_KEY is not set. Please set it in your .env file or environment variables. "
+            "Provider-style models require the API key to be set."
+        )
+    os.environ["GROQ_API_KEY"] = groq_api_key
+    return groq_api_key
+
+
 # Load knowledge base
 KB_PATH = Path(__file__).resolve().parent.parent / "knowledge_base" / "vision_rule_knowledge_base.json"
-
-# Load environment variables and ensure GROQ_API_KEY is set
-# Use the same path pattern as main.py to find .env file
-try:
-    env_path = Path(__file__).resolve().parent.parent.parent / ".env"
-    load_dotenv(env_path)
-    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-    # Set environment variable for LiteLlm to use Groq
-    if GROQ_API_KEY:
-        os.environ["GROQ_API_KEY"] = GROQ_API_KEY
-        print(f"GROQ_API_KEY loaded: {'*' * 10}{GROQ_API_KEY[-4:] if len(GROQ_API_KEY) > 4 else '****'}")
-    else:
-        print("Warning: GROQ_API_KEY not found in environment variables")
-except Exception as e:
-    print(f"Error loading environment variables: {e}")
 
 with open(KB_PATH, "r") as f:
     _kb_data = json.load(f)
@@ -48,15 +64,37 @@ rules = _kb_data.get("rules", [])
 
 
 def get_current_time_context() -> str:
-    """Get current time context in human-readable format for LLM prompt"""
-    # Use IST (Indian Standard Time) timezone
-    IST = timezone('Asia/Kolkata')  # UTC+5:30
-    now = datetime.now(IST)
-    # Format: "Monday, November 18, 2025 at 14:30 IST"
-    day_name = now.strftime("%A")
-    date_str = now.strftime("%B %d, %Y")
-    time_str = now.strftime("%H:%M")
-    return f"{day_name}, {date_str} at {time_str} IST"
+    """
+    Get current time context for the LLM prompt.
+
+    IMPORTANT:
+    - Provide both UTC + IST in machine-readable formats so the model can copy exact values.
+    - This reduces "rounded" times like 15:30 when the user says "start now".
+    """
+    IST = timezone("Asia/Kolkata")  # UTC+5:30
+
+    # Use an explicit UTC anchor first, then convert to IST.
+    now_utc = datetime.now(UTC)
+    now_ist = now_utc.astimezone(IST)
+
+    # Machine-readable anchors
+    now_utc_iso_z = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_ist_iso = now_ist.isoformat()
+    now_epoch_sec = int(now_utc.timestamp())
+
+    # Human-friendly
+    now_ist_human = now_ist.strftime("%A, %B %d, %Y at %H:%M:%S IST")
+    now_utc_human = now_utc.strftime("%A, %B %d, %Y at %H:%M:%S UTC")
+
+    return (
+        "TIME_CONTEXT (copy these values exactly; do not round):\n"
+        f"- NOW_UTC_ISO_Z: {now_utc_iso_z}\n"
+        f"- NOW_UTC_EPOCH_SEC: {now_epoch_sec}\n"
+        f"- NOW_IST_ISO: {now_ist_iso}\n"
+        f"- NOW_IST_HUMAN: {now_ist_human}\n"
+        f"- NOW_UTC_HUMAN: {now_utc_human}\n"
+        "RULE: If user says 'start now', use NOW_UTC_ISO_Z exactly. If user says 'end after X', compute end_time from NOW_UTC_EPOCH_SEC (+X).\n"
+    )
 
 
 # Static instruction - stable system behavior (kept short to reduce tokens)
@@ -213,20 +251,7 @@ def build_instruction_dynamic_with_session(context: ReadonlyContext, session_id:
 
 def create_agent_for_session(session_id: str = "default", user_id: Optional[str] = None) -> LlmAgent:
     # Ensure GROQ_API_KEY is set before creating the agent
-    groq_api_key = os.getenv("GROQ_API_KEY")
-    if not groq_api_key:
-        # Try loading from .env again with explicit path
-        env_path = Path(__file__).resolve().parent.parent.parent / ".env"
-        load_dotenv(env_path)
-        groq_api_key = os.getenv("GROQ_API_KEY")
-        if groq_api_key:
-            os.environ["GROQ_API_KEY"] = groq_api_key
-    
-    if not groq_api_key:
-        raise ValueError(
-            "GROQ_API_KEY is not set. Please set it in your .env file or environment variables. "
-            "Provider-style models (groq/llama-3.3-70b-versatile) require the API key to be set."
-        )
+    _ensure_groq_api_key()
 
     # Wrap all tools with FunctionTool for proper ADK registration
     # Create wrapper functions that inject session_id from a closure
@@ -315,9 +340,15 @@ def create_agent_for_session(session_id: str = "default", user_id: Optional[str]
                 - Do not call if missing_fields is not empty
                 - Do not call if status is not CONFIRMATION
             """
-            print(f"[save_to_db_wrapper] Called with session_id={current_session_id}, user_id={current_user_id}")
+            if _debug_adk_enabled():
+                logger.debug(
+                    "[save_to_db_wrapper] Called (session_id=%s user_id=%s)",
+                    current_session_id,
+                    current_user_id,
+                )
             result = save_to_db_impl(session_id=current_session_id, user_id=current_user_id)
-            print(f"[save_to_db_wrapper] Result: {result}")
+            if _debug_adk_enabled():
+                logger.debug("[save_to_db_wrapper] Result: %s", result)
             return result
         
         # Explicitly set function names to ensure they match what Groq expects
@@ -333,26 +364,40 @@ def create_agent_for_session(session_id: str = "default", user_id: Optional[str]
             FunctionTool(save_to_db_wrapper),
         ]
         
-        # Verify tool names match expected names
-        print(f"[create_tool_wrappers] Created tools with names: {[tool.name for tool in tools]}")
-        for tool in tools:
-            decl = tool._get_declaration()
-            if decl:
-                print(f"[create_tool_wrappers] Tool '{tool.name}' declaration name: '{decl.name}'")
-                if tool.name != decl.name:
-                    print(f"[create_tool_wrappers] WARNING: Tool name mismatch! Tool.name='{tool.name}' but decl.name='{decl.name}'")
-        
-        # Debug: Verify tools are properly wrapped (only if DEBUG_ADK env var is set)
-        if os.getenv("DEBUG_ADK") == "true":
-            print(f"[DEBUG] Created {len(tools)} wrapped tools")
+        if _debug_adk_enabled():
+            # Verify tool names match expected names (debug only)
+            logger.debug(
+                "[create_tool_wrappers] Created tools: %s",
+                [getattr(tool, "name", "<unknown>") for tool in tools],
+            )
             for tool in tools:
-                print(f"[DEBUG] Tool: {tool.name}, Type: {type(tool).__name__}")
                 try:
                     decl = tool._get_declaration()
-                    if decl:
-                        print(f"[DEBUG]   Declaration: name={decl.name}, description={decl.description[:50] if decl.description else 'None'}...")
-                except Exception as e:
-                    print(f"[DEBUG]   Error getting declaration: {e}")
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("[create_tool_wrappers] Error getting declaration: %s", exc)
+                    continue
+                if decl and getattr(tool, "name", None) != getattr(decl, "name", None):
+                    logger.warning(
+                        "[create_tool_wrappers] Tool name mismatch: tool.name=%s decl.name=%s",
+                        getattr(tool, "name", None),
+                        getattr(decl, "name", None),
+                    )
+        
+        if _debug_adk_enabled():
+            logger.debug("[tools] Created %d wrapped tools", len(tools))
+            for tool in tools:
+                try:
+                    decl = tool._get_declaration()
+                    desc = getattr(decl, "description", None) if decl else None
+                    logger.debug(
+                        "[tools] %s (%s) decl.name=%s desc=%s",
+                        getattr(tool, "name", "<unknown>"),
+                        type(tool).__name__,
+                        getattr(decl, "name", None) if decl else None,
+                        (desc[:50] + "...") if isinstance(desc, str) and len(desc) > 50 else desc,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("[tools] Error introspecting tool: %s", exc)
         
         return tools
     
@@ -382,94 +427,61 @@ def create_agent_for_session(session_id: str = "default", user_id: Optional[str]
     async def log_thinking_request(
         *, callback_context: CallbackContext, llm_request: LlmRequest
     ) -> Optional[LlmResponse]:
-        """Log thinking config before model request."""
-        print("\n" + "="*80)
-        print(f"🧠 PLANNING REQUEST - Agent: {callback_context.agent_name}")
-        print("="*80)
-        
-        # Log thinking config
-        if llm_request.config and llm_request.config.thinking_config:
-            tc = llm_request.config.thinking_config
-            print(f"Thinking Config:")
-            print(f"  - include_thoughts: {tc.include_thoughts}")
-            print(f"  - thinking_budget: {tc.thinking_budget}")
-            print(f"  - thinking_level: {tc.thinking_level}")
-        else:
-            print("Thinking Config: Not set")
-        
-        # Log available tools
-        if llm_request.tools_dict:
-            print(f"Available Tools: {list(llm_request.tools_dict.keys())}")
-        
-        # Log instruction preview (first 500 chars)
-        if llm_request.contents:
-            instruction_str = str(llm_request.contents)
-            instruction_preview = instruction_str
-            print(f"Instruction Preview: {instruction_preview}")
-        
-        print("="*80 + "\n")
+        """Log thinking config before model request (debug only)."""
+        if not _debug_adk_enabled():
+            return None
+
+        tc = None
+        try:
+            tc = llm_request.config.thinking_config if llm_request.config else None
+        except Exception:  # noqa: BLE001
+            tc = None
+
+        logger.debug(
+            "[adk] planning request agent=%s include_thoughts=%s budget=%s level=%s tools=%s",
+            getattr(callback_context, "agent_name", None),
+            getattr(tc, "include_thoughts", None) if tc else None,
+            getattr(tc, "thinking_budget", None) if tc else None,
+            getattr(tc, "thinking_level", None) if tc else None,
+            list(getattr(llm_request, "tools_dict", {}) or {}),
+        )
         return None
     
     async def log_thinking_response(
         *, callback_context: CallbackContext, llm_response: LlmResponse
     ) -> Optional[LlmResponse]:
-        """Log thinking content from model response."""
-        print("\n" + "="*80)
-        print(f"💭 PLANNING RESPONSE - Agent: {callback_context.agent_name}")
-        print("="*80)
-        
-        if llm_response.content and llm_response.content.parts:
-            thinking_parts = []
-            regular_parts = []
-            
-            for part in llm_response.content.parts:
-                # Check if this is a thinking part
-                if hasattr(part, 'thought') and part.thought:
-                    thinking_parts.append(part)
-                else:
-                    regular_parts.append(part)
-            
-            # Print thinking parts
-            if thinking_parts:
-                print("🧠 THINKING/PLANNING CONTENT:")
-                for i, part in enumerate(thinking_parts, 1):
-                    if hasattr(part, 'text') and part.text:
-                        print(f"\n[Thought {i}]")
-                        print("-" * 60)
-                        print(part.text)
-                        print("-" * 60)
-            else:
-                print("🧠 THINKING: No thinking content found in response")
-            
-            # Print regular response preview
-            if regular_parts:
-                print("\n📝 REGULAR RESPONSE:")
-                for i, part in enumerate(regular_parts, 1):
-                    if hasattr(part, 'text') and part.text:
-                        preview = part.text
-            
-                        print(f"[Response {i}] {preview}")
-                    elif hasattr(part, 'function_call') and part.function_call:
-                        func_call = part.function_call
-                        func_name = getattr(func_call, 'name', 'unknown')
-                        args_preview = str(getattr(func_call, 'args', {}))[:200]
-                        print(f"[Function Call {i}] {func_name}({args_preview}...)")
-        else:
-            print("No content in response")
-        
-        # Log error if present
-        if llm_response.error_code:
-            print(f"\n❌ ERROR:")
-            print(f"  - Error Code: {llm_response.error_code}")
-            print(f"  - Error Message: {llm_response.error_message}")
-        
-        # Log usage metadata if available
-        if llm_response.usage_metadata:
-            print(f"\n📊 Token Usage:")
-            print(f"  - Input: {llm_response.usage_metadata.prompt_token_count}")
-            print(f"  - Output: {llm_response.usage_metadata.candidates_token_count}")
-        
-        print("="*80 + "\n")
+        """Log response metadata (debug only; do not print full content)."""
+        if not _debug_adk_enabled():
+            return None
+
+        parts = []
+        try:
+            parts = list(getattr(getattr(llm_response, "content", None), "parts", []) or [])
+        except Exception:  # noqa: BLE001
+            parts = []
+
+        thought_count = 0
+        tool_call_count = 0
+        text_part_count = 0
+        for part in parts:
+            if getattr(part, "thought", False):
+                thought_count += 1
+            if getattr(part, "function_call", None):
+                tool_call_count += 1
+            if getattr(part, "text", None):
+                text_part_count += 1
+
+        usage = getattr(llm_response, "usage_metadata", None)
+        logger.debug(
+            "[adk] planning response agent=%s thoughts=%d text_parts=%d tool_calls=%d err=%s in_tok=%s out_tok=%s",
+            getattr(callback_context, "agent_name", None),
+            thought_count,
+            text_part_count,
+            tool_call_count,
+            getattr(llm_response, "error_code", None),
+            getattr(usage, "prompt_token_count", None) if usage else None,
+            getattr(usage, "candidates_token_count", None) if usage else None,
+        )
         return None  # Return None to keep original response unchanged
 
     # Create planner with thinking enabled
@@ -480,12 +492,13 @@ def create_agent_for_session(session_id: str = "default", user_id: Optional[str]
         )
     )
     
-    # Print planner config (only if DEBUG_ADK is enabled)
-    if os.getenv("DEBUG_ADK") == "true":
-        print(f"[DEBUG] Planner Thinking Config:")
-        print(f"  - include_thoughts: {planner.thinking_config.include_thoughts}")
-        print(f"  - thinking_budget: {planner.thinking_config.thinking_budget}")
-        print(f"  - thinking_level: {planner.thinking_config.thinking_level}")
+    if _debug_adk_enabled():
+        logger.debug(
+            "[planner] include_thoughts=%s budget=%s level=%s",
+            getattr(planner.thinking_config, "include_thoughts", None),
+            getattr(planner.thinking_config, "thinking_budget", None),
+            getattr(planner.thinking_config, "thinking_level", None),
+        )
 
     main_agent = LlmAgent(
         name="main_agent",
@@ -499,14 +512,12 @@ def create_agent_for_session(session_id: str = "default", user_id: Optional[str]
         after_model_callback=[log_thinking_response],  # Add callback to log planning response
     )
     
-    # Debug: Verify agent has tools (only if DEBUG_ADK env var is set)
-    if os.getenv("DEBUG_ADK") == "true":
-        print(f"[DEBUG] Agent created with {len(wrapped_tools)} tools")
-        print(f"[DEBUG] Agent model: {main_agent.model}")
+    if _debug_adk_enabled():
+        logger.debug("[agent] created tools=%d model=%s", len(wrapped_tools), main_agent.model)
 
     return main_agent
 
-# Default agent instance (for backward compatibility)
-default_agent = create_agent_for_session()
+# Backward-compat symbol (avoid import-time side effects)
+default_agent: Optional[LlmAgent] = None
 
 

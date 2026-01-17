@@ -11,6 +11,7 @@ class EventListItemResponse(BaseModel):
     severity: str
     rule_index: Optional[int] = None
     camera_id: Optional[str] = None
+    agent_id: Optional[str] = None
     agent_name: Optional[str] = None
     device_id: Optional[str] = None
     event_ts: Optional[datetime] = None

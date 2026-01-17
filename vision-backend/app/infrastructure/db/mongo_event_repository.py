@@ -12,6 +12,7 @@ from ...domain.repositories.event_repository import EventRepository
 from ...domain.models.event import Event
 from ...domain.constants import EventFields
 from .mongo_connection import get_event_collection
+from ...utils.datetime_utils import mongo_datetime_to_utc, ensure_utc, parse_iso
 
 
 class MongoEventRepository(EventRepository):
@@ -108,6 +109,19 @@ class MongoEventRepository(EventRepository):
         return total, items
 
     def _document_to_event(self, doc: dict) -> Event:
+        # Backward compatible: handle event_ts/received_at stored as string or datetime
+        raw_event_ts = doc.get(EventFields.EVENT_TS)
+        if isinstance(raw_event_ts, str):
+            event_ts = ensure_utc(parse_iso(raw_event_ts))
+        else:
+            event_ts = mongo_datetime_to_utc(raw_event_ts)
+
+        raw_received_at = doc.get(EventFields.RECEIVED_AT)
+        if isinstance(raw_received_at, str):
+            received_at = ensure_utc(parse_iso(raw_received_at)) or ensure_utc(datetime.utcnow())
+        else:
+            received_at = mongo_datetime_to_utc(raw_received_at) or ensure_utc(datetime.utcnow())
+
         return Event(
             id=str(doc.get(EventFields.MONGO_ID)),
             owner_user_id=doc.get(EventFields.OWNER_USER_ID),
@@ -119,8 +133,8 @@ class MongoEventRepository(EventRepository):
             agent_id=doc.get(EventFields.AGENT_ID),
             agent_name=doc.get(EventFields.AGENT_NAME),
             device_id=doc.get(EventFields.DEVICE_ID),
-            event_ts=doc.get(EventFields.EVENT_TS),
-            received_at=doc.get(EventFields.RECEIVED_AT) or datetime.utcnow(),
+            event_ts=event_ts,
+            received_at=received_at,
             image_path=doc.get(EventFields.IMAGE_PATH),
             json_path=doc.get(EventFields.JSON_PATH),
             metadata=doc.get(EventFields.METADATA) or {},

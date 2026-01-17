@@ -16,23 +16,41 @@ import parsedatetime
 from pytz import UTC, timezone
 import re
 
+from app.utils.datetime_utils import _get_app_timezone, now
+
 
 # Create parsedatetime calendar instance
 _cal = parsedatetime.Calendar()
 
-# Use IST (Indian Standard Time) as the local timezone
-IST = timezone('Asia/Kolkata')  # UTC+5:30
+
+def _get_app_tz_pytz():
+    """
+    Get application timezone as pytz timezone object.
+    This is needed for parsedatetime compatibility.
+    """
+    app_tz = _get_app_timezone()
+    # Convert zoneinfo ZoneInfo to pytz timezone
+    if hasattr(app_tz, 'key'):  # zoneinfo.ZoneInfo
+        return timezone(app_tz.key)
+    elif app_tz == timezone('UTC'):
+        return UTC
+    else:
+        # Try to get timezone name from the timezone object
+        try:
+            return timezone(str(app_tz))
+        except Exception:
+            return UTC
 
 
 def get_current_datetime_context() -> datetime:
     """
-    Get current datetime in IST for use as parsing context.
-    Times are interpreted in IST and then converted to UTC for storage.
+    Get current datetime in application timezone for use as parsing context.
+    Times are interpreted in app timezone and then converted to UTC for storage.
     
     Returns:
-        Current datetime in IST timezone
+        Current datetime in application-configured timezone
     """
-    return datetime.now(IST)
+    return now()
 
 
 def parse_time_input(
@@ -80,19 +98,22 @@ def parse_time_input(
             time_expression = time_expression + 'Z'
         return time_expression
     
-    # Use current IST time as reference if not provided
+    # Get application timezone
+    app_tz = _get_app_tz_pytz()
+    
+    # Use current app timezone time as reference if not provided
     if reference_datetime is None:
         reference_datetime = get_current_datetime_context()
     else:
-        # Ensure reference is timezone-aware (IST)
+        # Ensure reference is timezone-aware (app timezone)
         if reference_datetime.tzinfo is None:
-            reference_datetime = IST.localize(reference_datetime)
-        elif reference_datetime.tzinfo != IST:
-            reference_datetime = reference_datetime.astimezone(IST)
+            reference_datetime = app_tz.localize(reference_datetime)
+        elif reference_datetime.tzinfo != app_tz:
+            reference_datetime = reference_datetime.astimezone(app_tz)
     
-    # Use IST as local timezone for parsedatetime (works better with local context)
+    # Use app timezone as local timezone for parsedatetime (works better with local context)
     # We'll convert to UTC after parsing for storage
-    local_ref = reference_datetime.astimezone(IST) if reference_datetime.tzinfo else IST.localize(reference_datetime)
+    local_ref = reference_datetime.astimezone(app_tz) if reference_datetime.tzinfo else app_tz.localize(reference_datetime)
     
     # Try to parse the time expression
     try:
@@ -123,9 +144,9 @@ def parse_time_input(
             if status == 0:
                 raise ValueError(f"Could not parse time expression: '{time_expression}'")
         
-        # Ensure parsed_time is timezone-aware (assume IST if not specified)
+        # Ensure parsed_time is timezone-aware (assume app timezone if not specified)
         if parsed_time.tzinfo is None:
-            parsed_time = IST.localize(parsed_time)
+            parsed_time = app_tz.localize(parsed_time)
         
         # Convert from IST to UTC for storage
         if parsed_time.tzinfo != UTC:
@@ -142,18 +163,22 @@ def parse_time_input(
 
 def format_time_for_display(iso_time: str) -> str:
     """
-    Convert ISO 8601 time string to human-readable format for display in IST.
+    Convert ISO 8601 time string to human-readable format for display in application timezone.
     
     Args:
         iso_time: ISO 8601 formatted time string (e.g., "2025-11-16T09:00:00Z")
     
     Returns:
-        Human-readable time string in IST (e.g., "November 16, 2025 at 14:30")
+        Human-readable time string in application timezone (e.g., "November 16, 2025 at 14:30")
     """
     if not iso_time:
         return ""
     
     try:
+        # Get application timezone
+        app_tz = _get_app_tz_pytz()
+        app_tz_name = str(app_tz)
+        
         # Parse ISO string (assumed to be in UTC)
         if iso_time.endswith('Z'):
             dt = datetime.fromisoformat(iso_time.replace('Z', '+00:00'))
@@ -166,21 +191,21 @@ def format_time_for_display(iso_time: str) -> str:
         elif dt.tzinfo != UTC:
             dt = dt.astimezone(UTC)
         
-        # Convert to IST for display
-        dt_ist = dt.astimezone(IST)
+        # Convert to app timezone for display
+        dt_app = dt.astimezone(app_tz)
         
         # Format for display
-        # Check if it's today, tomorrow, or a specific date (in IST)
-        now = get_current_datetime_context()
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        # Check if it's today, tomorrow, or a specific date (in app timezone)
+        now_dt = get_current_datetime_context()
+        today_start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
         tomorrow_start = today_start + timedelta(days=1)
         
-        if dt_ist.date() == today_start.date():
-            return f"Today at {dt_ist.strftime('%H:%M')} IST"
-        elif dt_ist.date() == tomorrow_start.date():
-            return f"Tomorrow at {dt_ist.strftime('%H:%M')} IST"
+        if dt_app.date() == today_start.date():
+            return f"Today at {dt_app.strftime('%H:%M')} {app_tz_name}"
+        elif dt_app.date() == tomorrow_start.date():
+            return f"Tomorrow at {dt_app.strftime('%H:%M')} {app_tz_name}"
         else:
-            return dt_ist.strftime('%B %d, %Y at %H:%M IST')
+            return dt_app.strftime(f'%B %d, %Y at %H:%M {app_tz_name}')
             
     except Exception as e:
         # If parsing fails, return the original string

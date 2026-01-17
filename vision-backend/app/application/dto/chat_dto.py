@@ -18,3 +18,5 @@ class ChatMessageResponse(BaseModel):
     # Zone UI control signals
     zone_required: bool = False  # Computed from state: requires_zone && zone is None
     awaiting_zone_input: bool = False  # LLM is currently asking for zone input
+    # Flow diagram data (raw JSON for frontend transformation)
+    flow_diagram_data: Optional[Dict[str, Any]] = None  # Generic flow data: {"nodes": [...], "links": [...]}

@@ -1,13 +1,15 @@
 # Standard library imports
-import base64
-import html
+import logging
 import json
 import uuid
-from typing import Optional, List
+import threading
+from typing import Optional, List, Tuple, AsyncGenerator, Dict, Any
 
 # External package imports
+from google.adk.agents import LlmAgent
 from google.adk.runners import Runner
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
+from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.genai import types
 
 # Local application imports
@@ -23,6 +25,9 @@ from ....agents.tools.save_to_db_tool import (
     set_jetson_client
 )
 from ....infrastructure.external.agent_client import AgentClient
+
+
+logger = logging.getLogger(__name__)
 
 
 def _detect_zone_request(response_text: str, missing_fields: List[str]) -> bool:
@@ -108,6 +113,10 @@ class ChatWithAgentUseCase:
     
     # Shared session service across all instances (singleton pattern)
     _shared_session_service: Optional[InMemorySessionService] = None
+    # Shared agent cache across all instances (singleton pattern)
+    # Keyed by (user_id, session_id) to avoid cross-user leakage.
+    _shared_agent_cache: dict[Tuple[str, str], LlmAgent] = {}
+    _shared_agent_cache_lock = threading.Lock()
     
     def __init__(
         self,
@@ -120,12 +129,6 @@ class ChatWithAgentUseCase:
         if ChatWithAgentUseCase._shared_session_service is None:
             ChatWithAgentUseCase._shared_session_service = InMemorySessionService()
         self.session_service = ChatWithAgentUseCase._shared_session_service
-        
-        # Store session mappings: {session_id: (adk_session, agent_instance)}
-        # Note: This is per-instance, but sessions are stored in the shared session_service
-        self._sessions: dict[str, tuple] = {}
-        # Store user_id for each session
-        self._session_user_map: dict[str, str] = {}
         
         # Set up repositories and client for tools if provided
         if agent_repository:
@@ -159,255 +162,436 @@ class ChatWithAgentUseCase:
         # App name for ADK session service
         app_name = "vision-agent-chat"
         
-        # Get or create session
-        # If session_id is provided, try to get existing session first
-        # Otherwise, create a new session
-        session_id = request.session_id
-        adk_session = None
-        
-        # If session_id is provided, try to get existing session from ADK session service
-        if session_id:
-            try:
-                adk_session = await self.session_service.get_session(
-                    app_name=app_name,
-                    user_id=user_id,
-                    session_id=session_id
-                )
-            except Exception as e:
-                # If get_session fails, log and continue to create new session
-                # In production, use proper logging instead of print
-                adk_session = None
-        
-        # If session doesn't exist, create a new one
-        if not adk_session:
-            if not session_id:
-                session_id = self._create_session_id()
-            
-            try:
-                adk_session = await self.session_service.create_session(
-                    app_name=app_name,
-                    user_id=user_id,
-                    session_id=session_id
-                )
-            except Exception as e:
-                # If create fails (e.g., session already exists), try to get it
-                # In production, use proper logging instead of print
-                adk_session = await self.session_service.get_session(
-                    app_name=app_name,
-                    user_id=user_id,
-                    session_id=session_id
-                )
-                if not adk_session:
-                    # If still not found, create with a new session_id
-                    session_id = self._create_session_id()
-                    adk_session = await self.session_service.create_session(
-                        app_name=app_name,
-                        user_id=user_id,
-                        session_id=session_id
-                    )
-        
-        # Get or create agent for this session
-        # Always create a new agent to ensure we have the latest tool wrappings
-        # (This ensures FunctionTool wrappings are always used)
-        # Note: Instruction is now dynamic and rebuilds automatically on each LLM call
-        agent = create_agent_for_session(session_id=session_id, user_id=user_id)
-        
-        # Store mapping between ADK session.id and our internal session_id in ADK session state
-        # This allows the dynamic instruction provider to find the right state
+        adk_session, session_id = await self._get_or_create_adk_session(
+            app_name=app_name,
+            user_id=user_id,
+            session_id=request.session_id,
+        )
+
+        agent = self._get_or_create_agent_cached(user_id=user_id, session_id=session_id)
+
+        # Keep mapping between ADK session and internal session_id for downstream lookups
         if "internal_session_id" not in adk_session.state:
             adk_session.state["internal_session_id"] = session_id
-        
-        self._sessions[session_id] = (adk_session, agent)
-        self._session_user_map[session_id] = user_id
-        
-        # Create runner for this agent with required session service
-        runner = Runner(
-            app_name=app_name,
-            agent=agent,
-            session_service=self.session_service
-        )
-        
-        # Handle zone_data if provided from UI
-        user_message = request.message
-        if request.zone_data:
-            # Merge zone data into message as JSON
-            # LLM will extract and set it via set_field_value
-            # Use string concatenation instead of f-string to avoid format specifier issues with JSON
-            zone_json = json.dumps(request.zone_data)
-            user_message = user_message + "\n\nZone data: " + zone_json
-        
-        # Handle camera_id if provided from UI
-        # Strategy: 
-        # - If state is NOT initialized: Include camera_id in message so LLM can extract it during initialization
-        # - If state IS initialized: Set camera_id directly in state
-        if request.camera_id:
-            from ....agents.session_state.agent_state import get_agent_state
-            agent_state = get_agent_state(session_id)
-            
-            if agent_state.rule_id:
-                # State is already initialized - set camera_id directly
-                agent_state.fields["camera_id"] = request.camera_id
-                # Remove camera_id from missing_fields if it's there
-                if "camera_id" in agent_state.missing_fields:
-                    agent_state.missing_fields.remove("camera_id")
-            else:
-                # State not initialized yet - include camera_id in message
-                # LLM will extract it when user provides agent creation intent
-                # This way greetings work normally without premature state setting
-                user_message = user_message + f"\n\nCamera ID: {request.camera_id}"
-        
-        # Create Content object from user message
-        user_content = types.Content(
-            role="user",
-            parts=[types.Part(text=user_message)]
-        )
-        
-        # Run agent with user message
+
+        runner = Runner(app_name=app_name, agent=agent, session_service=self.session_service)
+
+        user_message = self._build_user_message(request=request, session_id=session_id)
+        user_content = types.Content(role="user", parts=[types.Part(text=user_message)])
+
         try:
-            # run_async returns an async generator of events
-            # ADK emits multiple events: model text, tool calls, model text again
-            # We only want the FINAL model response, not intermediate ones
-            final_response_text = ""
-            last_model_response = ""
-            
-            async for event in runner.run_async(
+            final_response_text, last_model_response = await self._run_agent_and_collect_text(
+                runner=runner,
                 user_id=user_id,
-                session_id=adk_session.id,
-                new_message=user_content
-            ):
-                # Check if this is a final model response event
-                # Only collect text from final responses to avoid mixing messages
-                if hasattr(event, 'is_final_response') and event.is_final_response():
-                    # Extract text from final response events only
-                    if hasattr(event, 'content') and event.content:
-                        if isinstance(event.content, types.Content):
-                            # Extract text from parts
-                            for part in event.content.parts:
-                                if hasattr(part, 'text') and part.text:
-                                    final_response_text += part.text
-                        elif hasattr(event.content, 'parts'):
-                            for part in event.content.parts:
-                                if hasattr(part, 'text') and part.text:
-                                    final_response_text += part.text
-                    # Also check for direct text attributes
-                    elif hasattr(event, 'text') and event.text:
-                        final_response_text += event.text
-                # Track the last model response (even if not marked final)
-                # Some models might not mark final correctly
-                # Author is the agent name (e.g., "main_agent"), not "model"
-                # Also check for any non-user author (could be agent name)
-                elif hasattr(event, 'author') and event.author != "user" and event.author:
-                    # Extract text for tracking
-                    event_text = ""
-                    if hasattr(event, 'content') and event.content:
-                        if isinstance(event.content, types.Content):
-                            for part in event.content.parts:
-                                if hasattr(part, 'text') and part.text:
-                                    event_text += part.text
-                        elif hasattr(event.content, 'parts'):
-                            for part in event.content.parts:
-                                if hasattr(part, 'text') and part.text:
-                                    event_text += part.text
-                    elif hasattr(event, 'text') and event.text:
-                        event_text = event.text
-                    
-                    if event_text:
-                        last_model_response = event_text
-            
-            # Use final response if available, otherwise use last model response
-            response_to_return = final_response_text.strip() if final_response_text.strip() else last_model_response.strip()
-            
-            # Get current agent state for zone signals / flow diagram.
-            # IMPORTANT: tools store state keyed by our internal session_id, but ADK can also key by adk_session.id.
-            # We defensively check both so flow diagram always attaches after a real save.
-            from ....agents.session_state.agent_state import get_agent_state
-            agent_state_primary = get_agent_state(session_id)
-            agent_state_adk = get_agent_state(getattr(adk_session, "id", session_id))
-
-            agent_state = agent_state_primary
-            if (not agent_state.saved_agent_id) and agent_state_adk.saved_agent_id:
-                agent_state = agent_state_adk
-
-            # Check if agent was just saved and append flow diagram
-            if agent_state.saved_agent_id:
-                try:
-                    # Fetch the saved agent to generate Sankey diagram
-                    from ....di.container import get_container
-                    container = get_container()
-                    agent_repository = container.get(AgentRepository)
-                    saved_agent = await agent_repository.find_by_id(agent_state.saved_agent_id)
-                    
-                    if saved_agent:
-                        from ....agents.tools.flow_diagram_utils import generate_agent_flow_diagram
-                        import json as json_lib
-                        
-                        flow_diagram = generate_agent_flow_diagram(saved_agent)
-                        flow_json = json_lib.dumps(flow_diagram, separators=(',', ':'))
-                        
-                        print(f"[ChatWithAgentUseCase] Generated flow diagram with {len(flow_diagram.get('nodes', []))} nodes and {len(flow_diagram.get('links', []))} links")
-                        
-                        # Append flow diagram HTML to response
-                        # Use base64 encoding for JSON to avoid escaping issues in HTML attributes
-                        flow_json_b64 = base64.b64encode(flow_json.encode('utf-8')).decode('utf-8')
-                        
-                        flow_html = f"""
-
----
-
-## Processing Flow Diagram
-
-Here's how your agent **"{agent_state.saved_agent_name or 'Agent'}"** processes video:
-
-<!-- FLOW_DIAGRAM_START -->
-<div id="flow-container-{agent_state.saved_agent_id}" 
-     data-flow-data-b64="{flow_json_b64}"
-     style="width: 100%; height: 500px; margin-top: 1rem; margin-bottom: 1rem; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 0.5rem;"></div>
-<!-- FLOW_DIAGRAM_END -->
-
-*This diagram shows the complete processing pipeline from camera stream to notifications.*
-"""
-                        response_to_return += flow_html
-                except Exception as e:
-                    # If diagram generation fails, just continue without it
-                    print(f"[ChatWithAgentUseCase] Failed to append flow diagram: {e}")
-                    import traceback
-                    print(f"[ChatWithAgentUseCase] Traceback: {traceback.format_exc()}")
-            
-            # Compute zone signals
-            # Pass response text to help infer zone requirement if state not initialized
-            response_text_for_zone = response_to_return if response_to_return else last_model_response
-            zone_required = _compute_zone_required(agent_state, response_text_for_zone)
-            awaiting_zone_input = _detect_zone_request(
-                response_text_for_zone,
-                agent_state.missing_fields
+                adk_session_id=adk_session.id,
+                user_content=user_content,
             )
-            
-            return ChatMessageResponse(
-                response=response_to_return if response_to_return else "I apologize, but I didn't receive a proper response.",
+
+            response_to_return = (
+                final_response_text.strip() if final_response_text.strip() else last_model_response.strip()
+            )
+
+            return await self._finalize_chat_response(
+                response_to_return=response_to_return,
+                last_model_response=last_model_response,
                 session_id=session_id,
+                adk_session=adk_session,
                 status="success",
-                zone_required=zone_required,
-                awaiting_zone_input=awaiting_zone_input,
             )
         except Exception as e:
+            logger.exception("[chat] execute failed")
+            return await self._finalize_chat_response(
+                response_to_return="",
+                last_model_response="",
+                session_id=session_id,
+                adk_session=adk_session,
+                status="error",
+                error=e,
+            )
+
+    async def stream_execute(
+        self,
+        *,
+        request: ChatMessageRequest,
+        user_id: Optional[str] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Stream agent output as structured events.
+
+        Yields dict events:
+        - {"event": "meta", "data": {...}}
+        - {"event": "token", "data": {...}}
+        - {"event": "done", "data": ChatMessageResponse-compatible dict}
+        - {"event": "error", "data": {...}}
+        """
+        if not user_id:
+            user_id = "anonymous"
+
+        app_name = "vision-agent-chat"
+
+        adk_session, session_id = await self._get_or_create_adk_session(
+            app_name=app_name,
+            user_id=user_id,
+            session_id=request.session_id,
+        )
+
+        agent = self._get_or_create_agent_cached(user_id=user_id, session_id=session_id)
+
+        if "internal_session_id" not in getattr(adk_session, "state", {}):
+            try:
+                adk_session.state["internal_session_id"] = session_id
+            except Exception:
+                pass
+
+        runner = Runner(app_name=app_name, agent=agent, session_service=self.session_service)
+
+        user_message = self._build_user_message(request=request, session_id=session_id)
+        user_content = types.Content(role="user", parts=[types.Part(text=user_message)])
+
+        # Let the client know the session_id immediately so UI can persist it mid-stream
+        yield {"event": "meta", "data": {"session_id": session_id}}
+
+        try:
+            final_response_text = ""
+            last_model_response = ""
+            async for chunk in self._run_agent_stream(
+                runner=runner,
+                user_id=user_id,
+                adk_session_id=adk_session.id,
+                user_content=user_content,
+            ):
+                if chunk.get("type") == "token":
+                    delta = chunk.get("delta") or ""
+                    if delta:
+                        yield {"event": "token", "data": {"delta": delta}}
+                elif chunk.get("type") == "result":
+                    final_response_text = chunk.get("final_response_text") or ""
+                    last_model_response = chunk.get("last_model_response") or ""
+
+            response_to_return = (
+                final_response_text.strip() if final_response_text.strip() else last_model_response.strip()
+            )
+
+            final_response = await self._finalize_chat_response(
+                response_to_return=response_to_return,
+                last_model_response=last_model_response,
+                session_id=session_id,
+                adk_session=adk_session,
+                status="success",
+            )
+            yield {"event": "done", "data": final_response.model_dump()}
+        except Exception as e:
+            logger.exception("[chat] stream_execute failed")
+            final_response = await self._finalize_chat_response(
+                response_to_return="",
+                last_model_response="",
+                session_id=session_id,
+                adk_session=adk_session,
+                status="error",
+                error=e,
+            )
+            yield {"event": "error", "data": {"message": str(e)}}
+            yield {"event": "done", "data": final_response.model_dump()}
+
+    async def _finalize_chat_response(
+        self,
+        *,
+        response_to_return: str,
+        last_model_response: str,
+        session_id: str,
+        adk_session: object,
+        status: str,
+        error: Optional[Exception] = None,
+    ) -> ChatMessageResponse:
+        """Apply flow diagram + zone flags and build ChatMessageResponse."""
+        if status != "success":
             # On error, still compute zone signals for UI consistency
             try:
                 from ....agents.session_state.agent_state import get_agent_state
+
                 agent_state = get_agent_state(session_id)
-                # Pass empty string for response text in error case
                 zone_required = _compute_zone_required(agent_state, "")
-                awaiting_zone_input = False  # Error state, not asking for input
-            except:
+                awaiting_zone_input = False
+            except Exception:
                 zone_required = False
                 awaiting_zone_input = False
-            
+
+            msg = f"I encountered an error: {str(error)}. Please try again." if error else "I encountered an error."
             return ChatMessageResponse(
-                response=f"I encountered an error: {str(e)}. Please try again.",
+                response=msg,
                 session_id=session_id,
                 status="error",
                 zone_required=zone_required,
                 awaiting_zone_input=awaiting_zone_input,
             )
+
+        # Prefer response_to_return; fall back to last_model_response
+        response_text = response_to_return.strip() if response_to_return else last_model_response.strip()
+        if not response_text:
+            response_text = "I apologize, but I didn't receive a proper response."
+
+        # Get current agent state for zone signals / flow diagram.
+        # IMPORTANT: tools store state keyed by our internal session_id, but ADK can also key by adk_session.id.
+        # We defensively check both so flow diagram always attaches after a real save.
+        from ....agents.session_state.agent_state import get_agent_state
+
+        agent_state_primary = get_agent_state(session_id)
+        agent_state_adk = get_agent_state(getattr(adk_session, "id", session_id))
+
+        agent_state = agent_state_primary
+        if (not agent_state.saved_agent_id) and agent_state_adk.saved_agent_id:
+            agent_state = agent_state_adk
+
+        # Check if agent was just saved and attach flow diagram data
+        flow_diagram_data = None
+        if agent_state.saved_agent_id:
+            try:
+                from ....di.container import get_container
+
+                container = get_container()
+                agent_repository = container.get(AgentRepository)
+                saved_agent = await agent_repository.find_by_id(agent_state.saved_agent_id)
+
+                if saved_agent:
+                    from ....agents.tools.flow_diagram_utils import generate_agent_flow_diagram
+
+                    # Generate raw diagram data (single generation, frontend transforms)
+                    flow_diagram_data = generate_agent_flow_diagram(saved_agent)
+
+                    logger.debug(
+                        "[chat] flow diagram generated (nodes=%d, links=%d)",
+                        len(flow_diagram_data.get("nodes", [])),
+                        len(flow_diagram_data.get("links", [])),
+                    )
+
+                    # Add a simple text indicator for user context
+                    response_text += "\n\n---\n\n## Processing Flow Diagram\n\n*Your agent's processing flow is shown below.*"
+            except Exception:
+                logger.exception("[chat] failed to generate flow diagram")
+
+        response_text_for_zone = response_text if response_text else last_model_response
+        zone_required = _compute_zone_required(agent_state, response_text_for_zone)
+        awaiting_zone_input = _detect_zone_request(
+            response_text_for_zone,
+            agent_state.missing_fields,
+        )
+
+        return ChatMessageResponse(
+            response=response_text,
+            session_id=session_id,
+            status="success",
+            zone_required=zone_required,
+            awaiting_zone_input=awaiting_zone_input,
+            flow_diagram_data=flow_diagram_data,
+        )
+
+    async def _run_agent_stream(
+        self,
+        *,
+        runner: Runner,
+        user_id: str,
+        adk_session_id: str,
+        user_content: types.Content,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Run ADK and yield streaming deltas, then a final result chunk.
+
+        Yields:
+        - {"type": "token", "delta": "..."} for incremental text updates
+        - {"type": "result", "final_response_text": "...", "last_model_response": "..."} at the end
+        """
+        final_response_text = ""
+        last_model_response = ""
+        emitted_so_far = ""
+
+        async for event in runner.run_async(
+            user_id=user_id,
+            session_id=adk_session_id,
+            new_message=user_content,
+            run_config=RunConfig(streaming_mode=StreamingMode.SSE),
+        ):
+            if hasattr(event, "is_final_response") and event.is_final_response():
+                if hasattr(event, "content") and event.content:
+                    if isinstance(event.content, types.Content):
+                        for part in event.content.parts:
+                            if hasattr(part, "text") and part.text:
+                                final_response_text += part.text
+                    elif hasattr(event.content, "parts"):
+                        for part in event.content.parts:
+                            if hasattr(part, "text") and part.text:
+                                final_response_text += part.text
+                elif hasattr(event, "text") and event.text:
+                    final_response_text += event.text
+                continue
+
+            if hasattr(event, "author") and event.author != "user" and event.author:
+                event_text = ""
+                if hasattr(event, "content") and event.content:
+                    if isinstance(event.content, types.Content):
+                        for part in event.content.parts:
+                            if hasattr(part, "text") and part.text:
+                                event_text += part.text
+                    elif hasattr(event.content, "parts"):
+                        for part in event.content.parts:
+                            if hasattr(part, "text") and part.text:
+                                event_text += part.text
+                elif hasattr(event, "text") and event.text:
+                    event_text = event.text
+
+                if not event_text:
+                    continue
+
+                # Heuristic: if event_text is a growing prefix, only emit the delta.
+                delta = event_text
+                if emitted_so_far and event_text.startswith(emitted_so_far):
+                    delta = event_text[len(emitted_so_far) :]
+                elif not emitted_so_far and event_text:
+                    # first emission: treat as delta as-is
+                    delta = event_text
+
+                # Track latest full text
+                last_model_response = event_text
+                emitted_so_far = event_text
+
+                if delta:
+                    yield {"type": "token", "delta": delta}
+
+        yield {
+            "type": "result",
+            "final_response_text": final_response_text,
+            "last_model_response": last_model_response,
+            "emitted_text": emitted_so_far,
+        }
+
+    async def _get_or_create_adk_session(
+        self,
+        *,
+        app_name: str,
+        user_id: str,
+        session_id: Optional[str],
+    ) -> Tuple[object, str]:
+        """Get an existing ADK session or create a new one."""
+        adk_session = None
+
+        if session_id:
+            try:
+                adk_session = await self.session_service.get_session(
+                    app_name=app_name,
+                    user_id=user_id,
+                    session_id=session_id,
+                )
+            except Exception:
+                logger.debug("[chat] get_session failed; will create a new session", exc_info=True)
+                adk_session = None
+
+        if adk_session:
+            return adk_session, session_id  # type: ignore[return-value]
+
+        if not session_id:
+            session_id = self._create_session_id()
+
+        try:
+            adk_session = await self.session_service.create_session(
+                app_name=app_name,
+                user_id=user_id,
+                session_id=session_id,
+            )
+        except Exception:
+            # If create fails (e.g. already exists), try to get it again; otherwise create with a new ID.
+            logger.debug("[chat] create_session failed; retrying get_session", exc_info=True)
+            adk_session = await self.session_service.get_session(
+                app_name=app_name,
+                user_id=user_id,
+                session_id=session_id,
+            )
+            if not adk_session:
+                session_id = self._create_session_id()
+                adk_session = await self.session_service.create_session(
+                    app_name=app_name,
+                    user_id=user_id,
+                    session_id=session_id,
+                )
+
+        return adk_session, session_id  # type: ignore[return-value]
+
+    def _get_or_create_agent_cached(self, *, user_id: str, session_id: str) -> LlmAgent:
+        """Get or create the ADK agent instance for this (user_id, session_id)."""
+        cache_key = (user_id, session_id)
+        with ChatWithAgentUseCase._shared_agent_cache_lock:
+            agent = ChatWithAgentUseCase._shared_agent_cache.get(cache_key)
+            if agent is None:
+                agent = create_agent_for_session(session_id=session_id, user_id=user_id)
+                ChatWithAgentUseCase._shared_agent_cache[cache_key] = agent
+            return agent
+
+    def _build_user_message(self, *, request: ChatMessageRequest, session_id: str) -> str:
+        """Build the final user message, merging optional UI-provided fields."""
+        user_message = request.message
+
+        if request.zone_data:
+            zone_json = json.dumps(request.zone_data)
+            user_message = user_message + "\n\nZone data: " + zone_json
+
+        if request.camera_id:
+            from ....agents.session_state.agent_state import get_agent_state
+
+            agent_state = get_agent_state(session_id)
+            if agent_state.rule_id:
+                agent_state.fields["camera_id"] = request.camera_id
+                if "camera_id" in agent_state.missing_fields:
+                    agent_state.missing_fields.remove("camera_id")
+            else:
+                user_message = user_message + f"\n\nCamera ID: {request.camera_id}"
+
+        return user_message
+
+    async def _run_agent_and_collect_text(
+        self,
+        *,
+        runner: Runner,
+        user_id: str,
+        adk_session_id: str,
+        user_content: types.Content,
+    ) -> Tuple[str, str]:
+        """Run ADK and return (final_response_text, last_model_response)."""
+        final_response_text = ""
+        last_model_response = ""
+
+        async for event in runner.run_async(
+            user_id=user_id,
+            session_id=adk_session_id,
+            new_message=user_content,
+        ):
+            if hasattr(event, "is_final_response") and event.is_final_response():
+                if hasattr(event, "content") and event.content:
+                    if isinstance(event.content, types.Content):
+                        for part in event.content.parts:
+                            if hasattr(part, "text") and part.text:
+                                final_response_text += part.text
+                    elif hasattr(event.content, "parts"):
+                        for part in event.content.parts:
+                            if hasattr(part, "text") and part.text:
+                                final_response_text += part.text
+                elif hasattr(event, "text") and event.text:
+                    final_response_text += event.text
+            elif hasattr(event, "author") and event.author != "user" and event.author:
+                event_text = ""
+                if hasattr(event, "content") and event.content:
+                    if isinstance(event.content, types.Content):
+                        for part in event.content.parts:
+                            if hasattr(part, "text") and part.text:
+                                event_text += part.text
+                    elif hasattr(event.content, "parts"):
+                        for part in event.content.parts:
+                            if hasattr(part, "text") and part.text:
+                                event_text += part.text
+                elif hasattr(event, "text") and event.text:
+                    event_text = event.text
+
+                if event_text:
+                    last_model_response = event_text
+
+        return final_response_text, last_model_response
     
     def _create_session_id(self) -> str:
         """Generate a unique session ID"""

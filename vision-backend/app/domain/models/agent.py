@@ -2,6 +2,8 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
+from ...utils.datetime_utils import utc_now
+
 
 @dataclass
 class Agent:
@@ -33,4 +35,5 @@ class Agent:
         if not self.rules:
             raise ValueError("At least one rule is required")
         if self.created_at is None:
-            self.created_at = datetime.now()
+            # Store persisted timestamps as UTC. Mongo stores BSON dates as UTC.
+            self.created_at = utc_now()

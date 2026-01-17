@@ -9,10 +9,13 @@ from fastapi.responses import Response
 # Local application imports
 from ...application.dto.user_dto import UserResponse
 from ...application.use_cases.camera.get_camera import GetCameraUseCase
+from ...domain.repositories.agent_repository import AgentRepository
 from ...infrastructure.streaming import WsFmp4Service
 from ...di.container import get_container
+from ...processing.shared_store_registry import get_shared_store
 from .dependencies import get_current_user
 import logging
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -153,4 +156,101 @@ async def websocket_live_stream(websocket: WebSocket, camera_id: str) -> None:
         logger.error("WebSocket error for camera %s: %s", camera_id, e, exc_info=True)
     finally:
         await ws_service.remove_viewer(camera_id=camera_id, websocket=websocket)
+
+
+@router.websocket("/agents/{agent_id}/overlay/ws")
+async def websocket_agent_overlay(websocket: WebSocket, agent_id: str) -> None:
+    """
+    Agent overlay websocket endpoint (Option A):
+    - Keep camera video stream unchanged (fMP4)
+    - Stream only detection metadata for the selected agent
+
+    Client draws overlays (boxes/labels) over the camera video element.
+    """
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=1008, reason="Authentication token required")
+        return
+
+    # Authenticate from query token
+    try:
+        class MockCredentials:
+            credentials = token
+
+        current_user = await get_current_user(MockCredentials())
+    except Exception:
+        await websocket.close(code=1008, reason="Invalid or expired token")
+        return
+
+    container = get_container()
+    agent_repo: AgentRepository = container.get(AgentRepository)
+    agent = await agent_repo.find_by_id(agent_id)
+    if not agent or not agent.owner_user_id or str(agent.owner_user_id) != str(current_user.id):
+        await websocket.close(code=1008, reason="Agent not found or access denied")
+        return
+
+    shared_store = get_shared_store()
+    if shared_store is None:
+        await websocket.close(code=1011, reason="Shared store not initialized")
+        return
+
+    await websocket.accept()
+
+    last_frame_index = None
+    try:
+        while True:
+            entry = None
+            try:
+                entry = shared_store.get(agent_id, None)
+            except Exception:
+                entry = None
+
+            if not isinstance(entry, dict):
+                # No agent output yet (agent not running / no frames) - heartbeat
+                await websocket.send_json({"agent_id": agent_id, "status": "no_data"})
+                await asyncio.sleep(0.25)
+                continue
+
+            frame_index = entry.get("frame_index")
+            if frame_index is None or frame_index == last_frame_index:
+                await asyncio.sleep(0.03)
+                continue
+            last_frame_index = frame_index
+
+            shape = entry.get("shape") or ()
+            try:
+                height = int(shape[0])
+                width = int(shape[1])
+            except Exception:
+                height = None
+                width = None
+
+            det = entry.get("detections") or {}
+            boxes = det.get("boxes") or []
+            classes = det.get("classes") or []
+            scores = det.get("scores") or []
+
+            payload = {
+                "type": "agent_overlay",
+                "agent_id": agent_id,
+                "camera_id": getattr(agent, "camera_id", None),
+                "frame_index": frame_index,
+                "ts_monotonic": entry.get("ts_monotonic"),  # Timestamp for staleness check
+                "width": width,
+                "height": height,
+                "detections": {
+                    "boxes": boxes,
+                    "classes": classes,
+                    "scores": scores,
+                },
+            }
+            await websocket.send_json(payload)
+    except WebSocketDisconnect:
+        return
+    except Exception as e:
+        logger.error("WebSocket overlay error for agent %s: %s", agent_id, e, exc_info=True)
+        try:
+            await websocket.close(code=1011, reason="Overlay stream error")
+        except Exception:
+            pass
 

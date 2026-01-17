@@ -68,6 +68,34 @@ class Settings:
             "KAFKA_ENABLE_AUTO_COMMIT",
             "true"
         ).lower() == "true"
+        
+        # Event Session Configuration
+        self.event_session_timeout_seconds: Final[int] = int(
+            os.getenv("EVENT_SESSION_TIMEOUT_SECONDS", "30")
+        )
+        self.event_video_chunk_duration_seconds: Final[int] = int(
+            os.getenv("EVENT_VIDEO_CHUNK_DURATION_SECONDS", "300")  # 5 minutes
+        )
+        self.event_session_check_interval_seconds: Final[int] = int(
+            os.getenv("EVENT_SESSION_CHECK_INTERVAL_SECONDS", "5")
+        )
+        self.event_video_fps: Final[int] = int(
+            os.getenv("EVENT_VIDEO_FPS", "5")
+        )
+        self.event_video_resolution_width: Final[int] = int(
+            os.getenv("EVENT_VIDEO_RESOLUTION_WIDTH", "1280")
+        )
+        self.event_video_resolution_height: Final[int] = int(
+            os.getenv("EVENT_VIDEO_RESOLUTION_HEIGHT", "720")
+        )
+        # Event Video File Storage
+        self.event_video_save_directory: Final[str] = os.getenv(
+            "EVENT_VIDEO_SAVE_DIRECTORY",
+            os.path.join(os.getcwd(), "event_videos")  # Default: ./event_videos
+        )
+        self.event_video_save_enabled: Final[bool] = os.getenv(
+            "EVENT_VIDEO_SAVE_ENABLED", "true"
+        ).lower() in ("true", "1", "yes")
 
 
 # Global settings instance (singleton pattern)

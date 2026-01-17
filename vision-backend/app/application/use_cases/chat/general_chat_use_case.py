@@ -1,8 +1,10 @@
 """Use case for general chat with a simple Google ADK agent."""
+import json
 import uuid
-from typing import Optional
+from typing import Optional, AsyncGenerator, Dict, Any
 from google.adk.runners import Runner
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
+from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.genai import types
 
 from ...dto.chat_dto import ChatMessageRequest, ChatMessageResponse
@@ -164,6 +166,142 @@ class GeneralChatUseCase:
                 session_id=session_id,
                 status="error"
             )
+
+    async def stream_execute(
+        self,
+        *,
+        request: ChatMessageRequest,
+        user_id: Optional[str] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Stream general chat output as structured events.
+
+        Yields dict events:
+        - {"event": "meta", "data": {"session_id": "..."}}
+        - {"event": "token", "data": {"delta": "..."}}
+        - {"event": "done", "data": ChatMessageResponse-compatible dict}
+        - {"event": "error", "data": {"message": "..."}}
+        """
+        if not user_id:
+            user_id = "anonymous"
+
+        app_name = "general-chat"
+
+        # Get or create session (same logic as execute)
+        session_id = request.session_id
+        adk_session = None
+        if session_id:
+            try:
+                adk_session = await self.session_service.get_session(
+                    app_name=app_name,
+                    user_id=user_id,
+                    session_id=session_id,
+                )
+            except Exception:
+                adk_session = None
+
+        if not adk_session:
+            if not session_id:
+                session_id = self._create_session_id()
+            try:
+                adk_session = await self.session_service.create_session(
+                    app_name=app_name,
+                    user_id=user_id,
+                    session_id=session_id,
+                )
+            except Exception:
+                adk_session = await self.session_service.get_session(
+                    app_name=app_name,
+                    user_id=user_id,
+                    session_id=session_id,
+                )
+                if not adk_session:
+                    session_id = self._create_session_id()
+                    adk_session = await self.session_service.create_session(
+                        app_name=app_name,
+                        user_id=user_id,
+                        session_id=session_id,
+                    )
+
+        agent = create_general_chat_agent()
+        self._sessions[session_id] = (adk_session, agent)
+        self._session_user_map[session_id] = user_id
+
+        runner = Runner(app_name=app_name, agent=agent, session_service=self.session_service)
+        user_content = types.Content(role="user", parts=[types.Part(text=request.message)])
+
+        yield {"event": "meta", "data": {"session_id": session_id}}
+
+        emitted_so_far = ""
+        final_response_text = ""
+        last_model_response = ""
+
+        try:
+            async for event in runner.run_async(
+                user_id=user_id,
+                session_id=adk_session.id,
+                new_message=user_content,
+                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
+            ):
+                if hasattr(event, "is_final_response") and event.is_final_response():
+                    if hasattr(event, "content") and event.content:
+                        if isinstance(event.content, types.Content):
+                            for part in event.content.parts:
+                                if hasattr(part, "text") and part.text:
+                                    final_response_text += part.text
+                        elif hasattr(event.content, "parts"):
+                            for part in event.content.parts:
+                                if hasattr(part, "text") and part.text:
+                                    final_response_text += part.text
+                    elif hasattr(event, "text") and event.text:
+                        final_response_text += event.text
+                    continue
+
+                if hasattr(event, "author") and event.author != "user" and event.author:
+                    event_text = ""
+                    if hasattr(event, "content") and event.content:
+                        if isinstance(event.content, types.Content):
+                            for part in event.content.parts:
+                                if hasattr(part, "text") and part.text:
+                                    event_text += part.text
+                        elif hasattr(event.content, "parts"):
+                            for part in event.content.parts:
+                                if hasattr(part, "text") and part.text:
+                                    event_text += part.text
+                    elif hasattr(event, "text") and event.text:
+                        event_text = event.text
+
+                    if not event_text:
+                        continue
+
+                    delta = event_text
+                    if emitted_so_far and event_text.startswith(emitted_so_far):
+                        delta = event_text[len(emitted_so_far) :]
+
+                    last_model_response = event_text
+                    emitted_so_far = event_text
+
+                    if delta:
+                        yield {"event": "token", "data": {"delta": delta}}
+
+            response_to_return = final_response_text.strip() if final_response_text.strip() else last_model_response.strip()
+            if not response_to_return:
+                response_to_return = "I apologize, but I didn't receive a proper response."
+
+            final_response = ChatMessageResponse(
+                response=response_to_return,
+                session_id=session_id,
+                status="success",
+            )
+            yield {"event": "done", "data": final_response.model_dump()}
+        except Exception as e:
+            yield {"event": "error", "data": {"message": str(e)}}
+            final_response = ChatMessageResponse(
+                response=f"I encountered an error: {str(e)}. Please try again.",
+                session_id=session_id or self._create_session_id(),
+                status="error",
+            )
+            yield {"event": "done", "data": final_response.model_dump()}
     
     def _create_session_id(self) -> str:
         """Generate a unique session ID"""

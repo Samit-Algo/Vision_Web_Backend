@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from ..session_state.agent_state import AgentState
 from ...domain.models.agent import Agent
 from .kb_utils import get_rule
+import re
 
 
 def generate_agent_flow_diagram(agent: Agent) -> Dict[str, Any]:
@@ -125,6 +126,117 @@ def generate_agent_flow_diagram(agent: Agent) -> Dict[str, Any]:
     links.append({"source": "notification", "target": "frontend"})
 
     return {"nodes": nodes, "links": links}
+
+
+def generate_agent_flow_mermaid(agent: Agent) -> str:
+    """
+    Generate a Mermaid flow diagram (graph LR) for a saved agent.
+
+    Output is text-only Mermaid syntax suitable for fenced blocks:
+    ```mermaid
+    graph LR
+      ...
+    ```
+
+    This maps 1:1 to generate_agent_flow_diagram(...) output (nodes + links),
+    but rendered in Mermaid instead of ECharts.
+    """
+    diagram = generate_agent_flow_diagram(agent)
+    nodes = diagram.get("nodes") or []
+    links = diagram.get("links") or []
+
+    def _safe_id(name: str) -> str:
+        # Mermaid IDs should be simple. Keep underscores; replace others.
+        s = re.sub(r"[^a-zA-Z0-9_]", "_", str(name or "node"))
+        if not s:
+            s = "node"
+        if s[0].isdigit():
+            s = f"n_{s}"
+        return s
+
+    def _label_text(node: dict) -> str:
+        # Our diagram nodes store label.formatter; it contains \n for multi-line.
+        label = ""
+        try:
+            label = (node.get("label") or {}).get("formatter") or ""
+        except Exception:
+            label = ""
+        label = str(label)
+        # Shorten common labels to keep nodes compact in the chat panel.
+        # (Mermaid node size is largely driven by label length.)
+        replacements = {
+            "Frame Extraction": "Frames",
+            "AI Model": "Model",
+            "Object<br/>Detection": "Detect",
+            "Object\nDetection": "Detect",
+            "Rule<br/>Engine": "Rules",
+            "Rule\nEngine": "Rules",
+            "Event<br/>Generation": "Events",
+            "Event\nGeneration": "Events",
+            "Kafka<br/>Topic": "Kafka",
+            "Kafka\nTopic": "Kafka",
+            "MongoDB<br/>Database": "MongoDB",
+            "MongoDB\nDatabase": "MongoDB",
+            "WebSocket<br/>Notification": "Notify",
+            "WebSocket\nNotification": "Notify",
+            "Frontend<br/>Updates": "UI",
+            "Frontend\nUpdates": "UI",
+        }
+        for k, v in replacements.items():
+            label = label.replace(k, v)
+        # Mermaid supports <br/> for multi-line labels.
+        label = label.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br/>")
+        # Escape double quotes inside labels.
+        label = label.replace('"', '\\"')
+        return label
+
+    # Build node definitions so labels/shapes are preserved.
+    node_lines: List[str] = []
+    seen: set[str] = set()
+    for n in nodes:
+        raw_name = str(n.get("name") or "")
+        nid = _safe_id(raw_name)
+        if nid in seen:
+            continue
+        seen.add(nid)
+
+        label = _label_text(n)
+        symbol = str(n.get("symbol") or "")
+        # roundRect -> rectangular, diamond -> decision
+        if symbol == "diamond":
+            # Decision node
+            node_lines.append(f'  {nid}{{"{label}"}}')
+        else:
+            node_lines.append(f'  {nid}["{label}"]')
+
+    # Links
+    edge_lines: List[str] = []
+    for l in links:
+        s = _safe_id(str(l.get("source") or ""))
+        t = _safe_id(str(l.get("target") or ""))
+        lbl = ""
+        try:
+            lbl = (l.get("label") or {}).get("formatter") or ""
+        except Exception:
+            lbl = ""
+        lbl = str(lbl).strip()
+        lbl = lbl.replace('"', '\\"')
+        if lbl:
+            edge_lines.append(f'  {s} -- "{lbl}" --> {t}')
+        else:
+            edge_lines.append(f"  {s} --> {t}")
+
+    # Mermaid init directive: tighter spacing + smoother edges + consistent theme.
+    # Keeps layout compact and more readable in the chatbot panel.
+    init = (
+        '%%{init: {"flowchart":{"curve":"basis","nodeSpacing":18,"rankSpacing":28},'
+        '"theme":"base","themeVariables":{"fontSize":"11px","primaryColor":"#2A7BE4","primaryTextColor":"#ffffff",'
+        '"primaryBorderColor":"#1A5BBE","lineColor":"#6c757d","tertiaryColor":"#f8f9fa"}}}%%'
+    )
+    lines = [init, "graph LR"]
+    lines.extend(node_lines)
+    lines.extend(edge_lines)
+    return "\n".join(lines)
 
 
 def generate_agent_flow_diagram_from_state(

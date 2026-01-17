@@ -2,13 +2,15 @@
 
 import logging
 import base64
+import time
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, HTTPException, status, Depends, Response
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, HTTPException, status, Depends, Response, Request
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from ...core.security import decode_jwt_token
-from ...infrastructure.notifications import WebSocketManager
+from ...infrastructure.notifications import WebSocketManager, send_push_notification, send_push_notification_multicast
 from ...utils.event_storage import (
     EVENTS_BASE_DIR,
     get_video_chunk_path,
@@ -24,6 +26,9 @@ router = APIRouter(tags=["notifications"])
 
 # Global WebSocket manager (set from main.py)
 _global_websocket_manager: Optional[WebSocketManager] = None
+
+# In-memory storage for device tokens (simple list)
+_registered_device_tokens: List[str] = []
 
 
 def set_websocket_manager(manager: WebSocketManager) -> None:
@@ -341,4 +346,136 @@ async def get_video_chunk_metadata(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error retrieving video chunk metadata: {str(e)}"
         )
+
+
+# ============================================================================
+# Firebase Push Notification Endpoints
+# ============================================================================
+
+class DeviceTokenRequest(BaseModel):
+    """Request model for device token registration"""
+    token: str
+
+
+@router.post("/register-device", status_code=status.HTTP_200_OK)
+async def register_device_token(request: DeviceTokenRequest) -> Dict[str, Any]:
+    """
+    Register a mobile device FCM token for push notifications.
+    
+    Stores the token in memory (simple implementation).
+    In production, this should be stored in a database per user.
+    
+    Args:
+        request: Device token registration request
+        
+    Returns:
+        Success message with registered token count
+    """
+    global _registered_device_tokens
+    
+    token = request.token.strip()
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Token cannot be empty"
+        )
+    
+    # Add token if not already registered
+    if token not in _registered_device_tokens:
+        _registered_device_tokens.append(token)
+        logger.info(f"[notifications] ✅ Device token registered. Total tokens: {len(_registered_device_tokens)}")
+    else:
+        logger.debug(f"[notifications] Device token already registered")
+    
+    return {
+        "message": "Device token registered successfully",
+        "total_tokens": len(_registered_device_tokens)
+    }
+
+
+@router.post("/send-notification", status_code=status.HTTP_200_OK)
+async def send_notification(
+    request: Request,
+    title: Optional[str] = None,
+    body: Optional[str] = None,
+    image_path: Optional[str] = None,
+    token: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Send push notification to all registered mobile devices.
+    
+    This endpoint loops through all registered device tokens and sends
+    a push notification using Firebase Cloud Messaging.
+    
+    Args:
+        request: FastAPI request object (for building image URLs)
+        title: Notification title (default: "Vision Alert")
+        body: Notification body (default: "An event has been detected")
+        image_path: Optional path to event image (relative to events/ directory)
+        token: Optional FCM device token (for single device notification)
+    Returns:
+        Dictionary with notification results:
+        {
+            "message": "Notifications sent",
+            "total_tokens": int,
+            "success_count": int,
+            "failure_count": int
+        }
+    """
+    global _registered_device_tokens
+    
+    if not token and not _registered_device_tokens:
+        return {
+            "message": "No device tokens registered or provided",
+            "success_count": 0,
+            "failure_count": 0
+        }
+
+    # Default notification content
+    notification_title = title or "Vision Alert"
+    notification_body = body or "An event has been detected"
+    
+    # Build image URL if image_path is provided
+    image_url: Optional[str] = None
+    if image_path:
+        try:
+            # Construct full URL to the event image endpoint
+            base_url = str(request.base_url).rstrip('/')
+            # URL encode the path
+            from urllib.parse import quote
+            encoded_path = quote(image_path, safe='')
+            image_url = f"{base_url}/api/v1/notifications/event-image?path={encoded_path}"
+            logger.info(f"[notifications] Image URL: {image_url}")
+        except Exception as e:
+            logger.warning(f"[notifications] Failed to build image URL: {e}")
+            image_url = None
+    
+    if token:
+        result = send_push_notification(
+            token=token,
+            title=notification_title,
+            body=notification_body,
+            image_url=image_url,
+        )
+    else:
+        result = send_push_notification_multicast(
+            tokens=_registered_device_tokens,
+            title=notification_title,
+            body=notification_body,
+            image_url=image_url,
+        )
+
+    
+    # Send notifications to all registered tokens using multicast (more efficient)
+    logger.info(
+        f"[notifications] ✅ Push notifications sent: "
+        f"{result['success_count']} successful, {result['failure_count']} failed"
+    )
+    
+    return {
+        "message": "Notifications sent",
+        "total_tokens": len(_registered_device_tokens),
+        "success_count": result["success_count"],
+        "failure_count": result["failure_count"]
+    }
 

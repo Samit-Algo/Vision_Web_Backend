@@ -1,306 +1,191 @@
-"""Kafka Consumer for Vision Events
+"""
+Kafka Event Consumer (FastAPI side)
+==================================
 
-Consumes events from Kafka topic "vision-events" and stores them locally.
+Consumes vision event messages from Kafka and forwards them to connected
+frontend clients via WebSocket.
+
+Design goals for this project:
+- Minimal and simple (no retry/reconnect loops)
+- Runs inside the FastAPI process (so it can access WebSocketManager)
+- Safe to run alongside the asyncio event loop (consumer runs in a thread)
 """
 
+from __future__ import annotations
+
+import asyncio
 import json
 import logging
-import time
-import queue
-from typing import Optional, Dict, Any, Tuple
-from threading import Thread
+import threading
+from typing import Any, Dict, Optional
 
-try:
-    from kafka import KafkaConsumer
-    from kafka.errors import KafkaError
-    KAFKA_AVAILABLE = True
-except ImportError:
-    KAFKA_AVAILABLE = False
-    KafkaConsumer = None
-    KafkaError = Exception
+from kafka import KafkaConsumer  # type: ignore
+from kafka.errors import KafkaError, NoBrokersAvailable  # type: ignore
 
 from ...core.config import get_settings
-from ...utils.event_storage import save_event_from_payload, save_video_chunk_from_payload
+from ...infrastructure.notifications.notification_service import NotificationService
+from ...infrastructure.notifications.websocket_manager import WebSocketManager
 
 logger = logging.getLogger(__name__)
 
 
 class KafkaEventConsumer:
     """
-    Kafka consumer for vision events.
-    
-    Consumes events from the "vision-events" topic and stores them
-    to local files using the existing event storage utility.
-    Also broadcasts notifications to connected WebSocket clients.
+    Simple Kafka consumer that forwards messages to WebSocket clients.
+
+    Notes:
+    - This consumer is meant to run in the FastAPI process.
+    - It uses a background thread because kafka-python is blocking.
     """
-    
-    def __init__(self, websocket_manager: Optional[Any] = None, notification_service: Optional[Any] = None, notification_queue: Optional[queue.Queue] = None):
-        """
-        Initialize Kafka consumer.
-        
-        Args:
-            websocket_manager: Optional WebSocketManager instance for broadcasting notifications
-            notification_service: Optional NotificationService instance for formatting notifications
-            notification_queue: Optional queue.Queue for queuing notifications from Kafka thread to main event loop (thread-safe)
-        """
-        if not KAFKA_AVAILABLE:
-            raise ImportError(
-                "kafka-python is not installed. Install it with: pip install kafka-python"
-            )
-        
-        self.settings = get_settings()
-        self.consumer: Optional[KafkaConsumer] = None
-        self.is_running = False
-        self._consumer_thread: Optional[Thread] = None
-        self.websocket_manager = websocket_manager
-        self.notification_service = notification_service
-        self._notification_queue = notification_queue
-        
-    def _create_consumer(self) -> KafkaConsumer:
-        """
-        Create and configure Kafka consumer.
-        
-        Returns:
-            Configured KafkaConsumer instance
-        """
-        consumer = KafkaConsumer(
-            self.settings.kafka_topic,
-            bootstrap_servers=self.settings.kafka_bootstrap_servers.split(','),
-            group_id=self.settings.kafka_consumer_group_id,
-            value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-            auto_offset_reset=self.settings.kafka_auto_offset_reset,
-            enable_auto_commit=self.settings.kafka_enable_auto_commit,
-            consumer_timeout_ms=1000,  # Timeout for polling (1 second)
-        )
-        
-        logger.info(
-            f"Created Kafka consumer: topic={self.settings.kafka_topic}, "
-            f"bootstrap_servers={self.settings.kafka_bootstrap_servers}, "
-            f"group_id={self.settings.kafka_consumer_group_id}"
-        )
-        
-        return consumer
-    
-    def _process_message(self, message: Any) -> None:
-        """
-        Process a single Kafka message.
-        
-        Handles two types of messages:
-        1. event_notification: Immediate notification with single frame (sent via WebSocket)
-        2. event_video: Video chunk (stored only, not sent via WebSocket)
-        
-        Args:
-            message: Kafka message object with value, topic, partition, offset
-        """
-        try:
-            # Extract payload from message value
-            payload = message.value
-            print("event is received")
-            
-            if not payload:
-                print("received empty message")
-                logger.warning(f"Received empty message from {message.topic}[{message.partition}]:{message.offset}")
-                return
-            
-            # Determine message type
-            message_type = payload.get("type", "event_notification")  # Default to event_notification for backward compatibility
-            
-            # Extract metadata for logging
-            agent_info = payload.get("agent", {})
-            camera_id = agent_info.get("camera_id", "unknown")
-            agent_id = agent_info.get("agent_id", "unknown")
-            event_label = payload.get("event", {}).get("label", "unknown")
-            
-            logger.info(
-                f"Received {message_type} from Kafka: topic={message.topic}, "
-                f"partition={message.partition}, offset={message.offset}, "
-                f"agent_id={agent_id}, camera_id={camera_id}, label={event_label}"
-            )
-            
-            # Handle different message types
-            if message_type == "event_video":
-                # Video chunk: Store only, do NOT send via WebSocket
-                try:
-                    saved_paths = save_video_chunk_from_payload(payload)
-                    session_id = saved_paths.get("session_id", "unknown")
-                    chunk_number = saved_paths.get("chunk_number", "unknown")
-                    
-                    logger.info(
-                        f"Video chunk saved successfully: session_id={session_id}, "
-                        f"chunk_number={chunk_number}, paths={saved_paths}"
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"Failed to save video chunk: {e}",
-                        exc_info=True
-                    )
-                # Do not send video chunks via WebSocket
-                return
-            
-            else:
-                # event_notification: Save and send via WebSocket
-                try:
-                    # Save event using existing storage utility
-                    saved_paths = save_event_from_payload(payload)
-                    
-                    logger.info(
-                        f"Event saved successfully: agent_id={agent_id}, "
-                        f"camera_id={camera_id}, paths={saved_paths}"
-                    )
-                    
-                    # Broadcast notification to WebSocket clients if manager and service are available
-                    if self.websocket_manager and self.notification_service:
-                        try:
-                            # Extract owner_user_id from payload
-                            owner_user_id = self.notification_service.extract_owner_user_id(payload)
-                            
-                            if owner_user_id:
-                                # Queue raw payload for DB persistence + WS broadcast in main async loop.
-                                if self._notification_queue:
-                                    try:
-                                        self._notification_queue.put((owner_user_id, payload, saved_paths), block=False)
-                                        logger.info(
-                                            f"Notification queued for user {owner_user_id} for event: agent_id={agent_id}, "
-                                            f"camera_id={camera_id}, label={event_label}"
-                                        )
-                                    except queue.Full:
-                                        logger.warning(f"Notification queue full, dropping notification for user {owner_user_id}")
-                                    except Exception as e:
-                                        logger.error(f"Error queueing notification: {e}", exc_info=True)
-                            else:
-                                # Dev-friendly fallback: broadcast to all connected users.
-                                # Later you can tighten this by ensuring Jetson includes camera.owner_user_id
-                                # or by looking up owner_user_id from DB using camera_id.
-                                logger.warning(
-                                    f"Could not extract owner_user_id from event payload. "
-                                    f"Broadcasting to all users. agent_id={agent_id}, camera_id={camera_id}"
-                                )
-                                if self._notification_queue:
-                                    try:
-                                        self._notification_queue.put((None, payload, saved_paths), block=False)
-                                    except queue.Full:
-                                        logger.warning("Notification queue full, dropping broadcast notification")
-                                    except Exception as e:
-                                        logger.error(f"Error queueing broadcast notification: {e}", exc_info=True)
-                                
-                        except Exception as e:
-                            # Log error but don't fail event processing
-                            logger.error(
-                                f"Error preparing WebSocket notification for event: {e}",
-                                exc_info=True
-                            )
-                except Exception as e:
-                    logger.error(
-                        f"Failed to save event notification: {e}",
-                        exc_info=True
-                    )
-            
-        except json.JSONDecodeError as e:
-            logger.error(
-                f"Failed to decode JSON from message {message.topic}[{message.partition}]:{message.offset}: {e}"
-            )
-        except ValueError as e:
-            logger.error(
-                f"Invalid payload structure from {message.topic}[{message.partition}]:{message.offset}: {e}"
-            )
-        except Exception as e:
-            logger.error(
-                f"Error processing message from {message.topic}[{message.partition}]:{message.offset}: {e}",
-                exc_info=True
-            )
-    
-    def _consume_loop(self) -> None:
-        """
-        Main consumer loop (runs in separate thread).
-        
-        Continuously polls Kafka for messages and processes them.
-        """
-        try:
-            self.consumer = self._create_consumer()
-            self.is_running = True
-            
-            logger.info(f"Kafka consumer started, listening on topic: {self.settings.kafka_topic}")
-            
-            # Poll for messages continuously
-            while self.is_running:
-                try:
-                    # Poll for messages (timeout_ms is set in consumer config)
-                    message_pack = self.consumer.poll(timeout_ms=1000)
-                    
-                    if message_pack:
-                        # Process each message from each partition
-                        for topic_partition, messages in message_pack.items():
-                            for message in messages:
-                                self._process_message(message)
-                                
-                except KafkaError as e:
-                    logger.error(f"Kafka error while consuming: {e}", exc_info=True)
-                    # Wait a bit before retrying
-                    time.sleep(1)
-                except Exception as e:
-                    logger.error(f"Unexpected error in consume loop: {e}", exc_info=True)
-                    time.sleep(1)
-                    
-        except Exception as e:
-            logger.error(f"Fatal error in Kafka consumer: {e}", exc_info=True)
-            self.is_running = False
-        finally:
-            self._cleanup()
-    
+
+    def __init__(
+        self,
+        *,
+        websocket_manager: WebSocketManager,
+        notification_service: NotificationService,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        self._ws = websocket_manager
+        self._notification_service = notification_service
+        self._loop = loop
+
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._consumer: Optional[KafkaConsumer] = None
+
     def start(self) -> None:
-        """
-        Start the Kafka consumer in a background thread.
-        """
-        if self.is_running:
-            logger.warning("Kafka consumer is already running")
+        """Start the background consumer thread."""
+        if self._thread and self._thread.is_alive():
             return
-        
-        if self._consumer_thread and self._consumer_thread.is_alive():
-            logger.warning("Kafka consumer thread is already alive")
-            return
-        
-        logger.info("Starting Kafka consumer...")
-        self._consumer_thread = Thread(
-            target=self._consume_loop,
-            daemon=True,  # Thread dies when main program exits
-            name="KafkaEventConsumer"
+
+        self._thread = threading.Thread(
+            target=self._run,
+            name="KafkaEventConsumer",
+            daemon=True,
         )
-        self._consumer_thread.start()
-        
-        # Give it a moment to initialize
-        time.sleep(0.5)
-        
-        if self.is_running:
-            logger.info("Kafka consumer started successfully")
-        else:
-            logger.error("Failed to start Kafka consumer")
-    
+        self._thread.start()
+
     def stop(self) -> None:
-        """
-        Stop the Kafka consumer gracefully.
-        """
-        if not self.is_running:
+        """Stop the consumer thread (best-effort) and close Kafka consumer."""
+        self._stop_event.set()
+        try:
+            if self._consumer is not None:
+                self._consumer.close()
+        except Exception:
+            pass
+
+    def _run(self) -> None:
+        settings = get_settings()
+
+        try:
+            self._consumer = KafkaConsumer(
+                settings.kafka_topic,
+                bootstrap_servers=settings.kafka_bootstrap_servers,
+                group_id=settings.kafka_consumer_group_id,
+                auto_offset_reset=settings.kafka_auto_offset_reset,
+                enable_auto_commit=bool(settings.kafka_enable_auto_commit),
+                value_deserializer=lambda v: json.loads(v.decode("utf-8")) if v else None,
+            )
+        except NoBrokersAvailable as e:
+            # IMPORTANT: do not crash FastAPI if Kafka is not running.
+            print(f"[kafka_consumer] ⚠️ Kafka not available, consumer not started: {e}")
             return
-        
-        logger.info("Stopping Kafka consumer...")
-        self.is_running = False
-        
-        if self._consumer_thread:
-            self._consumer_thread.join(timeout=5.0)
-            if self._consumer_thread.is_alive():
-                logger.warning("Consumer thread did not stop within timeout")
-        
-        self._cleanup()
-        logger.info("Kafka consumer stopped")
-    
-    def _cleanup(self) -> None:
-        """Clean up consumer resources"""
-        if self.consumer:
+        except Exception as e:
+            print(f"[kafka_consumer] ❌ Failed to create Kafka consumer: {e}")
+            return
+
+        print(
+            f"[kafka_consumer] ✅ started | topic={settings.kafka_topic} | bootstrap={settings.kafka_bootstrap_servers}"
+        )
+
+        # Poll loop (no retry logic; any fatal error exits the thread)
+        try:
+            while not self._stop_event.is_set():
+                records = self._consumer.poll(timeout_ms=1000)
+                if not records:
+                    continue
+
+                for _tp, batch in records.items():
+                    for record in batch:
+                        payload = record.value
+                        if not isinstance(payload, dict):
+                            continue
+                        # Print receipt at consumer side (debug)
+                        try:
+                            ev = payload.get("event") or {}
+                            ag = payload.get("agent") or {}
+                            cam = payload.get("camera") or {}
+                            meta = payload.get("metadata") or {}
+                            print(
+                                "[kafka_consumer] 📥 received",
+                                {
+                                    "label": ev.get("label"),
+                                    "agent_id": ag.get("agent_id"),
+                                    "camera_id": ag.get("camera_id"),
+                                    "owner_user_id": cam.get("owner_user_id"),
+                                    "event_id": meta.get("event_id"),
+                                },
+                            )
+                        except Exception:
+                            print("[kafka_consumer] 📥 received (payload parse failed)")
+                        self._handle_payload(payload)
+        except KafkaError as e:
+            print(f"[kafka_consumer] ❌ Kafka consumer error, stopping: {e}")
+        except Exception as e:
+            print(f"[kafka_consumer] ❌ Unexpected error in Kafka consumer, stopping: {e}")
+        finally:
             try:
-                self.consumer.close()
-                logger.info("Kafka consumer closed")
-            except Exception as e:
-                logger.error(f"Error closing Kafka consumer: {e}")
-            finally:
-                self.consumer = None
+                self._consumer.close()
+            except Exception:
+                pass
+
+    def _handle_payload(self, payload: Dict[str, Any]) -> None:
+        # Determine recipient user (required for send_to_user)
+        owner_user_id = self._notification_service.extract_owner_user_id(payload)
+        if not owner_user_id:
+            print("[kafka_consumer] ⚠️ missing owner_user_id → skip websocket send")
+            return
+
+        # Keep event_id if provided (frontend expects payload.event_id)
+        event_id = None
+        try:
+            meta = payload.get("metadata") or {}
+            if isinstance(meta, dict):
+                event_id = meta.get("event_id")
+        except Exception:
+            event_id = None
+
+        notification = self._notification_service.format_event_notification(
+            event_payload=payload,
+            saved_paths=None,
+            event_id=str(event_id) if event_id else None,
+            include_frame_base64=False,
+        )
+
+        # Schedule async send on the FastAPI event loop.
+        print(f"[kafka_consumer] 📤 scheduling websocket send | user={owner_user_id} | event_id={event_id}")
+        future = asyncio.run_coroutine_threadsafe(
+            self._ws.send_to_user(str(owner_user_id), notification),
+            self._loop,
+        )
+        # We intentionally don't block (no retries / no wait).
+        try:
+            def _log_send_result(f: "asyncio.Future[int]") -> None:
+                try:
+                    exc = f.exception()
+                    if exc:
+                        print(f"[kafka_consumer] ❌ websocket send failed | user={owner_user_id} | err={exc}")
+                        return
+                    try:
+                        sent_count = f.result()
+                        print(f"[kafka_consumer] ✅ websocket sent | user={owner_user_id} | connections={sent_count}")
+                    except Exception:
+                        # ignore result parsing issues
+                        pass
+                except Exception:
+                    return
+
+            future.add_done_callback(_log_send_result)
+        except Exception:
+            pass
 

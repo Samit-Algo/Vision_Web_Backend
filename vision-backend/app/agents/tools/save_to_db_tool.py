@@ -9,6 +9,7 @@ from ..session_state.agent_state import get_agent_state, reset_agent_state
 from ...domain.models.agent import Agent
 from ...infrastructure.external.agent_client import AgentClient
 from .flow_diagram_utils import generate_agent_flow_diagram
+from ...utils.datetime_utils import utc_now
 
 # Enable nested event loops to allow asyncio.run() from within async contexts
 import nest_asyncio
@@ -191,7 +192,8 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
             "end_time": end_time,
             "requires_zone": requires_zone,
             "status": "PENDING",
-            "created_at": datetime.now(),
+            # Persist as BSON datetime (UTC) for consistent DB querying/serialization.
+            "created_at": utc_now(),
             "owner_user_id": user_id,
         }
         

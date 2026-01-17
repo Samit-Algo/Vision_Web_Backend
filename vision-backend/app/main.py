@@ -4,9 +4,8 @@ from contextlib import asynccontextmanager
 from typing import Optional, Tuple, Dict, Any
 import logging
 import asyncio
-import queue
-from datetime import datetime
-from zoneinfo import ZoneInfo
+import threading
+from multiprocessing import Manager
 
 # External package imports
 from dotenv import load_dotenv
@@ -16,146 +15,45 @@ from fastapi.middleware.cors import CORSMiddleware
 # Local application imports
 from .api.v1 import auth_router, camera_router, chat_router, general_chat_router, device_router, notifications_router, streaming_router, events_router
 from .api.v1.notifications_controller import set_websocket_manager
-from .infrastructure.messaging import KafkaEventConsumer
 from .infrastructure.notifications import WebSocketManager, NotificationService
 from .infrastructure.streaming import WsFmp4Service
+from .infrastructure.messaging import KafkaEventConsumer
 from .di.container import get_container
-from .domain.models.event import Event
-from .domain.repositories.event_repository import EventRepository
+from .processing.runner.runner import main as run_runner
+from .processing.shared_store_registry import set_shared_store
+from .utils.event_session_manager import get_event_session_manager
 
 logger = logging.getLogger(__name__)
 
 # Global instances
-_kafka_consumer: Optional[KafkaEventConsumer] = None
 _websocket_manager: Optional[WebSocketManager] = None
 _notification_service: Optional[NotificationService] = None
-_notification_queue: Optional[queue.Queue] = None
+_kafka_consumer: Optional[KafkaEventConsumer] = None
+_shared_store: Optional[Any] = None
+_runner_thread: Optional[threading.Thread] = None
 
 
-async def process_notification_queue():
+def get_websocket_manager() -> Optional[WebSocketManager]:
     """
-    Background task to process notifications from queue and send via WebSocket.
+    Get the global WebSocketManager instance.
     
-    This task runs continuously, processing notifications queued by the Kafka consumer
-    and sending them to connected WebSocket clients.
+    This allows other modules (like event_notifier) to access the WebSocketManager
+    to send notifications directly to connected clients.
     
-    Uses asyncio.to_thread() to poll the thread-safe queue in a non-blocking way.
+    Returns:
+        WebSocketManager instance if available, None otherwise
     """
-    global _notification_queue, _websocket_manager
+    return _websocket_manager
+
+
+def get_notification_service() -> Optional[NotificationService]:
+    """
+    Get the global NotificationService instance.
     
-    if not _notification_queue or not _websocket_manager:
-        logger.warning("Notification queue or WebSocket manager not available")
-        return
-    
-    logger.info("Notification queue processor started")
-    
-    def get_from_queue():
-        """Helper function to get from queue with timeout"""
-        try:
-            return _notification_queue.get(timeout=1.0)
-        except queue.Empty:
-            return None
-    
-    while True:
-        try:
-            # Poll queue using asyncio.to_thread to avoid blocking the event loop
-            result = await asyncio.to_thread(get_from_queue)
-            
-            if result is None:
-                # Queue is empty (timeout), continue polling
-                await asyncio.sleep(0.1)  # Small sleep to avoid busy-waiting
-                continue
-            
-            user_id, payload, saved_paths = result
-
-            # Persist event to DB (Mongo) in the main async loop (safe for Motor)
-            event_id = None
-            try:
-                container = get_container()
-                event_repo: EventRepository = container.get(EventRepository)
-
-                # Build a preview notification to reuse session_id construction logic
-                preview = _notification_service.format_event_notification(
-                    payload,
-                    saved_paths=saved_paths,
-                    event_id=None,
-                    include_frame_base64=False,
-                )
-
-                session_id = preview.get("session_id") or (payload.get("metadata", {}) or {}).get("session_id") or ""
-                label = (payload.get("event", {}) or {}).get("label", "Event")
-                rule_index = (payload.get("event", {}) or {}).get("rule_index")
-                camera_id = (payload.get("agent", {}) or {}).get("camera_id")
-                agent_id = (payload.get("agent", {}) or {}).get("agent_id")
-                agent_name = (payload.get("agent", {}) or {}).get("agent_name")
-                device_id = (payload.get("camera", {}) or {}).get("device_id")
-
-                # Parse event timestamp
-                event_ts = None
-                ts_raw = (payload.get("event", {}) or {}).get("timestamp")
-                try:
-                    if ts_raw:
-                        event_ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
-                except Exception:
-                    event_ts = None
-
-                # Simple backend severity inference (kept in sync with frontend heuristic)
-                sev_label = str(label or "").lower()
-                if any(k in sev_label for k in ["weapon", "fire", "fall", "intrusion"]):
-                    severity = "critical"
-                elif any(k in sev_label for k in ["violation", "restricted", "collision", "alert"]):
-                    severity = "warning"
-                else:
-                    severity = "info"
-
-                ev = Event(
-                    id=None,
-                    owner_user_id=user_id,
-                    session_id=session_id,
-                    label=label,
-                    severity=severity,
-                    rule_index=rule_index,
-                    camera_id=camera_id,
-                    agent_id=agent_id,
-                    agent_name=agent_name,
-                    device_id=device_id,
-                    event_ts=event_ts,
-                    received_at=datetime.utcnow(),
-                    image_path=saved_paths.get("image_path") if isinstance(saved_paths, dict) else None,
-                    json_path=saved_paths.get("json_path") if isinstance(saved_paths, dict) else None,
-                    metadata={
-                        **((payload.get("metadata", {}) or {})),
-                        **({"image_path": saved_paths.get("image_path")} if isinstance(saved_paths, dict) and saved_paths.get("image_path") else {}),
-                        **({"json_path": saved_paths.get("json_path")} if isinstance(saved_paths, dict) and saved_paths.get("json_path") else {}),
-                    },
-                )
-                event_id = await event_repo.create(ev)
-            except Exception as e:
-                logger.error(f"Error persisting event to DB: {e}", exc_info=True)
-
-            # Format notification payload (now includes event_id)
-            notification = _notification_service.format_event_notification(
-                payload,
-                saved_paths=saved_paths,
-                event_id=event_id,
-                include_frame_base64=False,
-            )
-
-            # If user_id is missing (e.g., Jetson payload didn't include owner_user_id),
-            # fall back to broadcasting to all connected clients (dev-friendly default).
-            if not user_id:
-                sent_count = await _websocket_manager.broadcast_to_all(notification)
-            else:
-                sent_count = await _websocket_manager.send_to_user(user_id, notification)
-            
-            if sent_count > 0:
-                logger.debug(f"Sent notification to {sent_count} connection(s) for user {user_id}")
-            
-        except asyncio.CancelledError:
-            logger.info("Notification queue processor cancelled")
-            break
-        except Exception as e:
-            logger.error(f"Error processing notification from queue: {e}", exc_info=True)
+    Returns:
+        NotificationService instance if available, None otherwise
+    """
+    return _notification_service
 
 
 @asynccontextmanager
@@ -163,17 +61,16 @@ async def lifespan(app: FastAPI):
     """
     Lifespan context manager for startup/shutdown events.
     
-    Initializes WebSocket manager, notification service, notification queue,
-    starts Kafka consumer, and background notification processor.
+    Initializes WebSocket manager, notification service,
+    Event Session Manager, and YOLO processing Runner.
     """
-    global _kafka_consumer, _websocket_manager, _notification_service, _notification_queue
+    global _websocket_manager, _notification_service, _kafka_consumer
+    global _shared_store, _runner_thread
     
     # Initialize WebSocket manager and notification service
     try:
         _websocket_manager = WebSocketManager()
         _notification_service = NotificationService()
-        # Use standard library queue for thread-safe communication between Kafka thread and async event loop
-        _notification_queue = queue.Queue(maxsize=1000)  # Max 1000 queued notifications
         
         # Set global WebSocket manager for notifications controller
         set_websocket_manager(_websocket_manager)
@@ -183,36 +80,59 @@ async def lifespan(app: FastAPI):
         logger.error(f"Failed to initialize notification services: {e}", exc_info=True)
         _websocket_manager = None
         _notification_service = None
-        _notification_queue = None
-    
-    # Start background task to process notification queue
-    notification_task = None
-    if _notification_queue and _websocket_manager:
-        try:
-            notification_task = asyncio.create_task(process_notification_queue())
-            logger.info("Notification queue processor task started")
-        except Exception as e:
-            logger.error(f"Failed to start notification queue processor: {e}", exc_info=True)
-    
-    # Startup: Start Kafka consumer
+
+    # Startup: Start Kafka consumer (FastAPI side) for realtime notifications
+    # IMPORTANT: no retry logic; if Kafka is down, we just log and continue.
     try:
-        _kafka_consumer = KafkaEventConsumer(
-            websocket_manager=_websocket_manager,
-            notification_service=_notification_service,
-            notification_queue=_notification_queue
-        )
-        _kafka_consumer.start()
-        logger.info("Kafka consumer started during application startup")
-    except ImportError as e:
-        logger.warning(
-            f"Kafka consumer not available (kafka-python not installed or Kafka unavailable): {e}. "
-            f"Events will not be consumed from Kafka."
-        )
-        _kafka_consumer = None
+        if _websocket_manager and _notification_service:
+            if KafkaEventConsumer is not None:
+                loop = asyncio.get_running_loop()
+                _kafka_consumer = KafkaEventConsumer(
+                    websocket_manager=_websocket_manager,
+                    notification_service=_notification_service,
+                    loop=loop,
+                )
+                _kafka_consumer.start()
+                logger.info("KafkaEventConsumer started")
     except Exception as e:
-        logger.error(f"Failed to start Kafka consumer: {e}", exc_info=True)
-        # Don't fail app startup if Kafka is unavailable
+        logger.warning(f"KafkaEventConsumer not started: {e}")
         _kafka_consumer = None
+    
+    # Startup: Initialize Event Session Manager
+    try:
+        session_manager = get_event_session_manager()  # This starts background workers
+        logger.info("Event Session Manager initialized and started")
+    except Exception as e:
+        logger.error(f"Failed to initialize Event Session Manager: {e}", exc_info=True)
+    
+    # Startup: Create shared store for runner (frame sharing between CameraPublisher and workers)
+    try:
+        manager = Manager()
+        _shared_store = manager.dict()
+        # Expose to other modules (e.g. streaming overlays)
+        set_shared_store(_shared_store)
+        logger.info("Shared store created for frame sharing")
+    except Exception as e:
+        logger.error(f"Failed to create shared store: {e}", exc_info=True)
+        _shared_store = None
+    
+    # Startup: Start Runner in background thread
+    # Runner will start CameraPublisher for each camera and Worker for each agent
+    try:
+        def run_runner_with_store():
+            run_runner(_shared_store)
+        
+        _runner_thread = threading.Thread(target=run_runner_with_store, daemon=True)
+        _runner_thread.start()
+        logger.info("YOLO processing Runner started in background thread")
+        logger.info("Waiting for CameraPublisher to initialize...")
+        
+        # Give CameraPublisher time to connect and start publishing
+        await asyncio.sleep(3)
+        logger.info("Runner initialization complete")
+    except Exception as e:
+        logger.error(f"Failed to start Runner: {e}", exc_info=True)
+        _runner_thread = None
     
     yield
     
@@ -225,25 +145,26 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error stopping live WS streams: {e}", exc_info=True)
     
-    # Shutdown: Stop background tasks and services
-    if notification_task:
-        try:
-            notification_task.cancel()
-            try:
-                await notification_task
-            except asyncio.CancelledError:
-                pass
-            logger.info("Notification queue processor task stopped")
-        except Exception as e:
-            logger.error(f"Error stopping notification queue processor: {e}", exc_info=True)
-    
-    if _kafka_consumer:
-        try:
+    # Shutdown: Stop Event Session Manager
+    try:
+        session_manager = get_event_session_manager()
+        session_manager.stop()
+        logger.info("Event Session Manager stopped")
+    except Exception as e:
+        logger.error(f"Error stopping Event Session Manager: {e}", exc_info=True)
+
+    # Shutdown: Stop Kafka consumer
+    try:
+        if _kafka_consumer:
             _kafka_consumer.stop()
-            logger.info("Kafka consumer stopped during application shutdown")
-        except Exception as e:
-            logger.error(f"Error stopping Kafka consumer: {e}", exc_info=True)
+            logger.info("KafkaEventConsumer stopped")
+    except Exception as e:
+        logger.error(f"Error stopping KafkaEventConsumer: {e}", exc_info=True)
     
+    # Shutdown: Cleanup complete
+    
+    # Note: Runner thread is daemon, so it will terminate when main process exits
+    # CameraPublisher and Worker processes are also daemon, so they will terminate automatically
     logger.info("Application shutdown complete")
 
 

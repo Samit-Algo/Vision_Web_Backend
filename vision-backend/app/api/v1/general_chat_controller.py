@@ -3,6 +3,7 @@ from typing import Optional
 from io import BytesIO
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
+import json
 
 from ...application.dto.chat_dto import ChatMessageRequest, ChatMessageResponse
 from ...application.dto.user_dto import UserResponse
@@ -42,6 +43,39 @@ async def general_chat_message(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"General chat error: {str(e)}"
         )
+
+
+@router.post("/message/stream")
+async def general_chat_message_stream(
+    request: ChatMessageRequest,
+    current_user: UserResponse = Depends(get_current_user),
+) -> StreamingResponse:
+    """
+    Stream a message to the general chat agent (token streaming via SSE).
+    """
+    general_chat_use_case = GeneralChatUseCase()
+
+    def _encode_sse(event_name: str, data: dict) -> bytes:
+        payload = json.dumps(data, ensure_ascii=False)
+        return (f"event: {event_name}\n" f"data: {payload}\n\n").encode("utf-8")
+
+    async def event_generator():
+        try:
+            async for item in general_chat_use_case.stream_execute(request=request, user_id=current_user.id):
+                ev = item.get("event") or "message"
+                data = item.get("data") or {}
+                yield _encode_sse(str(ev), data if isinstance(data, dict) else {"data": data})
+        except Exception as e:
+            yield _encode_sse("error", {"message": str(e)})
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/voice-message")

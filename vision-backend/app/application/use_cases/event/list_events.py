@@ -34,6 +34,7 @@ class ListEventsUseCase:
                     severity=e.severity,
                     rule_index=e.rule_index,
                     camera_id=e.camera_id,
+                    agent_id=e.agent_id,
                     agent_name=e.agent_name,
                     device_id=e.device_id,
                     event_ts=e.event_ts,
