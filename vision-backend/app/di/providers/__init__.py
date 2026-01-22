@@ -6,6 +6,7 @@ from .chat_provider import ChatProvider
 from .device_provider import DeviceProvider
 from .streaming_provider import StreamingProvider
 from .events_provider import EventsProvider
+from .audio_provider import AudioProvider
 
 
 __all__ = [
@@ -17,5 +18,6 @@ __all__ = [
     "DeviceProvider",
     "StreamingProvider",
     "EventsProvider",
+    "AudioProvider",
 ]
 

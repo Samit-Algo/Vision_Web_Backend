@@ -1,29 +1,70 @@
 """Use case for voice chat with audio input/output."""
 import logging
-from typing import Optional, Tuple
-from io import BytesIO
+import re
+from typing import Optional, Tuple, AsyncGenerator, Dict, Any
 
 from ...dto.chat_dto import ChatMessageRequest, ChatMessageResponse
-from ....infrastructure.external.groq_audio_service import GroqAudioService
-from .general_chat_use_case import GeneralChatUseCase
+from ...services.voice_chat_service import VoiceChatService
 
 logger = logging.getLogger(__name__)
+
+
+def _markdown_to_plain_text(markdown_text: str) -> str:
+    """
+    Best-effort conversion from markdown to plain text for TTS.
+    This keeps the content while stripping most formatting syntax.
+    """
+    if not markdown_text:
+        return ""
+
+    text = markdown_text
+
+    # Images: ![alt](url) -> alt
+    text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", text)
+    # Links: [text](url) -> text
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    # Inline code and code blocks: `code` or ```code``` -> code
+    text = re.sub(r"`{3}([\s\S]*?)`{3}", r"\1", text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    # Bold / italic markers: **text**, __text__, *text*, _text_ -> text
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = re.sub(r"__([^_]+)__", r"\1", text)
+    text = re.sub(r"\*([^*]+)\*", r"\1", text)
+    text = re.sub(r"_([^_]+)_", r"\1", text)
+    # Headings: "# Title" -> "Title"
+    text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
+    # Blockquotes: "> text" -> "text"
+    text = re.sub(r"^>\s*", "", text, flags=re.MULTILINE)
+    # List markers: "- ", "* ", "+ " at line start -> ""
+    text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.MULTILINE)
+    # Horizontal rules: --- or *** etc. -> ""
+    text = re.sub(r"^[-*_]{3,}\s*$", "", text, flags=re.MULTILINE)
+
+    # Collapse excessive whitespace/newlines
+    text = re.sub(r"\s+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+
+    return text.strip()
 
 
 class VoiceChatUseCase:
     """
     Use case for voice chat conversations.
     
-    Orchestrates the flow:
-    1. Audio → Text (Groq STT)
-    2. Text → LLM Response (GeneralChatUseCase)
-    3. LLM Response Text → Audio (Groq TTS)
+    This use case delegates to VoiceChatService for orchestration.
+    It provides the use case interface while keeping business logic in the service layer.
     """
     
-    def __init__(self):
-        """Initialize voice chat use case with dependencies."""
-        self.groq_audio_service = GroqAudioService()
-        self.general_chat_use_case = GeneralChatUseCase()
+    def __init__(self, voice_chat_service: Optional[VoiceChatService] = None):
+        """
+        Initialize voice chat use case.
+        
+        Args:
+            voice_chat_service: Optional VoiceChatService instance.
+                               If None, will be injected via DI container.
+        """
+        self.voice_chat_service = voice_chat_service
     
     async def execute(
         self,
@@ -44,61 +85,52 @@ class VoiceChatUseCase:
         Returns:
             Tuple of (audio_bytes, text_response, session_id):
             - audio_bytes: Generated audio response (WAV format)
-            - text_response: LLM text response (for debugging/display)
+            - text_response: LLM text response (for debugging/display, may contain markdown)
             - session_id: Session ID for maintaining conversation context
             
         Raises:
             Exception: If any step in the pipeline fails
         """
-        try:
-            # Step 1: Convert audio to text using Groq STT
-            logger.info("Step 1: Transcribing audio to text")
-            transcribed_text = await self.groq_audio_service.transcribe(
-                audio_bytes=audio_bytes,
-                filename=filename
-            )
+        if not self.voice_chat_service:
+            raise ValueError("VoiceChatService not initialized. Use DI container to inject dependencies.")
+        
+        # Delegate to service layer for orchestration
+        return await self.voice_chat_service.process_voice_chat(
+            audio_bytes=audio_bytes,
+            filename=filename,
+            session_id=session_id,
+            user_id=user_id
+        )
+    
+    async def stream_execute(
+        self,
+        audio_bytes: bytes,
+        filename: str = "audio.wav",
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Stream voice chat processing with real-time events.
+        
+        Args:
+            audio_bytes: Raw audio file bytes from user
+            filename: Original audio filename (for format detection)
+            session_id: Optional session ID for conversation continuity
+            user_id: User ID for session management
             
-            if not transcribed_text:
-                raise ValueError("Failed to transcribe audio - empty result")
-            
-            logger.info(f"Transcribed text: {transcribed_text[:100]}...")
-            
-            # Step 2: Send transcribed text to LLM using existing chat use case
-            logger.info("Step 2: Sending text to LLM")
-            chat_request = ChatMessageRequest(
-                message=transcribed_text,
-                session_id=session_id
-            )
-            
-            chat_response: ChatMessageResponse = await self.general_chat_use_case.execute(
-                request=chat_request,
-                user_id=user_id
-            )
-            
-            llm_text_response = chat_response.response
-            final_session_id = chat_response.session_id
-            
-            if not llm_text_response:
-                raise ValueError("LLM returned empty response")
-            
-            logger.info(f"LLM response: {llm_text_response[:100]}...")
-            
-            # Step 3: Convert LLM text response to audio using Groq TTS
-            logger.info("Step 3: Converting LLM response to audio")
-            audio_response_bytes = await self.groq_audio_service.synthesize(
-                text=llm_text_response
-            )
-            
-            if not audio_response_bytes:
-                raise ValueError("Failed to synthesize audio - empty result")
-            
-            logger.info(f"Generated audio: {len(audio_response_bytes)} bytes")
-            
-            # Return audio bytes, text response, and session ID
-            return (audio_response_bytes, llm_text_response, final_session_id)
-            
-        except Exception as e:
-            logger.error(f"Error in voice chat pipeline: {e}", exc_info=True)
-            # Re-raise to let controller handle error response
-            raise
-
+        Yields:
+            Dict with "event" and "data" keys
+        """
+        if not self.voice_chat_service:
+            raise ValueError("VoiceChatService not initialized. Use DI container to inject dependencies.")
+        
+        # Delegate to service layer for streaming orchestration
+        async for event in self.voice_chat_service.stream_process_voice_chat(
+            audio_bytes=audio_bytes,
+            filename=filename,
+            session_id=session_id,
+            user_id=user_id
+        ):
+            yield event
+        
+        

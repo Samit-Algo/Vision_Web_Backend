@@ -31,9 +31,22 @@ class Settings:
         self.memory_max_chars: Final[int] = int(os.getenv("MEMORY_MAX_CHARS", "1000"))
         self.local_timezone: Final[str] = os.getenv("LOCAL_TIMEZONE", "Asia/Kolkata")
         
-        # Groq TTS Configuration
+        # Audio Service Configuration (STT & TTS)
+        # Provider options: "groq" or "local"
+        self.stt_provider: Final[str] = os.getenv("STT_PROVIDER", "groq").lower()
+        self.tts_provider: Final[str] = os.getenv("TTS_PROVIDER", "groq").lower()
+        
+        # Groq Configuration
+        self.groq_stt_api_key: Final[str] = os.getenv("GROQ_API_KEY_voice", "")
+        self.groq_tts_api_key: Final[str] = os.getenv("GROQ_API_KEY_voice", "")
         self.groq_tts_model: Final[str] = os.getenv("GROQ_TTS_MODEL", "canopylabs/orpheus-v1-english")
         self.groq_tts_voice: Final[str] = os.getenv("GROQ_TTS_VOICE", "autumn")
+        
+        # Local Model Configuration
+        # Faster Whisper model size: tiny, base, small, medium, large, large-v2, large-v3
+        self.local_stt_model: Final[str] = os.getenv("LOCAL_STT_MODEL", "base")
+        # Edge TTS voice (e.g., "en-US-AriaNeural", "en-GB-SoniaNeural")
+        self.local_tts_voice: Final[str] = os.getenv("LOCAL_TTS_VOICE", "en-US-AriaNeural")
         
         # Jetson Backend Configuration
         self.jetson_backend_url: Final[str] = os.getenv(

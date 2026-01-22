@@ -15,6 +15,8 @@ class ChatMessageResponse(BaseModel):
     response: str
     session_id: str
     status: Optional[str] = None
+    # Context for UI (resolved/selected camera)
+    camera_id: Optional[str] = None
     # Zone UI control signals
     zone_required: bool = False  # Computed from state: requires_zone && zone is None
     awaiting_zone_input: bool = False  # LLM is currently asking for zone input

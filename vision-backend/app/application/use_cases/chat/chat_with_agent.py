@@ -87,19 +87,29 @@ def _compute_zone_required(agent_state, response_text: str = "") -> bool:
         return bool(requires_zone and zone is None)
     
     # State not initialized - check if agent is asking for zone in response
-    # If agent mentions "object_enter_zone" rule, zone is required
+    # Check for rules that require zone (object_enter_zone, class_count, etc.)
     if response_text:
         response_lower = response_text.lower()
-        # Check if response mentions object_enter_zone rule
-        if "object_enter_zone" in response_lower or "object enter zone" in response_lower:
-            # This rule always requires zone
-            from ....agents.tools.kb_utils import get_rule, compute_requires_zone
-            try:
-                rule = get_rule("object_enter_zone")
-                requires_zone = compute_requires_zone(rule, "continuous")  # Default to continuous
-                return requires_zone
-            except (ValueError, KeyError):
-                pass
+        
+        # Check for known rules that require zones
+        zone_required_rules = ["object_enter_zone", "class_count"]
+        
+        for rule_id in zone_required_rules:
+            # Check if response mentions this rule
+            rule_name_variants = [
+                rule_id,
+                rule_id.replace("_", " "),
+            ]
+            if any(variant in response_lower for variant in rule_name_variants):
+                # This rule requires zone
+                from ....agents.tools.kb_utils import get_rule, compute_requires_zone
+                try:
+                    rule = get_rule(rule_id)
+                    requires_zone = compute_requires_zone(rule, "continuous")  # Default to continuous
+                    if requires_zone:
+                        return True
+                except (ValueError, KeyError):
+                    pass
         
         # Also check if zone is in missing_fields (agent might have initialized but we're checking before state update)
         if "zone" in agent_state.missing_fields:
@@ -312,15 +322,18 @@ class ChatWithAgentUseCase:
                 agent_state = get_agent_state(session_id)
                 zone_required = _compute_zone_required(agent_state, "")
                 awaiting_zone_input = False
+                camera_id = agent_state.fields.get("camera_id")
             except Exception:
                 zone_required = False
                 awaiting_zone_input = False
+                camera_id = None
 
             msg = f"I encountered an error: {str(error)}. Please try again." if error else "I encountered an error."
             return ChatMessageResponse(
                 response=msg,
                 session_id=session_id,
                 status="error",
+                camera_id=camera_id,
                 zone_required=zone_required,
                 awaiting_zone_input=awaiting_zone_input,
             )
@@ -380,6 +393,7 @@ class ChatWithAgentUseCase:
             response=response_text,
             session_id=session_id,
             status="success",
+            camera_id=agent_state.fields.get("camera_id"),
             zone_required=zone_required,
             awaiting_zone_input=awaiting_zone_input,
             flow_diagram_data=flow_diagram_data,
@@ -529,8 +543,25 @@ class ChatWithAgentUseCase:
         user_message = request.message
 
         if request.zone_data:
-            zone_json = json.dumps(request.zone_data)
-            user_message = user_message + "\n\nZone data: " + zone_json
+            # If agent state is already initialized, set zone deterministically (do not rely on LLM parsing).
+            # Otherwise, fall back to appending zone JSON into the user message for rule selection stage.
+            try:
+                from ....agents.session_state.agent_state import get_agent_state
+
+                agent_state = get_agent_state(session_id)
+                if agent_state.rule_id:
+                    zone_payload = request.zone_data
+                    if isinstance(zone_payload, dict) and "zone" in zone_payload:
+                        zone_payload = zone_payload.get("zone")
+                    agent_state.fields["zone"] = zone_payload
+                    if "zone" in agent_state.missing_fields:
+                        agent_state.missing_fields.remove("zone")
+                else:
+                    zone_json = json.dumps(request.zone_data)
+                    user_message = user_message + "\n\nZone data: " + zone_json
+            except Exception:
+                zone_json = json.dumps(request.zone_data)
+                user_message = user_message + "\n\nZone data: " + zone_json
 
         if request.camera_id:
             from ....agents.session_state.agent_state import get_agent_state

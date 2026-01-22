@@ -1,5 +1,6 @@
 # Standard library imports
 from typing import Optional
+import subprocess
 
 # External package imports
 from fastapi import APIRouter, Depends, HTTPException, status, Request
@@ -98,6 +99,83 @@ async def get_stream_status(
         "viewers": viewers,
         "last_error": last_error,
     }
+
+
+@router.get("/{camera_id}/snapshot.jpg")
+async def get_camera_snapshot(
+    camera_id: str,
+    current_user: UserResponse = Depends(get_current_user),
+) -> Response:
+    """
+    Return a single JPEG snapshot for the given camera.
+
+    Used by the desktop chat UI when a rule requires the user to draw a zone.
+    """
+    camera = await get_camera_for_user(camera_id, current_user)
+    rtsp_url = getattr(camera, "stream_url", None)
+    if not rtsp_url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Camera does not have a stream URL configured",
+        )
+
+    # Use FFmpeg to grab exactly 1 frame as JPEG to stdout.
+    # This avoids requiring Pillow/OpenCV in the backend runtime.
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-rtsp_transport",
+        "tcp",
+        "-fflags",
+        "+discardcorrupt+nobuffer",
+        "-flags",
+        "low_delay",
+        "-use_wallclock_as_timestamps",
+        "1",
+        "-i",
+        rtsp_url,
+        "-an",
+        "-frames:v",
+        "1",
+        "-f",
+        "image2pipe",
+        "-vcodec",
+        "mjpeg",
+        "pipe:1",
+    ]
+
+    try:
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=6,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="Snapshot timed out")
+    except FileNotFoundError:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="ffmpeg not found on server")
+    except Exception as e:
+        logger.error("Snapshot capture failed for camera %s: %s", camera_id, e, exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Snapshot capture failed")
+
+    if proc.returncode != 0 or not proc.stdout:
+        err = (proc.stderr or b"").decode("utf-8", errors="ignore")[-500:]
+        logger.warning("Snapshot ffmpeg failed for camera %s: %s", camera_id, err)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to capture snapshot")
+
+    return Response(
+        content=proc.stdout,
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "no-store, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
 
 
 @router.websocket("/{camera_id}/live/ws")
