@@ -268,7 +268,22 @@ def send_event_to_backend_sync(
         label = event.get("label", "Unknown")
         severity = _infer_severity(label)
         
+        # Extract report from detections if present (class_count rule includes report in detections)
+        report = None
+        if detections and isinstance(detections, dict) and "rule_report" in detections:
+            report = detections.get("rule_report")
+        
         # Build event document (matches Event model structure)
+        metadata = {
+            "video_timestamp": video_timestamp,
+            "detections": _serialize_for_json(detections) if detections else None,
+            "session_id": session_id,
+        }
+        
+        # Include report in metadata if present (for class_count and similar reporting rules)
+        if report:
+            metadata["report"] = _serialize_for_json(report)
+        
         event_doc = {
             EventFields.OWNER_USER_ID: owner_user_id,
             EventFields.SESSION_ID: session_id or "",
@@ -283,11 +298,7 @@ def send_event_to_backend_sync(
             EventFields.RECEIVED_AT: utc_now(),
             EventFields.IMAGE_PATH: image_path,
             EventFields.JSON_PATH: None,  # Not used
-            EventFields.METADATA: {
-                "video_timestamp": video_timestamp,
-                "detections": _serialize_for_json(detections) if detections else None,
-                "session_id": session_id,
-            },
+            EventFields.METADATA: metadata,
         }
         
         # 1. Insert event to MongoDB

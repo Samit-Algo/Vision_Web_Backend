@@ -42,6 +42,9 @@ class Settings:
         self.groq_tts_model: Final[str] = os.getenv("GROQ_TTS_MODEL", "canopylabs/orpheus-v1-english")
         self.groq_tts_voice: Final[str] = os.getenv("GROQ_TTS_VOICE", "autumn")
         
+        # VLM Configuration (Vision Language Model for weapon detection)
+        self.vlm_model: Final[str] = os.getenv("VLM_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+        
         # Local Model Configuration
         # Faster Whisper model size: tiny, base, small, medium, large, large-v2, large-v3
         self.local_stt_model: Final[str] = os.getenv("LOCAL_STT_MODEL", "base")

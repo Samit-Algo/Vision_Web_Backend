@@ -327,6 +327,73 @@
           "confidence": 0.75,
           "run_mode": "continuous"
         }
+      },
+
+      {
+        "rule_id": "class_count",
+        "rule_name": "Class Count",
+        "description": "Counts how many objects of a specific class are present (optionally within a zone).",
+      
+        "intent_examples": [
+          "How many people are in this classroom?",
+          "Count how many cars are in the parking lot",
+          "How many people are present in this area?"
+        ],
+      
+        "model": "yolov8n.pt",
+      
+        "detectable_classes": [
+          "person",
+          "car",
+          "dog",
+          "chair"
+        ],
+      
+        "required_fields_from_user": [
+          "class"
+        ],
+      
+        "time_window": {
+          "supported": true,
+          "required": true
+        },
+      
+        "zone_support": {
+          "supported": true,
+          "required": true
+        },
+      
+        "execution_modes": {
+          "continuous": {
+            "description": "Continuously counts objects in the zone",
+            "required_fields": [],
+            "forbidden_fields": [
+              "interval_minutes",
+              "check_duration_seconds"
+            ],
+            "zone_required": true
+          },
+      
+          "patrol": {
+            "description": "Counts objects in the zone periodically",
+            "required_fields": [
+              "interval_minutes",
+              "check_duration_seconds"
+            ],
+            "zone_required": true
+          }
+        },
+      
+        "rules_config_fields": [
+          "class",
+          "label"
+        ],
+      
+        "defaults": {
+          "fps": 1,
+          "confidence": 0.7,
+          "run_mode": "continuous"
+        }
       }
       
       
