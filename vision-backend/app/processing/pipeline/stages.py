@@ -56,16 +56,24 @@ def inference_stage(
     frame = frame_packet.frame
     detection_packets: List[DetectionPacket] = []
     
+    if not models:
+        print(f"[worker {context.task_id}] ⚠️ No models loaded!")
+        return detection_packets
+    
     for model in models:
         try:
             results = model(frame, verbose=False)
         except Exception as exc:  # noqa: BLE001
             print(f"[worker {context.task_id}] ⚠️ YOLO error: {exc}")
+            import traceback
+            print(f"[worker {context.task_id}] Traceback: {traceback.format_exc()}")
             continue
         if results:
             first_result = results[0]
             packet = DetectionBuilder.from_yolo_result(first_result, now())
             detection_packets.append(packet)
+            # Debug: Log detection counts
+            print(f"[worker {context.task_id}] 🎯 YOLO inference: {len(packet.boxes)} objects detected")
     
     return detection_packets
 

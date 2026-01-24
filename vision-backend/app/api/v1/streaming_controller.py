@@ -308,6 +308,14 @@ async def websocket_agent_overlay(websocket: WebSocket, agent_id: str) -> None:
             classes = det.get("classes") or []
             scores = det.get("scores") or []
 
+            # Include zone data if agent has it configured
+            zone_data = None
+            if agent and hasattr(agent, "zone") and agent.zone:
+                zone_data = agent.zone
+            
+            # Get zone violation status from entry
+            zone_violated = entry.get("zone_violated", False)
+            
             payload = {
                 "type": "agent_overlay",
                 "agent_id": agent_id,
@@ -321,6 +329,8 @@ async def websocket_agent_overlay(websocket: WebSocket, agent_id: str) -> None:
                     "classes": classes,
                     "scores": scores,
                 },
+                "zone": zone_data,  # Include zone polygon/line for visualization
+                "zone_violated": zone_violated,  # Include zone violation status
             }
             await websocket.send_json(payload)
     except WebSocketDisconnect:

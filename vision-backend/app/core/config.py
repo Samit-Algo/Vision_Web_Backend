@@ -13,77 +13,77 @@ class Settings:
     
     def __init__(self) -> None:
         # Database Configuration
-        self.mongo_uri: Final[str] = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-        self.mongo_database_name: Final[str] = os.getenv("MONGO_DB_NAME", "algo_vision_app_cloud")
+        self.mongo_uri: Final[str] = os.getenv("MONGO_URI", "mongodb://localhost:27017").split('#')[0].strip()
+        self.mongo_database_name: Final[str] = os.getenv("MONGO_DB_NAME", "algo_vision_app_cloud").split('#')[0].strip()
         
         # JWT Configuration
-        self.jwt_secret_key: Final[str] = os.getenv("JWT_SECRET_KEY", "change_this_secret_in_production")
-        self.jwt_algorithm: Final[str] = os.getenv("JWT_ALGORITHM", "HS256")
+        self.jwt_secret_key: Final[str] = os.getenv("JWT_SECRET_KEY", "change_this_secret_in_production").split('#')[0].strip()
+        self.jwt_algorithm: Final[str] = os.getenv("JWT_ALGORITHM", "HS256").split('#')[0].strip()
         self.access_token_expire_minutes: Final[int] = int(
-            os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440")
+            os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440").split('#')[0].strip()
         )
         
         # Chat/LLM Configuration
-        self.groq_api_key: Final[str] = os.getenv("GROQ_API_KEY", "")
-        self.llm_temperature: Final[float] = float(os.getenv("LLM_TEMPERATURE", "0.2"))
-        self.llm_model: Final[str] = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
-        self.memory_recent_limit: Final[int] = int(os.getenv("MEMORY_RECENT_LIMIT", "12"))
-        self.memory_max_chars: Final[int] = int(os.getenv("MEMORY_MAX_CHARS", "1000"))
-        self.local_timezone: Final[str] = os.getenv("LOCAL_TIMEZONE", "Asia/Kolkata")
+        self.groq_api_key: Final[str] = os.getenv("GROQ_API_KEY", "").split('#')[0].strip()
+        self.llm_temperature: Final[float] = float(os.getenv("LLM_TEMPERATURE", "0.2").split('#')[0].strip())
+        self.llm_model: Final[str] = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile").split('#')[0].strip()
+        self.memory_recent_limit: Final[int] = int(os.getenv("MEMORY_RECENT_LIMIT", "12").split('#')[0].strip())
+        self.memory_max_chars: Final[int] = int(os.getenv("MEMORY_MAX_CHARS", "1000").split('#')[0].strip())
+        self.local_timezone: Final[str] = os.getenv("LOCAL_TIMEZONE", "Asia/Kolkata").split('#')[0].strip()
         
         # Audio Service Configuration (STT & TTS)
         # Provider options: "groq" or "local"
-        self.stt_provider: Final[str] = os.getenv("STT_PROVIDER", "groq").lower()
-        self.tts_provider: Final[str] = os.getenv("TTS_PROVIDER", "groq").lower()
+        self.stt_provider: Final[str] = os.getenv("STT_PROVIDER", "groq").split('#')[0].strip().lower()
+        self.tts_provider: Final[str] = os.getenv("TTS_PROVIDER", "groq").split('#')[0].strip().lower()
         
         # Groq Configuration
-        self.groq_stt_api_key: Final[str] = os.getenv("GROQ_API_KEY_voice", "")
-        self.groq_tts_api_key: Final[str] = os.getenv("GROQ_API_KEY_voice", "")
-        self.groq_tts_model: Final[str] = os.getenv("GROQ_TTS_MODEL", "canopylabs/orpheus-v1-english")
-        self.groq_tts_voice: Final[str] = os.getenv("GROQ_TTS_VOICE", "autumn")
+        self.groq_stt_api_key: Final[str] = os.getenv("GROQ_API_KEY_voice", "").split('#')[0].strip()
+        self.groq_tts_api_key: Final[str] = os.getenv("GROQ_API_KEY_voice", "").split('#')[0].strip()
+        self.groq_tts_model: Final[str] = os.getenv("GROQ_TTS_MODEL", "canopylabs/orpheus-v1-english").split('#')[0].strip()
+        self.groq_tts_voice: Final[str] = os.getenv("GROQ_TTS_VOICE", "autumn").split('#')[0].strip()
         
         # VLM Configuration (Vision Language Model for weapon detection)
-        self.vlm_model: Final[str] = os.getenv("VLM_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+        self.vlm_model: Final[str] = os.getenv("VLM_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct").split('#')[0].strip()
         
         # Local Model Configuration
         # Faster Whisper model size: tiny, base, small, medium, large, large-v2, large-v3
-        self.local_stt_model: Final[str] = os.getenv("LOCAL_STT_MODEL", "base")
+        self.local_stt_model: Final[str] = os.getenv("LOCAL_STT_MODEL", "base").split('#')[0].strip()
         # Edge TTS voice (e.g., "en-US-AriaNeural", "en-GB-SoniaNeural")
-        self.local_tts_voice: Final[str] = os.getenv("LOCAL_TTS_VOICE", "en-US-AriaNeural")
+        self.local_tts_voice: Final[str] = os.getenv("LOCAL_TTS_VOICE", "en-US-AriaNeural").split('#')[0].strip()
         
         # Jetson Backend Configuration
         self.jetson_backend_url: Final[str] = os.getenv(
             "JETSON_BACKEND_URL",
             "http://localhost:8001"
-        )
+        ).split('#')[0].strip()
         
         # Web Backend Configuration (for Jetson backend to connect back)
         self.web_backend_url: Final[str] = os.getenv(
             "WEB_BACKEND_URL",
             "http://localhost:8000"
-        )
+        ).split('#')[0].strip()
         
         # Kafka Configuration
         self.kafka_bootstrap_servers: Final[str] = os.getenv(
             "KAFKA_BOOTSTRAP_SERVERS",
             "localhost:9092"
-        )
+        ).split('#')[0].strip()
         self.kafka_topic: Final[str] = os.getenv(
             "KAFKA_TOPIC",
             "vision-events"
-        )
+        ).split('#')[0].strip()
         self.kafka_consumer_group_id: Final[str] = os.getenv(
             "KAFKA_CONSUMER_GROUP_ID",
             "vision-backend-consumer"
-        )
+        ).split('#')[0].strip()
         self.kafka_auto_offset_reset: Final[str] = os.getenv(
             "KAFKA_AUTO_OFFSET_RESET",
             "latest"
-        )
+        ).split('#')[0].strip()
         self.kafka_enable_auto_commit: Final[bool] = os.getenv(
             "KAFKA_ENABLE_AUTO_COMMIT",
             "true"
-        ).lower() == "true"
+        ).split('#')[0].strip().lower() == "true"
         
         # Event Session Configuration
         self.event_session_timeout_seconds: Final[int] = int(

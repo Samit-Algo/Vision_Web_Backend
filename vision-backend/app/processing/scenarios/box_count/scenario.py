@@ -1,10 +1,12 @@
 """
-Class Count Scenario
---------------------
+Box Count Scenario
+------------------
 
-Counts detections of a specified class with two modes:
+Counts boxes (or specified class) with two modes:
 1. Simple per-frame counting (no zone)
-2. Line-based counting with tracking (objects crossing a line)
+2. Line-based counting with tracking (boxes crossing a line)
+
+Same as ClassCountScenario but defaults to "box" class.
 """
 
 from typing import List, Dict, Any, Optional
@@ -15,7 +17,7 @@ from app.processing.scenarios.contracts import (
     ScenarioEvent
 )
 from app.processing.scenarios.registry import register_scenario
-from app.processing.scenarios.class_count.config import ClassCountConfig
+from app.processing.scenarios.box_count.config import BoxCountConfig
 from app.processing.scenarios.class_count.counter import (
     count_class_detections,
     generate_count_label,
@@ -25,21 +27,19 @@ from app.processing.scenarios.class_count.reporter import generate_report
 from app.processing.scenarios.tracking import SimpleTracker, LineCrossingCounter
 
 
-@register_scenario("class_count")
-class ClassCountScenario(BaseScenario):
+@register_scenario("box_count")
+class BoxCountScenario(BaseScenario):
     """
-    Counts class detections with optional line crossing.
+    Counts boxes with optional line crossing.
     
-    Modes:
-    - No zone: Simple per-frame count
-    - Line zone: Counts objects crossing the line (with tracking)
+    Same as class_count but defaults to "box" class.
     """
     
     def __init__(self, config: Dict[str, Any], pipeline_context):
         super().__init__(config, pipeline_context)
         
         # Load configuration
-        self.config_obj = ClassCountConfig(config, pipeline_context.task)
+        self.config_obj = BoxCountConfig(config, pipeline_context.task)
         
         # Initialize tracker and line counter for line-based counting
         self.tracker: Optional[SimpleTracker] = None
@@ -132,7 +132,7 @@ class ClassCountScenario(BaseScenario):
         
         # Emit event
         event = ScenarioEvent(
-            event_type="class_count",
+            event_type="box_count",
             label=label,
             confidence=1.0,
             metadata={
@@ -178,7 +178,7 @@ class ClassCountScenario(BaseScenario):
         
         # Emit event
         event = ScenarioEvent(
-            event_type="class_count",
+            event_type="box_count",
             label=label,
             confidence=1.0,
             metadata={
@@ -216,9 +216,9 @@ class ClassCountScenario(BaseScenario):
             if direction == "both":
                 return f"{target_class} count: {net_count} (IN: {entry_count}, OUT: {exit_count})"
             elif direction == "entry":
-                return f"{entry_count} {target_class}(s) entered"
+                return f"{entry_count} {target_class}(s) crossed in"
             else:  # exit
-                return f"{exit_count} {target_class}(s) exited"
+                return f"{exit_count} {target_class}(s) crossed out"
     
     def _match_tracks_to_detections(self, tracks: List, detections) -> List[int]:
         """Match active tracks to detection indices for visualization."""

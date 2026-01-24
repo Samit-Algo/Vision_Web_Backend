@@ -1,15 +1,16 @@
 """
-Class Count Configuration
---------------------------
+Box Count Configuration
+-----------------------
 
-Handles configuration parsing for class count scenario.
+Handles configuration parsing for box count scenario.
+Same as class_count but defaults to "box" class.
 """
 
 from typing import Optional, Dict, Any, List
 
 
-class ClassCountConfig:
-    """Configuration for class count scenario."""
+class BoxCountConfig:
+    """Configuration for box count scenario."""
     
     def __init__(self, config: Dict[str, Any], task: Dict[str, Any]):
         """
@@ -19,7 +20,8 @@ class ClassCountConfig:
             config: Configuration dictionary from rule/task
             task: Full task dictionary (for zone info)
         """
-        self.target_class = str(config.get("class") or "").strip().lower()
+        # Default to "box" if no class specified
+        self.target_class = str(config.get("class") or "box").strip().lower()
         self.custom_label = config.get("label")
         
         # Zone configuration (from config or task)

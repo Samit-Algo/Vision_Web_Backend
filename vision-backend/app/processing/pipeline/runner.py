@@ -325,8 +325,34 @@ class PipelineRunner:
             frame_bytes = processed_frame.tobytes()
             height, width = processed_frame.shape[0], processed_frame.shape[1]
             
-            # Filter overlay detections using matched_detection_indices
-            if all_matched_indices:
+            # For restricted zone scenarios: show ALL person detections, not just those in zone
+            # For other scenarios: show only matched detections
+            zone_violated = False
+            target_class = None
+            
+            # Check if this is a restricted zone scenario
+            is_restricted_zone = False
+            if hasattr(self.context, '_scenario_instances'):
+                for scenario_instance in self.context._scenario_instances.values():
+                    # Check if this is a restricted zone scenario
+                    if hasattr(scenario_instance, 'config_obj') and hasattr(scenario_instance.config_obj, 'target_class'):
+                        is_restricted_zone = True
+                        target_class = scenario_instance.config_obj.target_class
+                        # Check if zone is violated
+                        if hasattr(scenario_instance, '_state'):
+                            state = scenario_instance._state
+                            if state.get('objects_in_zone', False):
+                                zone_violated = True
+                        break
+            
+            # Filter detections based on scenario type
+            if is_restricted_zone and target_class:
+                # Show ALL detections of target class (e.g., all persons)
+                f_boxes, f_classes, f_scores = self._filter_detections_by_class(
+                    target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores
+                )
+            elif all_matched_indices:
+                # Other scenarios: show only matched detections
                 unique_indices = sorted(set(all_matched_indices))
                 f_boxes, f_classes, f_scores = self._filter_detections_by_indices(
                     unique_indices, merged_packet.boxes, merged_packet.classes, merged_packet.scores
@@ -352,6 +378,7 @@ class PipelineRunner:
                 },
                 "rules": self.context.rules,
                 "camera_id": self.context.camera_id,
+                "zone_violated": zone_violated,  # Add zone violation status
             }
             
             return processed_frame
@@ -366,17 +393,59 @@ class PipelineRunner:
         classes: List[str],
         scores: List[float],
     ) -> tuple[List[List[float]], List[str], List[float]]:
-        """Filter detections to only those at specified indices."""
+        """Filter detections to only those at specified indices with confidence >= 0.7."""
         if not indices:
             return [], [], []
         f_boxes: List[List[float]] = []
         f_classes: List[str] = []
         f_scores: List[float] = []
+        confidence_threshold = 0.7  # Minimum confidence level
+        
         for idx in indices:
             if 0 <= idx < len(boxes) and idx < len(classes) and idx < len(scores):
-                f_boxes.append(boxes[idx])
-                f_classes.append(classes[idx])
-                f_scores.append(scores[idx])
+                # Apply confidence threshold
+                if scores[idx] >= confidence_threshold:
+                    f_boxes.append(boxes[idx])
+                    f_classes.append(classes[idx])
+                    f_scores.append(scores[idx])
+        return f_boxes, f_classes, f_scores
+    
+    def _filter_detections_by_class(
+        self,
+        target_class: str,
+        boxes: List[List[float]],
+        classes: List[str],
+        scores: List[float],
+    ) -> tuple[List[List[float]], List[str], List[float]]:
+        """Filter detections to only those matching target class (e.g., 'person') with confidence >= 0.7."""
+        f_boxes: List[List[float]] = []
+        f_classes: List[str] = []
+        f_scores: List[float] = []
+        target_lower = target_class.lower()
+        confidence_threshold = 0.7  # Minimum confidence level
+        
+        # Debug: Log all detected classes
+        if len(classes) > 0:
+            unique_classes = set(cls.lower() if isinstance(cls, str) else str(cls) for cls in classes)
+            print(f"[worker {self.context.task_id}] 🔍 YOLO detected classes: {unique_classes} (total: {len(classes)} objects)")
+        
+        filtered_count = 0
+        for idx, (box, cls, score) in enumerate(zip(boxes, classes, scores)):
+            if isinstance(cls, str) and cls.lower() == target_lower:
+                # Apply confidence threshold
+                if score >= confidence_threshold:
+                    f_boxes.append(box)
+                    f_classes.append(cls)
+                    f_scores.append(score)
+                else:
+                    filtered_count += 1
+        
+        # Debug: Log filtering results
+        if len(f_boxes) > 0:
+            print(f"[worker {self.context.task_id}] ✅ Found {len(f_boxes)} '{target_class}' detections (confidence >= {confidence_threshold})")
+        if filtered_count > 0:
+            print(f"[worker {self.context.task_id}] 🔽 Filtered out {filtered_count} low-confidence '{target_class}' detections (< {confidence_threshold})")
+        
         return f_boxes, f_classes, f_scores
     
     def _handle_event(

@@ -31,7 +31,7 @@ def get_shared_http_client() -> httpx.AsyncClient:
                 max_connections=100,
                 keepalive_expiry=30.0,
             ),
-            http2=True,  # Enable HTTP/2 for better performance
+            http2=False,  # Enable HTTP/2 for better performance
         )
         logger.info("Created shared HTTP client for connection pooling")
     

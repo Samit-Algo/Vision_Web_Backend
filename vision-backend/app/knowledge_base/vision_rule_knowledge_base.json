@@ -332,21 +332,25 @@
       {
         "rule_id": "class_count",
         "rule_name": "Class Count",
-        "description": "Counts how many objects of a specific class are present (optionally within a zone).",
+        "description": "Counts objects of a specific class. Can count objects crossing a line (requires 2 points) using tracking, or simple per-frame counting without a zone.",
       
         "intent_examples": [
-          "How many people are in this classroom?",
-          "Count how many cars are in the parking lot",
-          "How many people are present in this area?"
+          "Count how many people entered the room",
+          "Count people crossing the line",
+          "How many cars passed through the gate",
+          "Count objects crossing this line",
+          "How many people are there"
         ],
       
-        "model": "yolov8n.pt",
+        "model": "yolov8m.pt",
       
         "detectable_classes": [
           "person",
           "car",
+          "truck",
+          "bicycle",
           "dog",
-          "chair"
+          "cat"
         ],
       
         "required_fields_from_user": [
@@ -360,27 +364,34 @@
       
         "zone_support": {
           "supported": true,
-          "required": true
+          "required": false,
+          "zone_type": "line",
+          "min_points": 2,
+          "max_points": 2,
+          "supports_polygon": false,
+          "supports_line": true,
+          "line_for_crossing": true,
+          "description": "Requires a line (exactly 2 points) for crossing detection with object tracking. Objects are tracked as they cross the line to count entries, exits, or both. Without a zone, performs simple per-frame counting."
         },
       
         "execution_modes": {
           "continuous": {
-            "description": "Continuously counts objects in the zone",
+            "description": "Continuously counts objects (with or without zone)",
             "required_fields": [],
             "forbidden_fields": [
               "interval_minutes",
               "check_duration_seconds"
             ],
-            "zone_required": true
+            "zone_required": false
           },
       
           "patrol": {
-            "description": "Counts objects in the zone periodically",
+            "description": "Counts objects periodically",
             "required_fields": [
               "interval_minutes",
               "check_duration_seconds"
             ],
-            "zone_required": true
+            "zone_required": false
           }
         },
       
@@ -393,6 +404,162 @@
           "fps": 1,
           "confidence": 0.7,
           "run_mode": "continuous"
+        }
+      },
+
+      {
+        "rule_id": "box_count",
+        "rule_name": "Box Count",
+        "description": "Counts boxes or packages. Can count boxes crossing a line (requires 2 points) using tracking, or simple per-frame counting without a zone. Same as class_count but defaults to 'box' class.",
+      
+        "intent_examples": [
+          "Count boxes",
+          "How many boxes are there",
+          "Count boxes crossing the line",
+          "Count how many packages passed through",
+          "How many boxes entered"
+        ],
+      
+        "model": "box_detection.pt",
+      
+        "detectable_classes": [
+          "box",
+          "package",
+          "container",
+          "bag",
+          "suitcase"
+        ],
+      
+        "required_fields_from_user": [
+          "class"
+        ],
+      
+        "time_window": {
+          "supported": true,
+          "required": true
+        },
+      
+        "zone_support": {
+          "supported": true,
+          "required": false,
+          "zone_type": "line",
+          "min_points": 2,
+          "max_points": 2,
+          "supports_polygon": false,
+          "supports_line": true,
+          "line_for_crossing": true,
+          "description": "Requires a line (exactly 2 points) for crossing detection with box tracking. Boxes are tracked as they cross the line to count entries, exits, or both. Without a zone, performs simple per-frame counting."
+        },
+      
+        "execution_modes": {
+          "continuous": {
+            "description": "Continuously counts boxes (with or without zone/line)",
+            "required_fields": [],
+            "forbidden_fields": [
+              "interval_minutes",
+              "check_duration_seconds"
+            ],
+            "zone_required": false
+          },
+      
+          "patrol": {
+            "description": "Counts boxes periodically",
+            "required_fields": [
+              "interval_minutes",
+              "check_duration_seconds"
+            ],
+            "zone_required": false
+          }
+        },
+      
+        "rules_config_fields": [
+          "class",
+          "label"
+        ],
+      
+        "defaults": {
+          "fps": 1,
+          "confidence": 0.7,
+          "run_mode": "continuous"
+        }
+      },
+
+      {
+        "rule_id": "restricted_zone",
+        "rule_name": "Restricted Zone Detection",
+        "description": "Triggers an alert when a specified object is detected inside a restricted zone. Uses polygon zone (minimum 3 points) to define the restricted area. The zone polygon is visible on the live stream. Applies alert cooldown to prevent spam.",
+      
+        "intent_examples": [
+          "Alert if a person is in the restricted zone",
+          "Notify when someone enters the no-go area",
+          "Detect if any person is inside the danger zone",
+          "Alert when a car is parked in the restricted area",
+          "Monitor the restricted zone for unauthorized access"
+        ],
+      
+        "model": "yolov8m.pt",
+      
+        "detectable_classes": [
+          "person",
+          "car",
+          "truck",
+          "bicycle",
+          "motorcycle",
+          "dog"
+        ],
+      
+        "required_fields_from_user": [
+          "class"
+        ],
+      
+        "time_window": {
+          "supported": true,
+          "required": true
+        },
+
+        "zone_support": {
+          "supported": true,
+          "required": true,
+          "zone_type": "polygon",
+          "min_points": 3,
+          "max_points": null,
+          "supports_polygon": true,
+          "supports_line": false,
+          "description": "Restricted zone requires a polygon (minimum 3 points) to define the restricted area. The zone is continuously monitored for object presence."
+        },
+
+        "execution_modes": {
+          "continuous": {
+            "description": "Continuously monitors the restricted zone for object presence",
+            "required_fields": [],
+            "forbidden_fields": [
+              "interval_minutes",
+              "check_duration_seconds"
+            ],
+            "zone_required": true
+          },
+      
+          "patrol": {
+            "description": "Periodically checks the restricted zone for object presence",
+            "required_fields": [
+              "interval_minutes",
+              "check_duration_seconds"
+            ],
+            "zone_required": true
+          }
+        },
+      
+        "rules_config_fields": [
+          "class",
+          "label",
+          "alert_cooldown_seconds"
+        ],
+      
+        "defaults": {
+          "fps": 2,
+          "confidence": 0.7,
+          "run_mode": "continuous",
+          "alert_cooldown_seconds": 10
         }
       }
       
