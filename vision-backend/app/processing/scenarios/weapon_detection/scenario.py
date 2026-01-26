@@ -21,7 +21,7 @@ from app.processing.scenarios.registry import register_scenario
 from app.processing.scenarios.weapon_detection.config import WeaponDetectionConfig
 from app.processing.scenarios.weapon_detection.state import WeaponDetectionState
 from app.processing.scenarios.weapon_detection.pose_extractor import extract_pose_frame
-from app.processing.scenarios.weapon_detection.posture_analyzer import analyze_arm_posture
+from app.processing.scenarios.weapon_detection.posture_analyzer import analyze_arm_posture, check_arm_raised
 from app.processing.scenarios.weapon_detection.vlm_handler import (
     should_call_vlm,
     call_vlm,
@@ -96,11 +96,25 @@ class WeaponDetectionScenario(BaseScenario):
         vlm_service = self._get_vlm_service()
         for analysis in list(self.state.pending_analyses):
             if should_call_vlm(analysis, self.state, self.config_obj.vlm_throttle_seconds):
-                print(f"[WeaponDetectionScenario] 🔍 Calling VLM for person {analysis.person_index} (frame {frame_context.frame_index}, arm_angle: {analysis.arm_angle:.1f}°)")
+                # Extract all buffered frames that showed suspicious posture for this person
+                suspicious_frames = []
+                for pose_frame in self.state.pose_buffer[-self.config_obj.temporal_consistency_frames:]:
+                    # Check if this person had suspicious posture in this frame
+                    if analysis.person_index < len(pose_frame.keypoints):
+                        person_kp = pose_frame.keypoints[analysis.person_index]
+                        arm_angle, arm_raised = check_arm_raised(person_kp, self.config_obj.arm_angle_threshold)
+                        if arm_raised:
+                            suspicious_frames.append(pose_frame.frame)
+                
+                # If no suspicious frames found, use the latest frame as fallback
+                if not suspicious_frames:
+                    suspicious_frames = [self.state.pose_buffer[-1].frame] if self.state.pose_buffer else [frame_context.frame]
+                
+                print(f"[WeaponDetectionScenario] 🔍 Calling VLM for person {analysis.person_index} with {len(suspicious_frames)} buffered frames (frame {frame_context.frame_index}, arm_angle: {analysis.arm_angle:.1f}°)")
                 
                 vlm_result = call_vlm(
                     analysis,
-                    frame_context.frame,
+                    suspicious_frames,
                     self.state,
                     vlm_service,
                     self.config_obj.vlm_confidence_threshold,
@@ -123,6 +137,7 @@ class WeaponDetectionScenario(BaseScenario):
                                 "person_index": vlm_result.person_index,
                                 "box": vlm_result.box,
                                 "arm_angle": analysis.arm_angle,
+                                "vlm_description": vlm_result.description,  # VLM description
                                 "vlm_response": vlm_result.vlm_response
                             },
                             detection_indices=[vlm_result.person_index],

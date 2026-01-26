@@ -19,17 +19,19 @@ from app.processing.scenarios.weapon_detection.state import WeaponDetectionState
 from app.infrastructure.external.groq_vlm_service import GroqVLMService
 
 
-WEAPON_DETECTION_PROMPT = """Analyze this image and determine if there is a weapon visible (gun, knife, sword, or any other weapon).
+WEAPON_DETECTION_PROMPT = """Analyze these images (multiple frames from a video sequence) and determine if there is a weapon visible (gun, knife, sword, or any other weapon) in ANY of the frames.
+
+The images are sequential frames showing the same person. Look across all frames to detect weapons - a weapon may be visible in some frames but not others.
 
 Respond ONLY with a valid JSON object in this exact format:
 {
     "weapon_detected": true or false,
     "weapon_type": "gun" or "knife" or "sword" or "other" or null,
     "confidence": 0.0 to 1.0,
-    "description": "Brief description of what you see"
+    "description": "Brief description of what you see across the frames"
 }
 
-Be very strict - only return true if you are confident a weapon is actually visible. False positives are worse than false negatives."""
+Be very strict - only return true if you are confident a weapon is actually visible in at least one frame. False positives are worse than false negatives."""
 
 
 def get_person_key(person_index: int, box: list[float]) -> str:
@@ -123,20 +125,20 @@ def save_vlm_frame(
 
 def call_vlm(
     analysis: ArmPostureAnalysis,
-    frame: np.ndarray,
+    frames: list[np.ndarray],
     state: WeaponDetectionState,
     vlm_service: GroqVLMService,
     vlm_confidence_threshold: float,
     frames_dir: str
 ) -> Optional[VLMConfirmation]:
     """
-    Call VLM model to confirm weapon presence.
+    Call VLM model to confirm weapon presence using multiple buffered frames.
     
     Non-blocking: Returns cached result if available, otherwise calls VLM.
     
     Args:
         analysis: Arm posture analysis
-        frame: Full frame image
+        frames: List of frame images (buffered frames that showed suspicious posture)
         state: Weapon detection state
         vlm_service: VLM service instance
         vlm_confidence_threshold: Minimum confidence threshold
@@ -157,12 +159,23 @@ def call_vlm(
     state.last_vlm_call_time[person_key] = analysis.timestamp.timestamp()
     
     try:
-        # Save frame before sending to VLM
-        save_vlm_frame(frame, analysis, frames_dir)
+        # Save all frames before sending to VLM
+        for idx, frame in enumerate(frames):
+            # Create a temporary analysis with frame index for saving
+            temp_analysis = ArmPostureAnalysis(
+                person_index=analysis.person_index,
+                box=analysis.box,
+                arm_raised=analysis.arm_raised,
+                arm_angle=analysis.arm_angle,
+                confidence=analysis.confidence,
+                timestamp=analysis.timestamp,
+                frame_index=analysis.frame_index + idx - len(frames) + 1
+            )
+            save_vlm_frame(frame, temp_analysis, frames_dir)
         
-        # Call generic VLM analyze_image method with custom prompt
-        vlm_result = vlm_service.analyze_image(
-            frame,
+        # Call VLM with multiple frames
+        vlm_result = vlm_service.analyze_images(
+            frames,
             prompt=WEAPON_DETECTION_PROMPT,
             crop_box=analysis.box,
             temperature=0.1,
@@ -202,6 +215,7 @@ def call_vlm(
             weapon_detected=weapon_confirmed,
             weapon_type=weapon_type if weapon_confirmed else None,
             confidence=confidence,
+            description=description if weapon_confirmed else None,
             vlm_response=vlm_result.get("raw_response", {}),
             timestamp=analysis.timestamp,
             frame_index=analysis.frame_index

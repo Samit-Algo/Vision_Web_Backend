@@ -162,10 +162,20 @@ def evaluate_rules_stage(
             if scenario_events:
                 # Use first scenario event as rule match
                 scenario_event = scenario_events[0]
+                
+                # Build report from scenario metadata (includes VLM description, weapon_type, etc.)
+                report = None
+                if scenario_event.metadata:
+                    # Use existing report if present, otherwise create one from metadata
+                    report = scenario_event.metadata.get("report")
+                    if report is None:
+                        # Create report from metadata (for weapon detection, includes vlm_description)
+                        report = {k: v for k, v in scenario_event.metadata.items() if k != "report"}
+                
                 rule_result = {
                     "label": scenario_event.label,
                     "matched_detection_indices": scenario_event.detection_indices,
-                    "report": scenario_event.metadata.get("report") if scenario_event.metadata else None
+                    "report": report
                 }
                 
                 if rule_result:

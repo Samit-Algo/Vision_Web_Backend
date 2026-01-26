@@ -36,6 +36,11 @@ def set_camera_repository(repository):
     _camera_repository = repository
 
 
+def get_camera_repository():
+    """Get the camera repository (for use by other tools)"""
+    return _camera_repository
+
+
 def set_device_repository(repository):
     """Set the device repository for looking up devices"""
     global _device_repository

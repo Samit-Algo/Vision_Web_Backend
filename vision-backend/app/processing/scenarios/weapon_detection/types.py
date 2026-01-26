@@ -41,6 +41,7 @@ class VLMConfirmation:
     weapon_detected: bool
     weapon_type: Optional[str]  # "gun", "knife", etc.
     confidence: float  # VLM confidence (0.0-1.0)
+    description: Optional[str]  # VLM description of what was detected
     vlm_response: Dict[str, Any]  # Raw VLM response
     timestamp: datetime
     frame_index: int

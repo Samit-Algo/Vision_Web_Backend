@@ -394,7 +394,7 @@ class PipelineRunner:
         
         print(f"[worker {self.context.task_id}] 🔔 {event_label} | agent='{self.context.agent_name}' | video_time={video_ts}")
         
-        # Include report in detections if present
+        # Include report in detections if present (contains VLM description, weapon_type, etc.)
         if rule_match.report and detections is not None:
             detections = detections.copy()
             detections["rule_report"] = rule_match.report

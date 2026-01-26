@@ -20,6 +20,7 @@ from google.genai import types
 from .tools.initialize_state_tool import initialize_state as initialize_state_impl
 from .tools.set_field_value_tool import set_field_value as set_field_value_impl
 from .tools.save_to_db_tool import save_to_db as save_to_db_impl
+from .tools.camera_selection_tool import list_cameras as list_cameras_impl, resolve_camera as resolve_camera_impl
 
 
 
@@ -221,9 +222,21 @@ def build_instruction_dynamic_with_session(context: ReadonlyContext, session_id:
         "- Do NOT list all rules by default. If ambiguous, ask one clarifying question and present max 2–3 options.\n"
         "\n"
         "TOOL CALLING (internal; never mention tools to user):\n"
-        "- Allowed tools: initialize_state_wrapper(rule_id), set_field_value_wrapper(field_values_json), save_to_db_wrapper().\n"
+        "- Allowed tools: initialize_state_wrapper(rule_id), set_field_value_wrapper(field_values_json), save_to_db_wrapper(), list_cameras_wrapper(), resolve_camera_wrapper(name_or_id).\n"
         "- field_values_json MUST be a JSON STRING.\n"
         "- If user provides multiple missing values in one message, set them all in one call.\n"
+        "\n"
+        "CAMERA SELECTION (CRITICAL):\n"
+        "- When camera_id is missing, ALWAYS resolve it using camera selection tools.\n"
+        "- NEVER assume or guess a camera_id - always use resolve_camera_wrapper() or list_cameras_wrapper().\n"
+        "- Flow:\n"
+        "  1. If user mentions a camera name/ID: call resolve_camera_wrapper(name_or_id)\n"
+        "  2. If resolve_camera_wrapper returns 'exact_match': use the camera_id from response and set it via set_field_value_wrapper\n"
+        "  3. If resolve_camera_wrapper returns 'multiple_matches': ask user which camera they want from the list (NEVER auto-select)\n"
+        "  4. If resolve_camera_wrapper returns 'not_found' OR user doesn't specify: call list_cameras_wrapper() and suggest available cameras\n"
+        "  5. After user clarifies, call resolve_camera_wrapper again with their choice\n"
+        "- Users can provide camera name (partial match supported), camera ID, or just describe it - handle all cases.\n"
+        "- Example user inputs: 'Front Gate', 'loading area', 'CAM-001', 'the camera at the warehouse'\n"
         "\n"
         "INITIALIZATION FLOW (CRITICAL):\n"
         "- If state is UNINITIALIZED and you infer a rule:\n"
@@ -252,6 +265,12 @@ def build_instruction_dynamic_with_session(context: ReadonlyContext, session_id:
 def create_agent_for_session(session_id: str = "default", user_id: Optional[str] = None) -> LlmAgent:
     # Ensure GROQ_API_KEY is set before creating the agent
     _ensure_groq_api_key()
+    
+    # Store user_id in agent state immediately (before any tool calls)
+    from .session_state.agent_state import get_agent_state
+    agent_state = get_agent_state(session_id)
+    if user_id:
+        agent_state.user_id = user_id
 
     # Wrap all tools with FunctionTool for proper ADK registration
     # Create wrapper functions that inject session_id from a closure
@@ -277,7 +296,7 @@ def create_agent_for_session(session_id: str = "default", user_id: Optional[str]
             Example:
                 initialize_state_wrapper(rule_id="object_enter_zone")
             """
-            return initialize_state_impl(rule_id=rule_id, session_id=current_session_id)
+            return initialize_state_impl(rule_id=rule_id, session_id=current_session_id, user_id=current_user_id)
         
         def set_field_value_wrapper(field_values_json: str) -> Dict:
             """
@@ -351,17 +370,116 @@ def create_agent_for_session(session_id: str = "default", user_id: Optional[str]
                 logger.debug("[save_to_db_wrapper] Result: %s", result)
             return result
         
+        def list_cameras_wrapper() -> Dict:
+            """
+            List all cameras owned by the current user.
+            
+            Use this function to get a list of available cameras when camera_id is missing.
+            This helps suggest cameras to the user in natural language.
+            
+            Args:
+                None: This function takes no parameters. It uses the user_id from agent state.
+            
+            Returns:
+                Dict: A dictionary with cameras list:
+                {
+                    "cameras": [
+                        {"id": "CAM-001", "name": "Front Gate"},
+                        {"id": "CAM-002", "name": "Warehouse Cam 2"}
+                    ]
+                }
+            
+            Example:
+                list_cameras_wrapper()
+            """
+            # Get user_id from agent state (stored when agent was created)
+            from .session_state.agent_state import get_agent_state
+            agent_state = get_agent_state(current_session_id)
+            user_id_for_camera = agent_state.user_id or current_user_id
+            
+            if not user_id_for_camera:
+                return {
+                    "error": "user_id is required. Agent state must have user_id set.",
+                    "cameras": []
+                }
+            
+            return list_cameras_impl(user_id=user_id_for_camera, session_id=current_session_id)
+        
+        def resolve_camera_wrapper(name_or_id: str) -> Dict:
+            """
+            Resolve a camera by name (regex/partial match) or ID.
+            
+            This function:
+            1. First tries to find by ID (exact match, fast)
+            2. If not found, searches by name using regex (case-insensitive partial match)
+            3. Returns structured response:
+               - exact_match: Single camera found → use camera_id from response
+               - multiple_matches: Multiple cameras found → ask user to clarify
+               - not_found: No cameras found → suggest using list_cameras_wrapper()
+            
+            Args:
+                name_or_id (str): Camera name (partial match supported) or camera ID.
+                    Examples: "Front Gate", "loading area", "CAM-001"
+            
+            Returns:
+                Dict: Structured response with status:
+                {
+                    "status": "exact_match",
+                    "camera_id": "CAM-001",
+                    "camera_name": "Front Gate"
+                }
+                OR
+                {
+                    "status": "multiple_matches",
+                    "cameras": [
+                        {"id": "CAM-001", "name": "Loading Area"},
+                        {"id": "CAM-002", "name": "Loading Dock"}
+                    ]
+                }
+                OR
+                {
+                    "status": "not_found"
+                }
+            
+            Example:
+                resolve_camera_wrapper(name_or_id="Front Gate")
+                resolve_camera_wrapper(name_or_id="loading")
+                resolve_camera_wrapper(name_or_id="CAM-001")
+            
+            IMPORTANT:
+                - If status is "exact_match", use the camera_id from response and set it via set_field_value_wrapper
+                - If status is "multiple_matches", ask the user which camera they want from the list
+                - If status is "not_found", suggest using list_cameras_wrapper() to see available cameras
+                - Never assume a camera if multiple matches exist - always ask the user
+            """
+            # Get user_id from agent state (stored when agent was created)
+            from .session_state.agent_state import get_agent_state
+            agent_state = get_agent_state(current_session_id)
+            user_id_for_camera = agent_state.user_id or current_user_id
+            
+            if not user_id_for_camera:
+                return {
+                    "status": "not_found",
+                    "error": "user_id is required. Agent state must have user_id set."
+                }
+            
+            return resolve_camera_impl(name_or_id=name_or_id, user_id=user_id_for_camera, session_id=current_session_id)
+        
         # Explicitly set function names to ensure they match what Groq expects
         # This prevents name mangling issues with LiteLLM/Groq compatibility
         initialize_state_wrapper.__name__ = "initialize_state_wrapper"
         set_field_value_wrapper.__name__ = "set_field_value_wrapper"
         save_to_db_wrapper.__name__ = "save_to_db_wrapper"
+        list_cameras_wrapper.__name__ = "list_cameras_wrapper"
+        resolve_camera_wrapper.__name__ = "resolve_camera_wrapper"
         
         # Create FunctionTool instances with explicitly named functions
         tools = [
             FunctionTool(initialize_state_wrapper),
             FunctionTool(set_field_value_wrapper),
             FunctionTool(save_to_db_wrapper),
+            FunctionTool(list_cameras_wrapper),
+            FunctionTool(resolve_camera_wrapper),
         ]
         
         if _debug_adk_enabled():

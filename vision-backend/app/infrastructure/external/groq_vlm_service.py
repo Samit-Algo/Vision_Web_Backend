@@ -122,7 +122,37 @@ class GroqVLMService:
         Generic method to analyze an image with a custom prompt using Groq VLM.
         
         Args:
-            image: Image as numpy array (BGR format)
+            image: Image as numpy array (BGR format) or list of images
+            prompt: Custom prompt for the VLM (should request JSON response)
+            crop_box: Optional bounding box [x1, y1, x2, y2] to crop image region
+            temperature: Sampling temperature (0.0-2.0), lower = more deterministic
+            max_tokens: Maximum tokens in response
+            
+        Returns:
+            Dictionary with:
+            {
+                "content": str,  # Raw text response from VLM
+                "parsed_json": dict | None,  # Parsed JSON if response is valid JSON
+                "raw_response": dict  # Full API response
+            }
+        """
+        # Support both single image and list of images
+        images = image if isinstance(image, list) else [image]
+        return self.analyze_images(images, prompt, crop_box, temperature, max_tokens)
+    
+    def analyze_images(
+        self,
+        images: list[np.ndarray],
+        prompt: str,
+        crop_box: Optional[list[float]] = None,
+        temperature: float = 0.1,
+        max_tokens: int = 500
+    ) -> Dict[str, Any]:
+        """
+        Generic method to analyze multiple images with a custom prompt using Groq VLM.
+        
+        Args:
+            images: List of images as numpy arrays (BGR format)
             prompt: Custom prompt for the VLM (should request JSON response)
             crop_box: Optional bounding box [x1, y1, x2, y2] to crop image region
             temperature: Sampling temperature (0.0-2.0), lower = more deterministic
@@ -146,29 +176,38 @@ class GroqVLMService:
             }
         
         try:
-            # Crop image region if box provided
-            if crop_box:
-                image = self._crop_person_region(image, crop_box)
+            # Crop image regions if box provided
+            processed_images = []
+            for img in images:
+                if crop_box:
+                    processed_img = self._crop_person_region(img, crop_box)
+                else:
+                    processed_img = img
+                processed_images.append(processed_img)
             
-            # Convert to base64
-            base64_image = self._numpy_to_base64(image)
+            # Convert all images to base64
+            content_items = [
+                {
+                    "type": "text",
+                    "text": prompt
+                }
+            ]
+            
+            # Add all images to content
+            for img in processed_images:
+                base64_image = self._numpy_to_base64(img)
+                content_items.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": base64_image
+                    }
+                })
             
             # Prepare messages for chat API
             messages = [
                 {
                     "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": prompt
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": base64_image
-                            }
-                        }
-                    ]
+                    "content": content_items
                 }
             ]
             

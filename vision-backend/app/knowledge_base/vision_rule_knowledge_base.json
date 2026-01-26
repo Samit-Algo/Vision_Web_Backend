@@ -265,9 +265,9 @@
       },
 
       {
-        "rule_id": "weapon_detected",
-        "rule_name": "Weapon Detected",
-        "description": "Triggers when a weapon is detected in the camera view.",
+        "rule_id": "weapon_detection",
+        "rule_name": "Weapon Detection",
+        "description": "Triggers when a weapon is detected in the camera view using pose and VLM analysis.",
       
         "intent_examples": [
           "Alert me if someone has a gun",
@@ -276,16 +276,14 @@
           "Tell me if someone carries a firearm"
         ],
       
-        "model": "YOLO-Weapons-v1",
-      
+        "model": "yolov8n-pose.pt",
+
         "detectable_weapons": [
           "gun",
           "knife"
         ],
       
-        "required_fields_from_user": [
-          "weapon_type"
-        ],
+        "required_fields_from_user": [],
       
         "time_window": {
           "supported": true,
@@ -319,13 +317,21 @@
         },
       
         "rules_config_fields": [
-          "weapon_type"
+          "buffer_size",
+          "arm_angle_threshold",
+          "vlm_confidence_threshold",
+          "temporal_consistency_frames",
+          "vlm_throttle_seconds"
         ],
       
         "defaults": {
-          "fps": 2,
-          "confidence": 0.75,
-          "run_mode": "continuous"
+          "fps": 1,
+          "run_mode": "continuous",
+          "buffer_size": 5,
+          "arm_angle_threshold": 45,
+          "vlm_confidence_threshold": 0.7,
+          "temporal_consistency_frames": 4,
+          "vlm_throttle_seconds": 2
         }
       },
 

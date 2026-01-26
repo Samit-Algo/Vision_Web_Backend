@@ -1,5 +1,6 @@
 # Standard library imports
 from typing import Optional, List, Dict, Any
+import re
 
 # External package imports
 from motor.motor_asyncio import AsyncIOMotorCollection
@@ -91,6 +92,43 @@ class MongoCameraRepository(CameraRepository):
             return cameras
         except Exception as e:
             raise RuntimeError(f"Error listing cameras for device: {str(e)}")
+    
+    async def search_by_name(self, query: str, owner_user_id: str, limit: int = 5) -> List[Camera]:
+        """
+        Search cameras by name using regex (case-insensitive partial matching).
+        
+        Args:
+            query: Search query (will be used for regex matching)
+            owner_user_id: The owner user ID to filter by
+            limit: Maximum number of results to return (default: 5)
+            
+        Returns:
+            List of Camera domain models matching the query
+        """
+        if not query or not owner_user_id:
+            return []
+        
+        try:
+            # Escape special regex characters to prevent injection
+            escaped_query = re.escape(query)
+            
+            # Build regex pattern for case-insensitive partial matching
+            # This allows matching "loading" in "Loading Area Camera"
+            regex_pattern = f".*{escaped_query}.*"
+            
+            # Search with regex (case-insensitive) and filter by owner
+            cursor = self.camera_collection.find({
+                CameraFields.OWNER_USER_ID: owner_user_id,
+                CameraFields.NAME: {"$regex": regex_pattern, "$options": "i"}
+            }).limit(limit)
+            
+            cameras = []
+            async for document in cursor:
+                cameras.append(self._document_to_camera(document))
+            
+            return cameras
+        except Exception as e:
+            raise RuntimeError(f"Error searching cameras by name: {str(e)}")
     
     async def save(self, camera: Camera) -> Camera:
         """
