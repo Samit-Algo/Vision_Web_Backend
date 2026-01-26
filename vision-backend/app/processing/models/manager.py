@@ -14,6 +14,20 @@ from app.processing.models.providers.yolo_detector import YOLODetectorProvider
 from app.processing.models.providers.yolo_pose import YOLOPoseProvider
 
 
+# Model alias mapping - maps invalid/old model names to valid ones
+MODEL_ALIASES = {
+    # Old/invalid model names -> valid YOLO models
+    "YOLO-Objects-v1": "yolov8m.pt",
+    "YOLO-Objects-v2": "yolov8m.pt",
+    "YOLO-Objects": "yolov8m.pt",
+    "yolo-objects": "yolov8m.pt",
+    # Note: box_detection.pt is NOT aliased - it's a custom model file
+    # "box-detection": "yolov8m.pt",
+    "YOLO-Detection": "yolov8m.pt",
+    "yolo-detection": "yolov8m.pt",
+}
+
+
 # Auto-register default providers on module import
 _initialized = False
 
@@ -69,7 +83,13 @@ class ModelManager:
         Returns:
             Loaded model instance or None if loading failed
         """
-        # Check cache first
+        # Check for model alias (maps invalid/old names to valid ones)
+        original_model_id = model_id
+        if model_id in MODEL_ALIASES:
+            print(f"[ModelManager] 🔄 Model alias detected: '{model_id}' -> '{MODEL_ALIASES[model_id]}'")
+            model_id = MODEL_ALIASES[model_id]
+        
+        # Check cache first (use resolved model_id for cache)
         if model_id in self._cache:
             return self._cache[model_id]
         
@@ -85,8 +105,11 @@ class ModelManager:
         model = provider.load(model_id)
         
         if model is not None:
-            # Cache the loaded model
+            # Cache the loaded model (use resolved model_id as key)
             self._cache[model_id] = model
+            # Also cache with original name if it was an alias
+            if original_model_id != model_id:
+                self._cache[original_model_id] = model
         
         return model
     

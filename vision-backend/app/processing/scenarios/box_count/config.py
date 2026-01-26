@@ -44,8 +44,9 @@ class BoxCountConfig:
                 self.zone_applied = True
         
         # Tracker configuration (for line-based counting)
+        # Lower min_hits for boxes (they move faster, need faster confirmation)
         self.tracker_config = config.get("tracker_config", {})
         self.max_age = self.tracker_config.get("max_age", 30)
-        self.min_hits = self.tracker_config.get("min_hits", 3)
+        self.min_hits = self.tracker_config.get("min_hits", 1)  # Lower for boxes (was 3)
         self.iou_threshold = self.tracker_config.get("iou_threshold", 0.3)
         self.score_threshold = self.tracker_config.get("score_threshold", 0.5)

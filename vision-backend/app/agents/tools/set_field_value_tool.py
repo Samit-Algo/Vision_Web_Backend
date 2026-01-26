@@ -135,6 +135,7 @@ def _update_rules_field(agent: AgentState, rule: Dict) -> None:
     
     Special handling:
     - "label" field: If in rules_config_fields but not provided, auto-generate from "class" if available
+    - "zone" field: For counting rules (class_count, box_count), include zone in rule config if it exists
     """
     rule_id = agent.rule_id
     rule_config = {"type": rule_id}
@@ -155,6 +156,13 @@ def _update_rules_field(agent: AgentState, rule: Dict) -> None:
             # Only include non-None values
             if value is not None:
                 rule_config[field_name] = value
+    
+    # Special handling: For counting rules (class_count, box_count), include zone in rule config if it exists
+    # This allows zone to be stored in the rule even though requires_zone is False
+    if rule_id in ["class_count", "box_count"]:
+        zone = agent.fields.get("zone")
+        if zone is not None:
+            rule_config["zone"] = zone
     
     # Update rules array
     agent.fields["rules"] = [rule_config]

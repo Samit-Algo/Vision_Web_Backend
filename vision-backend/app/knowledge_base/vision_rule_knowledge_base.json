@@ -72,14 +72,14 @@
       {
         "rule_id": "object_enter_zone",
         "rule_name": "Object Enter Zone",
-        "description": "Triggers when an object enters a defined zone.",
+        "description": "Triggers when an object enters a defined polygon zone. User must draw MINIMUM 3 POINTS to create a polygon. The system checks if the center point of detected objects is inside the polygon.",
       
         "intent_examples": [
           "Alert if someone enters restricted area",
           "Notify when a car enters the gate"
         ],
       
-        "model": "YOLO-Objects-v2",
+        "model": "yolov8n.pt",
       
         "detectable_classes": [
           "person",
@@ -98,7 +98,13 @@
       
         "zone_support": {
           "supported": true,
-          "required": true
+          "required": true,
+          "zone_type": "polygon",
+          "min_points": 3,
+          "max_points": null,
+          "supports_polygon": true,
+          "supports_line": false,
+          "description": "User must draw a POLYGON with MINIMUM 3 POINTS to define the detection zone. NO LINE DRAWING - ONLY POLYGON. The system uses the center point of detected objects to check if they are inside the polygon zone."
         },
       
         "execution_modes": {
@@ -332,14 +338,19 @@
       {
         "rule_id": "class_count",
         "rule_name": "Class Count",
-        "description": "Counts objects of a specific class. Can count objects crossing a line (requires 2 points) using tracking, or simple per-frame counting without a zone.",
+        "description": "Counts objects of a specific class. For crossing detection, user must draw exactly 2 points to create a counting line. The system tracks objects and increments count when the center point of an object crosses the line. Without a line, performs simple per-frame counting.",
       
         "intent_examples": [
           "Count how many people entered the room",
           "Count people crossing the line",
           "How many cars passed through the gate",
           "Count objects crossing this line",
-          "How many people are there"
+          "How many people are there",
+          "count people",
+          "count cars",
+          "person count",
+          "vehicle count",
+          "count the workers"
         ],
       
         "model": "yolov8m.pt",
@@ -371,7 +382,7 @@
           "supports_polygon": false,
           "supports_line": true,
           "line_for_crossing": true,
-          "description": "Requires a line (exactly 2 points) for crossing detection with object tracking. Objects are tracked as they cross the line to count entries, exits, or both. Without a zone, performs simple per-frame counting."
+          "description": "For counting objects crossing a boundary, user draws EXACTLY 2 POINTS to create a line. NO POLYGON NEEDED. The system uses the center point of each detected object - when the center point crosses the user-drawn line, the count increments by 1. Object tracking ensures each object is counted only once. Without a line, the system performs simple per-frame counting of all visible objects."
         },
       
         "execution_modes": {
@@ -410,17 +421,19 @@
       {
         "rule_id": "box_count",
         "rule_name": "Box Count",
-        "description": "Counts boxes or packages. Can count boxes crossing a line (requires 2 points) using tracking, or simple per-frame counting without a zone. Same as class_count but defaults to 'box' class.",
+        "description": "Counts boxes or packages. For crossing detection, user must draw exactly 2 points to create a counting line. The system tracks boxes and increments count when the center point of a box crosses the line. Without a line, performs simple per-frame counting.",
       
         "intent_examples": [
           "Count boxes",
           "How many boxes are there",
           "Count boxes crossing the line",
           "Count how many packages passed through",
-          "How many boxes entered"
+          "How many boxes entered",
+          "box count",
+          "count the boxes"
         ],
       
-        "model": "box_detection.pt",
+        "model": "C:\\AlgoOrange Task\\Vision_Web_Backend\\vision-backend\\box_detection.pt",
       
         "detectable_classes": [
           "box",
@@ -448,7 +461,7 @@
           "supports_polygon": false,
           "supports_line": true,
           "line_for_crossing": true,
-          "description": "Requires a line (exactly 2 points) for crossing detection with box tracking. Boxes are tracked as they cross the line to count entries, exits, or both. Without a zone, performs simple per-frame counting."
+          "description": "For counting boxes crossing a boundary, user draws EXACTLY 2 POINTS to create a line. NO POLYGON NEEDED. The system uses the center point of each detected box - when the center point crosses the user-drawn line, the count increments by 1. Box tracking ensures each box is counted only once. Without a line, the system performs simple per-frame counting of all visible boxes."
         },
       
         "execution_modes": {
@@ -487,7 +500,7 @@
       {
         "rule_id": "restricted_zone",
         "rule_name": "Restricted Zone Detection",
-        "description": "Triggers an alert when a specified object is detected inside a restricted zone. Uses polygon zone (minimum 3 points) to define the restricted area. The zone polygon is visible on the live stream. Applies alert cooldown to prevent spam.",
+        "description": "Triggers an alert when a specified object is detected inside a restricted zone. User must draw MINIMUM 3 POINTS to create a polygon defining the restricted area. The system checks if the center point of detected objects falls inside the polygon. The zone polygon is visible on the live stream. Applies alert cooldown to prevent spam.",
       
         "intent_examples": [
           "Alert if a person is in the restricted zone",
@@ -525,7 +538,7 @@
           "max_points": null,
           "supports_polygon": true,
           "supports_line": false,
-          "description": "Restricted zone requires a polygon (minimum 3 points) to define the restricted area. The zone is continuously monitored for object presence."
+          "description": "User must draw a POLYGON with MINIMUM 3 POINTS to define the restricted area. NO LINE DRAWING - ONLY POLYGON. The system uses the center point of each detected object to check if it's inside the polygon zone. If the object's center point is within the polygon boundaries, an alert is triggered. The zone polygon is continuously monitored and visible on the live stream."
         },
 
         "execution_modes": {

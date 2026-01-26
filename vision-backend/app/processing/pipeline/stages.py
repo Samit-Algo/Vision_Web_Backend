@@ -152,8 +152,9 @@ def evaluate_rules_stage(
             scenario_instance = context._scenario_instances[rule_idx]
             
             # Build ScenarioFrameContext
-            from datetime import datetime
-            frame_timestamp = datetime.fromtimestamp(frame_packet.timestamp)
+            # Note: frame_packet.timestamp is a monotonic timestamp (relative time),
+            # not a Unix timestamp, so we use current time instead
+            frame_timestamp = now()
             frame_context = ScenarioFrameContext(
                 frame=frame_packet.frame,
                 frame_index=context.frame_index,

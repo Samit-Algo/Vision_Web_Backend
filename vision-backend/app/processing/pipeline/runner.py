@@ -326,24 +326,83 @@ class PipelineRunner:
             height, width = processed_frame.shape[0], processed_frame.shape[1]
             
             # For restricted zone scenarios: show ALL person detections, not just those in zone
+            # For class_count/box_count with line: show ALL detections of target class
             # For other scenarios: show only matched detections
             zone_violated = False
             target_class = None
+            line_crossed_indices = []  # Indices of objects that crossed the line
+            line_zone = None  # Line zone data for visualization
+            track_info = []  # Track information (center points, track IDs) for visualization
             
-            # Check if this is a restricted zone scenario
+            # Check scenario types
             is_restricted_zone = False
+            is_line_counting = False
             if hasattr(self.context, '_scenario_instances'):
                 for scenario_instance in self.context._scenario_instances.values():
+                    scenario_type = getattr(scenario_instance, 'scenario_id', '')
+                    
                     # Check if this is a restricted zone scenario
-                    if hasattr(scenario_instance, 'config_obj') and hasattr(scenario_instance.config_obj, 'target_class'):
+                    if scenario_type == 'restricted_zone':
                         is_restricted_zone = True
-                        target_class = scenario_instance.config_obj.target_class
+                        if hasattr(scenario_instance, 'config_obj') and hasattr(scenario_instance.config_obj, 'target_class'):
+                            target_class = scenario_instance.config_obj.target_class
                         # Check if zone is violated
                         if hasattr(scenario_instance, '_state'):
                             state = scenario_instance._state
                             if state.get('objects_in_zone', False):
                                 zone_violated = True
-                        break
+                    
+                    # Check if this is a line-based counting scenario (class_count or box_count)
+                    elif scenario_type in ['class_count', 'box_count']:
+                        is_line_counting = True
+                        if hasattr(scenario_instance, 'config_obj') and hasattr(scenario_instance.config_obj, 'target_class'):
+                            target_class = scenario_instance.config_obj.target_class
+                        
+                        # Get line zone data for visualization
+                        if hasattr(scenario_instance, 'config_obj') and hasattr(scenario_instance.config_obj, 'zone_type'):
+                            if scenario_instance.config_obj.zone_type == 'line' and scenario_instance.config_obj.zone_coordinates:
+                                line_zone = {
+                                    "type": "line",
+                                    "coordinates": scenario_instance.config_obj.zone_coordinates,
+                                    "direction": scenario_instance.config_obj.zone_direction
+                                }
+                        
+                        # Get objects that touched the line (for visualization)
+                        if hasattr(scenario_instance, '_state'):
+                            state = scenario_instance._state
+                            # Get track info with center points and touch status for visualization
+                            scenario_track_info = state.get('track_info', [])
+                            if scenario_track_info:
+                                track_info = scenario_track_info
+                            
+                            # Match tracks that are currently touching the line to detection indices
+                            # Use track_info which already has touching_line flag (more accurate than matching touched_track_ids)
+                            if track_info and hasattr(scenario_instance, 'tracker') and scenario_instance.tracker:
+                                # Get active tracks from tracker for matching
+                                active_tracks = scenario_instance.tracker.tracks
+                                
+                                # Create a map of track_id to track_info for quick lookup
+                                track_info_map = {t.get('track_id'): t for t in track_info if t.get('track_id') is not None}
+                                
+                                # Match tracks that are touching the line to detection indices by IoU
+                                for track in active_tracks:
+                                    track_info_item = track_info_map.get(track.track_id)
+                                    # Only match tracks that are currently touching the line
+                                    if track_info_item and track_info_item.get('touching_line', False):
+                                        # Find matching detection index
+                                        track_bbox = track.bbox
+                                        for idx, det_box in enumerate(merged_packet.boxes):
+                                            if idx >= len(merged_packet.classes):
+                                                continue
+                                            # Check if class matches
+                                            det_class = merged_packet.classes[idx]
+                                            if isinstance(det_class, str) and det_class.lower() == target_class:
+                                                # Calculate IoU
+                                                iou = self._calculate_iou(track_bbox, det_box)
+                                                if iou >= 0.3:  # Match threshold
+                                                    if idx not in line_crossed_indices:
+                                                        line_crossed_indices.append(idx)
+                                                    break
             
             # Filter detections based on scenario type
             if is_restricted_zone and target_class:
@@ -351,6 +410,27 @@ class PipelineRunner:
                 f_boxes, f_classes, f_scores = self._filter_detections_by_class(
                     target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores
                 )
+            elif is_line_counting and target_class:
+                # Show ALL detections of target class for line counting
+                f_boxes, f_classes, f_scores = self._filter_detections_by_class(
+                    target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores
+                )
+                
+                # Map line_crossed_indices from merged_packet indices to filtered indices
+                if line_crossed_indices:
+                    # Create mapping: original index -> filtered index
+                    filtered_crossed_indices = []
+                    original_to_filtered = {}
+                    filtered_idx = 0
+                    for orig_idx in range(len(merged_packet.boxes)):
+                        if orig_idx < len(merged_packet.classes):
+                            det_class = merged_packet.classes[orig_idx]
+                            if isinstance(det_class, str) and det_class.lower() == target_class:
+                                if orig_idx in line_crossed_indices:
+                                    filtered_crossed_indices.append(filtered_idx)
+                                original_to_filtered[orig_idx] = filtered_idx
+                                filtered_idx += 1
+                    line_crossed_indices = filtered_crossed_indices
             elif all_matched_indices:
                 # Other scenarios: show only matched detections
                 unique_indices = sorted(set(all_matched_indices))
@@ -378,13 +458,40 @@ class PipelineRunner:
                 },
                 "rules": self.context.rules,
                 "camera_id": self.context.camera_id,
-                "zone_violated": zone_violated,  # Add zone violation status
+                "zone_violated": zone_violated,  # Zone violation status
+                "line_zone": line_zone,  # Line zone data for visualization
+                "line_crossed": len(line_crossed_indices) > 0,  # Whether any object crossed the line
+                "line_crossed_indices": line_crossed_indices,  # Indices of filtered detections that crossed the line
+                "track_info": track_info,  # Track information (center points, track IDs) for visualization
             }
             
             return processed_frame
         except Exception as exc:  # noqa: BLE001
             print(f"[worker {self.context.task_id}] ⚠️  Error processing frame for stream: {exc}")
             return None
+    
+    def _calculate_iou(self, box1: List[float], box2: List[float]) -> float:
+        """Calculate Intersection over Union between two boxes."""
+        x1_1, y1_1, x2_1, y2_1 = box1
+        x1_2, y1_2, x2_2, y2_2 = box2
+        
+        overlap_left = max(x1_1, x1_2)
+        overlap_top = max(y1_1, y1_2)
+        overlap_right = min(x2_1, x2_2)
+        overlap_bottom = min(y2_1, y2_2)
+        
+        if overlap_right < overlap_left or overlap_bottom < overlap_top:
+            return 0.0
+        
+        intersection = (overlap_right - overlap_left) * (overlap_bottom - overlap_top)
+        area1 = (x2_1 - x1_1) * (y2_1 - y1_1)
+        area2 = (x2_2 - x1_2) * (y2_2 - y1_2)
+        union = area1 + area2 - intersection
+        
+        if union == 0:
+            return 0.0
+        
+        return intersection / union
     
     def _filter_detections_by_indices(
         self,
