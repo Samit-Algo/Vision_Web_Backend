@@ -574,6 +574,92 @@
           "run_mode": "continuous",
           "alert_cooldown_seconds": 10
         }
+      },
+
+      {
+        "rule_id": "fall_detection",
+        "rule_name": "Fall Detection",
+        "description": "Detects when a person falls down using pose keypoint analysis. Monitors body angle, height, and sudden downward movement to identify falls. Requires pose detection model (YOLOv8 Pose). Triggers alert when fall is confirmed after multiple consecutive frames.",
+      
+        "intent_examples": [
+          "Alert me if any person fall detected",
+          "Alert me if any fall detected",
+          "Notify me when someone falls down",
+          "Detect if a person falls",
+          "Alert if someone falls",
+          "Tell me if a person falls",
+          "Monitor for falls",
+          "Detect human falls",
+          "Alert on fall detection",
+          "Notify when fall is detected"
+        ],
+      
+        "model": "yolov8m-pose.pt",
+      
+        "detectable_classes": [
+          "person"
+        ],
+      
+        "required_fields_from_user": [],
+      
+        "time_window": {
+          "supported": true,
+          "required": true
+        },
+      
+        "zone_support": {
+          "supported": false,
+          "required": false
+        },
+      
+        "execution_modes": {
+          "continuous": {
+            "description": "Continuously monitors for fall detection",
+            "required_fields": [],
+            "forbidden_fields": [
+              "interval_minutes",
+              "check_duration_seconds"
+            ],
+            "zone_required": false
+          },
+      
+          "patrol": {
+            "description": "Checks periodically for fall detection",
+            "required_fields": [
+              "interval_minutes",
+              "check_duration_seconds"
+            ],
+            "zone_required": false
+          }
+        },
+      
+        "rules_config_fields": [
+          "class",
+          "label",
+          "alert_cooldown_seconds",
+          "confidence_threshold",
+          "kp_confidence_threshold",
+          "lying_angle_threshold",
+          "hip_drop_threshold",
+          "height_drop_ratio",
+          "min_height_for_standing",
+          "confirm_frames"
+        ],
+      
+        "defaults": {
+          "fps": 5,
+          "confidence": 0.5,
+          "run_mode": "continuous",
+          "class": "person",
+          "alert_cooldown_seconds": 10,
+          "confidence_threshold": 0.5,
+          "kp_confidence_threshold": 0.3,
+          "lying_angle_threshold": 50,
+          "hip_drop_threshold": 15,
+          "height_drop_ratio": 0.25,
+          "min_height_for_standing": 300,
+          "confirm_frames": 3
+        }
       }
       
       

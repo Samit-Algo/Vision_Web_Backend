@@ -31,6 +31,7 @@ from app.processing.scenarios.weapon_detection import scenario as weapon_detecti
 from app.processing.scenarios.class_count import scenario as class_count_scenario  # noqa: F401
 from app.processing.scenarios.box_count import scenario as box_count_scenario  # noqa: F401
 from app.processing.scenarios.restricted_zone import scenario as restricted_zone_scenario  # noqa: F401
+from app.processing.scenarios.fall_detection import scenario as fall_detection_scenario  # noqa: F401
 
 # Check for class_presence scenario if it exists
 try:

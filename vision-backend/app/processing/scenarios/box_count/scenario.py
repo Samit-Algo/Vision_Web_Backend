@@ -106,8 +106,16 @@ class BoxCountScenario(BaseScenario):
         if len(class_detections) > 0:
             print(f"[BOX_COUNT] 📦 Filtered {len(class_detections)} '{self.config_obj.target_class}' detections for tracking")
         
+        # Store track ID counter before update (to detect new IDs)
+        prev_track_count = self.tracker.track_id_counter
+        
         # Update tracker
         active_tracks = self.tracker.update(class_detections)
+        
+        # Log if new track IDs were created
+        new_track_count = self.tracker.track_id_counter - prev_track_count
+        if new_track_count > 0:
+            print(f"[BOX_COUNT] 🆕 Created {new_track_count} new track ID(s), next ID: {self.tracker.track_id_counter}")
         
         # Also get all active tracks (including unconfirmed) for line crossing detection
         # This ensures we detect crossings even for tracks that haven't been confirmed yet

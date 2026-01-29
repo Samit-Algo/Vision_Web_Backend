@@ -147,7 +147,10 @@ def evaluate_rules_stage(
                 # Convert rule to scenario config format
                 # Rule fields (except "type") become scenario config
                 scenario_config = {k: v for k, v in rule.items() if k != "type"}
-                context._scenario_instances[rule_idx] = scenario_class(scenario_config, context)
+                scenario_instance = scenario_class(scenario_config, context)
+                # Explicitly set scenario_id from rule type (since we removed "type" from config)
+                scenario_instance.scenario_id = rule_type
+                context._scenario_instances[rule_idx] = scenario_instance
             
             scenario_instance = context._scenario_instances[rule_idx]
             

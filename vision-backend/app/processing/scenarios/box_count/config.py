@@ -43,10 +43,16 @@ class BoxCountConfig:
                 self.zone_direction = zone.get("direction", "both")
                 self.zone_applied = True
         
-        # Tracker configuration (for line-based counting)
-        # Lower min_hits for boxes (they move faster, need faster confirmation)
+        # Tracker configuration (optimized for conveyor belt scenarios)
+        # 
+        # Key settings for stable track ID assignment:
+        # - max_age: How long to keep a track alive when not seen (30 frames = ~1 second at 30fps)
+        # - min_hits: How many consecutive detections before track is confirmed (1 = immediate)
+        # - iou_threshold: Minimum overlap for matching (0.15 = lower threshold for fast-moving boxes)
+        # - score_threshold: Minimum detection confidence (0.5 = balanced)
+        #
         self.tracker_config = config.get("tracker_config", {})
         self.max_age = self.tracker_config.get("max_age", 30)
-        self.min_hits = self.tracker_config.get("min_hits", 1)  # Lower for boxes (was 3)
-        self.iou_threshold = self.tracker_config.get("iou_threshold", 0.3)
+        self.min_hits = self.tracker_config.get("min_hits", 1)  # Lower for boxes (immediate confirmation)
+        self.iou_threshold = self.tracker_config.get("iou_threshold", 0.15)  # Lower for fast-moving boxes (was 0.3)
         self.score_threshold = self.tracker_config.get("score_threshold", 0.5)

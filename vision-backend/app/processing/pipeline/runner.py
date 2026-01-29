@@ -25,7 +25,11 @@ from app.utils.db import get_collection
 from app.utils.datetime_utils import now, utc_now
 from app.utils.event_notifier import send_event_to_backend_sync
 from app.utils.event_session_manager import get_event_session_manager
-from app.processing.worker.frame_processor import draw_bounding_boxes, draw_pose_keypoints
+from app.processing.worker.frame_processor import (
+    draw_bounding_boxes, 
+    draw_pose_keypoints,
+    draw_box_count_annotations
+)
 from app.processing.detections.contracts import DetectionPacket
 
 
@@ -71,6 +75,17 @@ class PipelineRunner:
     
     def run_continuous(self) -> None:
         """Run pipeline in continuous mode (process frames indefinitely at target FPS)."""
+        # Check if any rules are counting rules (box_count or class_count)
+        # For counting rules, use camera FPS instead of configured FPS
+        use_camera_fps = False
+        if self.context.rules:
+            for rule in self.context.rules:
+                rule_type = str(rule.get("type", "")).strip().lower()
+                if rule_type in ['box_count', 'class_count']:
+                    use_camera_fps = True
+                    break
+        
+        # Default to configured FPS
         fps = self.context.fps
         min_interval = 1.0 / max(1, fps)
         next_tick = time.time()
@@ -88,17 +103,22 @@ class PipelineRunner:
                 print(f"[worker {self.context.task_id}] ⏹️ Stopping (reason={stop_reason})")
                 return
             
-            # FPS pacing
-            now_timestamp = time.time()
-            if now_timestamp < next_tick:
-                time.sleep(max(0.0, next_tick - now_timestamp))
-            next_tick = max(next_tick + min_interval, time.time())
-            
             # Stage 1: Acquire frame
             frame_packet = acquire_frame_stage(self.source)
             if frame_packet is None:
                 time.sleep(0.05)
                 continue
+            
+            # For counting rules, use camera FPS if available
+            if use_camera_fps and frame_packet.fps is not None and frame_packet.fps > 0:
+                fps = frame_packet.fps
+                min_interval = 1.0 / max(1, fps)
+            
+            # FPS pacing
+            now_timestamp = time.time()
+            if now_timestamp < next_tick:
+                time.sleep(max(0.0, next_tick - now_timestamp))
+            next_tick = max(next_tick + min_interval, time.time())
             
             # Update context tracking
             hub_index = frame_packet.frame_index
@@ -170,6 +190,18 @@ class PipelineRunner:
         """Run pipeline in patrol mode (sleep interval, then process window, repeat)."""
         interval_seconds = max(0, int(self.context.interval_minutes) * 60)
         window_seconds = max(1, int(self.context.check_duration_seconds))
+        
+        # Check if any rules are counting rules (box_count or class_count)
+        # For counting rules, use camera FPS instead of configured FPS
+        use_camera_fps = False
+        if self.context.rules:
+            for rule in self.context.rules:
+                rule_type = str(rule.get("type", "")).strip().lower()
+                if rule_type in ['box_count', 'class_count']:
+                    use_camera_fps = True
+                    break
+        
+        # Default to configured FPS
         fps = self.context.fps
         
         print(f"[worker {self.context.task_id}] 💤 Patrol mode | sleep={interval_seconds}s window={window_seconds}s fps={fps}")
@@ -202,17 +234,22 @@ class PipelineRunner:
                     print(f"[worker {self.context.task_id}] ⏹️ Stopping (reason={stop_reason})")
                     return
                 
-                # FPS pacing
-                now_timestamp = time.time()
-                if now_timestamp < next_tick:
-                    time.sleep(max(0.0, next_tick - now_timestamp))
-                next_tick = max(next_tick + min_interval, time.time())
-                
                 # Stage 1: Acquire frame
                 frame_packet = acquire_frame_stage(self.source)
                 if frame_packet is None:
                     time.sleep(0.05)
                     continue
+                
+                # For counting rules, use camera FPS if available
+                if use_camera_fps and frame_packet.fps is not None and frame_packet.fps > 0:
+                    fps = frame_packet.fps
+                    min_interval = 1.0 / max(1, fps)
+                
+                # FPS pacing
+                now_timestamp = time.time()
+                if now_timestamp < next_tick:
+                    time.sleep(max(0.0, next_tick - now_timestamp))
+                next_tick = max(next_tick + min_interval, time.time())
                 
                 # Update context tracking
                 hub_index = frame_packet.frame_index
@@ -315,16 +352,6 @@ class PipelineRunner:
         try:
             frame = frame_packet.frame.copy()
             
-            # Draw pose keypoints if available; otherwise draw bounding boxes
-            if detections.get("keypoints"):
-                processed_frame = draw_pose_keypoints(frame, detections, self.context.rules)
-            else:
-                processed_frame = draw_bounding_boxes(frame, detections, self.context.rules)
-            
-            # Convert to bytes
-            frame_bytes = processed_frame.tobytes()
-            height, width = processed_frame.shape[0], processed_frame.shape[1]
-            
             # For restricted zone scenarios: show ALL person detections, not just those in zone
             # For class_count/box_count with line: show ALL detections of target class
             # For other scenarios: show only matched detections
@@ -333,12 +360,15 @@ class PipelineRunner:
             line_crossed_indices = []  # Indices of objects that crossed the line
             line_zone = None  # Line zone data for visualization
             track_info = []  # Track information (center points, track IDs) for visualization
+            counts = None  # Counts for box/class counting scenarios
+            active_tracks_count = 0  # Number of active tracks
             
             # Check scenario types
             is_restricted_zone = False
             is_line_counting = False
+            
             if hasattr(self.context, '_scenario_instances'):
-                for scenario_instance in self.context._scenario_instances.values():
+                for rule_idx, scenario_instance in self.context._scenario_instances.items():
                     scenario_type = getattr(scenario_instance, 'scenario_id', '')
                     
                     # Check if this is a restricted zone scenario
@@ -355,6 +385,7 @@ class PipelineRunner:
                     # Check if this is a line-based counting scenario (class_count or box_count)
                     elif scenario_type in ['class_count', 'box_count']:
                         is_line_counting = True
+                        
                         if hasattr(scenario_instance, 'config_obj') and hasattr(scenario_instance.config_obj, 'target_class'):
                             target_class = scenario_instance.config_obj.target_class
                         
@@ -370,10 +401,23 @@ class PipelineRunner:
                         # Get objects that touched the line (for visualization)
                         if hasattr(scenario_instance, '_state'):
                             state = scenario_instance._state
+                            
                             # Get track info with center points and touch status for visualization
                             scenario_track_info = state.get('track_info', [])
+                            
                             if scenario_track_info:
-                                track_info = scenario_track_info
+                                track_info = scenario_track_info.copy()  # Make a copy to avoid reference issues
+                            else:
+                                track_info = []  # Ensure track_info is always a list
+                            
+                            # Get counts from line counter if available
+                            if hasattr(scenario_instance, 'line_counter') and scenario_instance.line_counter:
+                                counts = scenario_instance.line_counter.get_counts()
+                            
+                            # Get active tracks count
+                            if hasattr(scenario_instance, 'tracker') and scenario_instance.tracker:
+                                all_active_tracks = scenario_instance.tracker.get_all_active_tracks()
+                                active_tracks_count = len(all_active_tracks)
                             
                             # Match tracks that are currently touching the line to detection indices
                             # Use track_info which already has touching_line flag (more accurate than matching touched_track_ids)
@@ -403,6 +447,22 @@ class PipelineRunner:
                                                     if idx not in line_crossed_indices:
                                                         line_crossed_indices.append(idx)
                                                     break
+            
+            # Draw annotations based on scenario type
+            # For line-based counting (box_count/class_count), frontend handles drawing
+            # Backend only draws for pose keypoints or regular bounding boxes
+            if detections.get("keypoints"):
+                processed_frame = draw_pose_keypoints(frame, detections, self.context.rules)
+            elif is_line_counting:
+                # For line counting, frontend draws boxes/center points based on track_info
+                # Don't draw boxes here to avoid duplicates
+                processed_frame = frame.copy()
+            else:
+                processed_frame = draw_bounding_boxes(frame, detections, self.context.rules)
+            
+            # Convert to bytes
+            frame_bytes = processed_frame.tobytes()
+            height, width = processed_frame.shape[0], processed_frame.shape[1]
             
             # Filter detections based on scenario type
             if is_restricted_zone and target_class:

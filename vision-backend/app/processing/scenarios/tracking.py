@@ -22,6 +22,10 @@ class Track:
         self.history = [self.center]  # Movement history
         self.age = 1
         self.hit_streak = 1
+        self.time_since_update = 0  # Frames since last successful match
+        
+        # Velocity estimation (for motion prediction)
+        self.velocity: Tuple[float, float] = (0.0, 0.0)
     
     def _calculate_center(self) -> Tuple[float, float]:
         """Calculate center point of bounding box."""
@@ -29,6 +33,29 @@ class Track:
         center_x = float(x1 + x2) / 2.0
         center_y = float(y1 + y2) / 2.0
         return (center_x, center_y)
+    
+    def _update_velocity(self):
+        """Update velocity based on recent movement."""
+        if len(self.history) >= 2:
+            # Use last 2 positions to estimate velocity
+            prev = self.history[-2]
+            curr = self.history[-1]
+            self.velocity = (curr[0] - prev[0], curr[1] - prev[1])
+        else:
+            self.velocity = (0.0, 0.0)
+    
+    def predict_position(self) -> Tuple[float, float]:
+        """Predict next position based on velocity."""
+        # Use velocity to predict where the box will be
+        predicted_x = self.center[0] + self.velocity[0]
+        predicted_y = self.center[1] + self.velocity[1]
+        return (predicted_x, predicted_y)
+    
+    def get_predicted_bbox(self) -> List[float]:
+        """Get predicted bounding box based on velocity."""
+        dx, dy = self.velocity
+        x1, y1, x2, y2 = self.bbox
+        return [x1 + dx, y1 + dy, x2 + dx, y2 + dy]
     
     def update(self, bbox: List[float], score: float, frame_id: int):
         """Update track with new detection."""
@@ -39,14 +66,38 @@ class Track:
         self.history.append(self.center)
         self.age += 1
         self.hit_streak += 1
+        self.time_since_update = 0  # Reset on successful match
+        
+        # Update velocity estimation
+        self._update_velocity()
         
         # Keep only last 30 positions
         if len(self.history) > 30:
             self.history = self.history[-30:]
+    
+    def mark_missed(self):
+        """Mark this track as missed (not matched in current frame)."""
+        self.time_since_update += 1
+        self.hit_streak = 0  # Reset hit streak on miss
 
 
 class SimpleTracker:
-    """Simple object tracker using IoU matching."""
+    """
+    Enhanced object tracker for conveyor belt scenarios.
+    
+    Uses a multi-stage matching strategy for stable track ID assignment:
+    1. Primary matching: IoU + Velocity Prediction (for fast-moving boxes)
+    2. Secondary matching: Center Distance with predicted position
+    3. Fallback matching: Distance-only for lost tracks (recover IDs)
+    4. Each detection is assigned to at most one track
+    5. Unmatched detections create new tracks
+    
+    Key improvements for conveyor belts:
+    - Velocity-based position prediction
+    - Lower IoU threshold for fast motion
+    - Distance-based fallback matching
+    - Better handling of temporary occlusions
+    """
     
     def __init__(self, max_age: int = 30, min_hits: int = 3, 
                  iou_threshold: float = 0.3, score_threshold: float = 0.5):
@@ -57,6 +108,10 @@ class SimpleTracker:
         self.tracks: List[Track] = []
         self.track_id_counter = 0
         self.frame_id = 0  # Current frame number
+        
+        # Distance threshold for fallback matching (pixels)
+        # This allows matching even when IoU is 0 (box moved too far)
+        self.max_distance_threshold = 150.0  # Increased for faster conveyor belts
     
     def _iou(self, box1: List[float], box2: List[float]) -> float:
         """Calculate Intersection over Union between two boxes."""
@@ -79,12 +134,40 @@ class SimpleTracker:
         
         return intersection / union if union > 0 else 0.0
     
+    def _center_distance(self, box1: List[float], box2: List[float]) -> float:
+        """Calculate Euclidean distance between centers of two boxes."""
+        cx1 = (box1[0] + box1[2]) / 2
+        cy1 = (box1[1] + box1[3]) / 2
+        cx2 = (box2[0] + box2[2]) / 2
+        cy2 = (box2[1] + box2[3]) / 2
+        return ((cx1 - cx2) ** 2 + (cy1 - cy2) ** 2) ** 0.5
+    
+    def _point_distance(self, p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
+        """Calculate Euclidean distance between two points."""
+        return ((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2) ** 0.5
+    
+    def _get_detection_center(self, bbox: List[float]) -> Tuple[float, float]:
+        """Get center point of a detection bbox."""
+        return ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
+    
     def _match_detections_to_tracks(
         self, 
         detections: List[Tuple[List[float], float]],
-        tracks: List[Track]
+        tracks: List[Track],
+        use_prediction: bool = True
     ) -> Tuple[List[Tuple[int, int]], List[int], List[int]]:
-        """Match detections to tracks using IoU."""
+        """
+        Enhanced matching using IoU + Velocity Prediction + Center Distance.
+        
+        Matching strategy for conveyor belt scenarios:
+        1. Use predicted position (from velocity) for matching
+        2. Calculate IoU between detection and predicted track position
+        3. Also calculate center distance to predicted position
+        4. Combined score gives weight to both overlap and position
+        5. Lower IoU threshold (0.15) for fast-moving boxes
+        
+        This ensures stable track IDs even when boxes move fast.
+        """
         # Edge case: No detections
         if len(detections) == 0:
             unmatched_track_indices = list(range(len(tracks)))
@@ -95,43 +178,147 @@ class SimpleTracker:
             unmatched_detection_indices = list(range(len(detections)))
             return [], unmatched_detection_indices, []
         
-        # Calculate IoU matrix
-        iou_matrix = np.zeros((len(detections), len(tracks)))
+        # Calculate matching matrices
+        num_dets = len(detections)
+        num_tracks = len(tracks)
+        
+        iou_matrix = np.zeros((num_dets, num_tracks))
+        iou_predicted_matrix = np.zeros((num_dets, num_tracks))  # IoU with predicted position
+        dist_matrix = np.zeros((num_dets, num_tracks))
+        dist_predicted_matrix = np.zeros((num_dets, num_tracks))  # Distance to predicted position
+        
         for d_idx, (d_bbox, _) in enumerate(detections):
+            det_center = self._get_detection_center(d_bbox)
+            
             for t_idx, track in enumerate(tracks):
+                # Current position matching
                 iou_matrix[d_idx, t_idx] = self._iou(d_bbox, track.bbox)
+                dist_matrix[d_idx, t_idx] = self._center_distance(d_bbox, track.bbox)
+                
+                # Predicted position matching (for fast-moving boxes)
+                if use_prediction and len(track.history) >= 2:
+                    predicted_bbox = track.get_predicted_bbox()
+                    predicted_center = track.predict_position()
+                    iou_predicted_matrix[d_idx, t_idx] = self._iou(d_bbox, predicted_bbox)
+                    dist_predicted_matrix[d_idx, t_idx] = self._point_distance(det_center, predicted_center)
+                else:
+                    iou_predicted_matrix[d_idx, t_idx] = iou_matrix[d_idx, t_idx]
+                    dist_predicted_matrix[d_idx, t_idx] = dist_matrix[d_idx, t_idx]
         
-        # Find matches above threshold (greedy matching)
+        # Use the BETTER of current vs predicted IoU
+        best_iou_matrix = np.maximum(iou_matrix, iou_predicted_matrix)
+        # Use the SMALLER of current vs predicted distance
+        best_dist_matrix = np.minimum(dist_matrix, dist_predicted_matrix)
+        
+        # Normalize distances
+        max_dist = np.max(best_dist_matrix) if np.max(best_dist_matrix) > 0 else 1.0
+        normalized_dist = best_dist_matrix / max_dist
+        
+        # Combined score: IoU + (1 - normalized_distance) * weight
+        # Higher IoU is better, lower distance is better
+        # Weight 0.4 means distance matters significantly (increased from 0.1)
+        distance_weight = 0.4
+        combined_score = best_iou_matrix + (1.0 - normalized_dist) * distance_weight
+        
+        # Lower IoU threshold for conveyor belts (fast-moving boxes)
+        # Use 0.15 instead of self.iou_threshold for better matching
+        effective_iou_threshold = min(self.iou_threshold, 0.15)
+        
+        # Find matches (greedy matching using combined score)
         potential_matches = []
-        for d_idx in range(len(detections)):
-            for t_idx in range(len(tracks)):
-                overlap_score = iou_matrix[d_idx, t_idx]
-                if overlap_score > self.iou_threshold:
-                    potential_matches.append((d_idx, t_idx, overlap_score))
+        for d_idx in range(num_dets):
+            for t_idx in range(num_tracks):
+                iou_score = best_iou_matrix[d_idx, t_idx]
+                dist_score = best_dist_matrix[d_idx, t_idx]
+                
+                # Match if IoU is good enough OR distance is close enough
+                # This allows matching even when IoU is 0 (box moved far but is close)
+                if iou_score >= effective_iou_threshold or dist_score < self.max_distance_threshold:
+                    potential_matches.append((
+                        d_idx, t_idx, 
+                        combined_score[d_idx, t_idx], 
+                        iou_score, 
+                        dist_score
+                    ))
         
-        # Sort by IoU (highest first)
+        # Sort by combined score (highest first)
         potential_matches.sort(key=lambda x: x[2], reverse=True)
         
         matches = []
         used_detections = set()
         used_tracks = set()
-        unmatched_track_indices = list(range(len(tracks)))
+        unmatched_track_indices = list(range(num_tracks))
         
-        for d_idx, t_idx, _ in potential_matches:
+        for d_idx, t_idx, score, iou, dist in potential_matches:
             if d_idx not in used_detections and t_idx not in used_tracks:
+                # Additional validation: don't match if both IoU is 0 AND distance is too far
+                if iou < 0.01 and dist > self.max_distance_threshold:
+                    continue
+                    
                 matches.append((d_idx, t_idx))
                 used_detections.add(d_idx)
                 used_tracks.add(t_idx)
                 if t_idx in unmatched_track_indices:
                     unmatched_track_indices.remove(t_idx)
         
-        unmatched_detections = [i for i in range(len(detections)) if i not in used_detections]
+        unmatched_detections = [i for i in range(num_dets) if i not in used_detections]
         
         return matches, unmatched_detections, unmatched_track_indices
+    
+    def _fallback_distance_matching(
+        self,
+        detections: List[Tuple[List[float], float]],
+        tracks: List[Track]
+    ) -> List[Tuple[int, int]]:
+        """
+        Fallback matching using pure center distance.
+        
+        Used for tracks that couldn't be matched by IoU (e.g., after occlusion).
+        This helps recover lost track IDs instead of creating new ones.
+        """
+        if len(detections) == 0 or len(tracks) == 0:
+            return []
+        
+        matches = []
+        used_detections = set()
+        used_tracks = set()
+        
+        # Calculate distance from each detection to each track's predicted position
+        distance_pairs = []
+        for d_idx, (d_bbox, _) in enumerate(detections):
+            det_center = self._get_detection_center(d_bbox)
+            
+            for t_idx, track in enumerate(tracks):
+                # Use predicted position for matching
+                predicted_center = track.predict_position()
+                dist = self._point_distance(det_center, predicted_center)
+                
+                if dist < self.max_distance_threshold:
+                    distance_pairs.append((d_idx, t_idx, dist))
+        
+        # Sort by distance (smallest first)
+        distance_pairs.sort(key=lambda x: x[2])
+        
+        # Greedy matching
+        for d_idx, t_idx, dist in distance_pairs:
+            if d_idx not in used_detections and t_idx not in used_tracks:
+                matches.append((d_idx, t_idx))
+                used_detections.add(d_idx)
+                used_tracks.add(t_idx)
+        
+        return matches
     
     def update(self, detections: List[Tuple[List[float], float]]) -> List[Track]:
         """
         Update tracker with new detections.
+        
+        Enhanced update process for conveyor belt scenarios:
+        1. Filter detections by confidence
+        2. Match to confirmed tracks (with velocity prediction)
+        3. Match remaining detections to unconfirmed tracks
+        4. Fallback: Try distance-only matching for lost tracks
+        5. Create new tracks for truly new detections
+        6. Remove old tracks
         
         Args:
             detections: List of (bbox, score) tuples
@@ -149,9 +336,9 @@ class SimpleTracker:
         confirmed_tracks = [t for t in self.tracks if t.hit_streak >= self.min_hits]
         unconfirmed_tracks = [t for t in self.tracks if t.hit_streak < self.min_hits]
         
-        # Match detections to confirmed tracks first
-        matches, unmatched_dets, unmatched_track_indices = self._match_detections_to_tracks(
-            valid_detections, confirmed_tracks
+        # STEP 1: Match detections to confirmed tracks (with velocity prediction)
+        matches, unmatched_dets, unmatched_confirmed_indices = self._match_detections_to_tracks(
+            valid_detections, confirmed_tracks, use_prediction=True
         )
         
         # Update matched confirmed tracks
@@ -159,13 +346,17 @@ class SimpleTracker:
             bbox, score = valid_detections[d_idx]
             confirmed_tracks[t_idx].update(bbox, score, self.frame_id)
         
-        # Try to match unmatched detections to unconfirmed tracks
+        # Mark unmatched confirmed tracks as missed
+        for t_idx in unmatched_confirmed_indices:
+            confirmed_tracks[t_idx].mark_missed()
+        
+        # STEP 2: Match unmatched detections to unconfirmed tracks
         unmatched_detections = [valid_detections[idx] for idx in unmatched_dets]
         remaining_unmatched_indices = set(unmatched_dets)
         
         if len(unmatched_detections) > 0 and len(unconfirmed_tracks) > 0:
-            matches_2, _, _ = self._match_detections_to_tracks(
-                unmatched_detections, unconfirmed_tracks
+            matches_2, unmatched_dets_2, _ = self._match_detections_to_tracks(
+                unmatched_detections, unconfirmed_tracks, use_prediction=True
             )
             
             for d_idx, t_idx in matches_2:
@@ -175,7 +366,25 @@ class SimpleTracker:
                 original_idx = unmatched_dets[d_idx]
                 remaining_unmatched_indices.discard(original_idx)
         
-        # Create new tracks for remaining unmatched detections
+        # STEP 3: Fallback - Try distance matching for lost confirmed tracks
+        # This helps recover IDs for tracks that went out of view briefly
+        if len(remaining_unmatched_indices) > 0 and len(unmatched_confirmed_indices) > 0:
+            remaining_detections = [(valid_detections[idx][0], valid_detections[idx][1]) 
+                                   for idx in remaining_unmatched_indices]
+            lost_tracks = [confirmed_tracks[idx] for idx in unmatched_confirmed_indices]
+            
+            fallback_matches = self._fallback_distance_matching(remaining_detections, lost_tracks)
+            
+            remaining_list = list(remaining_unmatched_indices)
+            for d_idx, t_idx in fallback_matches:
+                original_d_idx = remaining_list[d_idx]
+                original_t_idx = unmatched_confirmed_indices[t_idx]
+                
+                bbox, score = valid_detections[original_d_idx]
+                confirmed_tracks[original_t_idx].update(bbox, score, self.frame_id)
+                remaining_unmatched_indices.discard(original_d_idx)
+        
+        # STEP 4: Create new tracks for remaining unmatched detections
         for d_idx in remaining_unmatched_indices:
             if d_idx < len(valid_detections):
                 bbox, score = valid_detections[d_idx]
@@ -183,13 +392,13 @@ class SimpleTracker:
                 self.tracks.append(new_track)
                 self.track_id_counter += 1
         
-        # Remove old tracks that haven't been seen for too long
+        # STEP 5: Remove old tracks that haven't been seen for too long
         active_tracks = []
         for track in self.tracks:
             # Keep track if it was updated this frame
             if track.frame_id == self.frame_id:
                 active_tracks.append(track)
-            # Or if it's still within max_age (might come back)
+            # Or if it's still within max_age (might come back - handles occlusion)
             elif self.frame_id - track.frame_id <= self.max_age:
                 active_tracks.append(track)
         
@@ -200,6 +409,14 @@ class SimpleTracker:
             track for track in self.tracks 
             if track.hit_streak >= self.min_hits and track.frame_id == self.frame_id
         ]
+        
+        # Debug: Log tracking statistics (only when there are detections)
+        if len(valid_detections) > 0:
+            matched_count = len(valid_detections) - len(remaining_unmatched_indices)
+            print(f"[TRACKER] 🔍 Matched: {matched_count}/{len(valid_detections)} detections | "
+                  f"Active IDs: {[t.track_id for t in confirmed_active_tracks]} | "
+                  f"Total tracks: {len(self.tracks)}")
+        
         return confirmed_active_tracks
     
     def get_all_active_tracks(self) -> List[Track]:
@@ -264,15 +481,13 @@ class LineCrossingCounter:
         self.frame_width: Optional[int] = None
         self.frame_height: Optional[int] = None
         
-        # Remember which side each track is on (used for touch-based counting to determine direction)
-        # Format: {track_id: 'bottom_side', 'top_side', 'left_side', or 'right_side'}
-        self.track_sides: Dict[int, str] = {}
-        
-        # For touch-based counting: track which boxes have touched the line
-        # Format: {track_id: {'touched': bool, 'last_side': str, 'counted': bool, 'direction': str}}
-        # direction: 'entry' or 'exit' based on generic rules:
-        #   - Horizontal line: bottom-to-top = "entry", top-to-bottom = "exit"
-        #   - Vertical line: right-to-left = "entry", left-to-right = "exit"
+        # For side-transition counting: track which boxes have crossed the line
+        # Format: {track_id: {'initial_side': str, 'last_side': str, 'counted': bool, 'direction': str, 'count_frame': int}}
+        # 
+        # CONVEYOR BELT COUNTING:
+        # - Each track ID is counted ONLY ONCE (counted=True is PERMANENT)
+        # - Prevents jitter-based double counting
+        # - direction: 'entry' (side2→side1, loading) or 'exit' (side1→side2, unloading)
         self._touch_tracking: Dict[int, Dict[str, Any]] = {}
         self.touch_threshold_pixels: float = 10.0  # Distance threshold for "touching" the line (increased from 5.0 for better detection)
     
@@ -307,33 +522,34 @@ class LineCrossingCounter:
             self.line_end[1] - self.line_start[1]
         )
     
-    def _is_horizontal_line(self) -> bool:
-        """
-        Determine if line is mostly horizontal (within 45 degrees).
-        
-        Returns:
-            True if line is mostly horizontal, False if mostly vertical
-        """
-        if self.line_vector is None:
-            return False
-        # Calculate angle: if |dy| < |dx|, line is more horizontal
-        return abs(self.line_vector[1]) < abs(self.line_vector[0])
-    
     def _get_side(self, point: Tuple[float, float]) -> str:
         """
-        Determine which side of line the point is on using a generic approach.
+        Determine which side of line the point is on.
         
-        For horizontal lines:
-        - Points below the line = 'bottom_side'
-        - Points above the line = 'top_side'
+        Uses cross product to determine which side of the line a point is on.
+        Works for ANY line orientation (horizontal, vertical, or diagonal).
         
-        For vertical lines:
-        - Points to the right of the line = 'right_side'
-        - Points to the left of the line = 'left_side'
+        ═══════════════════════════════════════════════════════════════════
+        HORIZONTAL LINE (left to right):
+        ═══════════════════════════════════════════════════════════════════
+                    Side 2 (ABOVE)  ← negative cross product
+            ─────────────────────────
+                    Side 1 (BELOW)  ← positive cross product
+            
+            Movement: Side 2 → Side 1 (top to bottom) = ADD/ENTRY
+            Movement: Side 1 → Side 2 (bottom to top) = OUT/EXIT
         
-        Uses cross product to determine side, then maps to semantic names.
+        ═══════════════════════════════════════════════════════════════════
+        VERTICAL LINE (top to bottom):
+        ═══════════════════════════════════════════════════════════════════
+            Side 1 (LEFT)  │  Side 2 (RIGHT)
+            positive cross │  negative cross
+                           │
+            Movement: Side 2 → Side 1 (right to left) = ADD/ENTRY
+            Movement: Side 1 → Side 2 (left to right) = OUT/EXIT
+        ═══════════════════════════════════════════════════════════════════
         
-        Returns: 'bottom_side', 'top_side', 'right_side', or 'left_side'
+        Returns: 'side1' (positive cross) or 'side2' (negative cross)
         """
         if self.line_start is None or self.line_vector is None:
             raise ValueError("Line coordinates not initialized. Call update_frame_dimensions() first.")
@@ -347,32 +563,12 @@ class LineCrossingCounter:
         # Calculate cross product: (line_vector.x * point_vector.y) - (line_vector.y * point_vector.x)
         cross_product = (self.line_vector[0] * point_vector[1]) - (self.line_vector[1] * point_vector[0])
         
-        # Determine side based on line orientation
-        is_horizontal = self._is_horizontal_line()
-        
-        if is_horizontal:
-            # Horizontal line: use Y-coordinate to determine top/bottom
-            # In image coordinates, Y increases downward
-            # For horizontal line going left-to-right: cross = dx * (py - start_y)
-            #   - If point is below line (py > start_y): cross > 0 = bottom_side
-            #   - If point is above line (py < start_y): cross < 0 = top_side
-            if self.line_vector[0] >= 0:  # Line goes left-to-right
-                # Positive cross = below line (bottom_side), negative = above line (top_side)
-                return 'bottom_side' if cross_product >= 0 else 'top_side'
-            else:  # Line goes right-to-left, reverse the logic
-                return 'top_side' if cross_product >= 0 else 'bottom_side'
-        else:
-            # Vertical line: use X-coordinate to determine left/right
-            # For vertical line going top-to-bottom: cross = -dy * (px - start_x)
-            #   - If point is to the right (px > start_x): cross < 0 = right_side
-            #   - If point is to the left (px < start_x): cross > 0 = left_side
-            if self.line_vector[1] >= 0:  # Line goes top-to-bottom
-                # Positive cross = left of line (left_side), negative = right of line (right_side)
-                return 'left_side' if cross_product >= 0 else 'right_side'
-            else:  # Line goes bottom-to-top, reverse the logic
-                return 'right_side' if cross_product >= 0 else 'left_side'
+        # Side determination based on cross product sign:
+        # - positive cross = side1 (BELOW for horizontal, LEFT for vertical)
+        # - negative cross = side2 (ABOVE for horizontal, RIGHT for vertical)
+        return 'side1' if cross_product >= 0 else 'side2'
     
-    def is_point_on_line(self, point: Tuple[float, float], threshold_pixels: float = 5.0) -> bool:
+    def _is_point_on_line(self, point: Tuple[float, float], threshold_pixels: float = 5.0) -> bool:
         """
         Check if a point is on or near the line (within threshold distance).
         
@@ -433,7 +629,6 @@ class LineCrossingCounter:
             dist_to_end = ((point[0] - self.line_end[0]) ** 2 + (point[1] - self.line_end[1]) ** 2) ** 0.5
             return min(dist_to_start, dist_to_end) <= threshold_pixels
     
-    
     def get_counts(self) -> Dict[str, int]:
         """Get current crossing counts."""
         if self.count_mode == "single":
@@ -472,81 +667,93 @@ class LineCrossingCounter:
     
     def check_touch(self, track: Track) -> Optional[str]:
         """
-        Check if track crossed the line and count based on crossing (like old code).
+        Check if track crossed the line using side transition detection.
         
-        This method uses CROSSING-BASED detection (more reliable than touch-based):
-        - Compares previous side vs current side
-        - If sides changed = object crossed the line = COUNT
-        - Determines in/out direction based on which side object came from
+        ═══════════════════════════════════════════════════════════════════
+        COUNTING LOGIC (Works for HORIZONTAL or VERTICAL lines):
+        ═══════════════════════════════════════════════════════════════════
         
-        This is more accurate than touch-based because it detects actual crossing,
-        not just when center point is near the line (which can miss fast-moving objects).
+        HORIZONTAL LINE:
+        ────────────────────────────
+                Side 2 (ABOVE)
+        ════════════════════════════  ← User-drawn line
+                Side 1 (BELOW)
+        ────────────────────────────
+        
+        - side2 → side1 (top to bottom) = ADD / ENTRY
+        - side1 → side2 (bottom to top) = OUT / EXIT
+        
+        VERTICAL LINE:
+        ─────────────────────────────
+        Side 1 (LEFT) │ Side 2 (RIGHT)
+                      │
+        ─────────────────────────────
+        
+        - side2 → side1 (right to left) = ADD / ENTRY
+        - side1 → side2 (left to right) = OUT / EXIT
+        ═══════════════════════════════════════════════════════════════════
+        
+        IMPORTANT: Each track ID is counted ONLY ONCE.
+        Once counted, it will NEVER be counted again (prevents jitter errors).
         
         Args:
             track: Track to check
             
         Returns:
-            'entry' if object crossed line in entry direction, 'exit' if exit direction,
+            'entry' if object crossed from side2→side1, 
+            'exit' if side1→side2,
             None if not crossed or already counted
         """
         if self.line_start is None or self.line_vector is None:
             return None
         
-        # Need at least 2 positions in history to detect crossing
-        if len(track.history) < 2:
+        # Need at least 3 positions in history for stable tracking
+        # This ensures the track has been consistently detected for at least 3 frames
+        # before we count it, reducing false counts from flickering detections
+        MIN_HISTORY_FOR_COUNTING = 3
+        if len(track.history) < MIN_HISTORY_FOR_COUNTING:
             return None
         
-        # Get current and previous positions (like old code)
+        # Get current and previous positions
         current_position = track.center
-        previous_position = track.history[-2]  # 2 frames ago (like old code)
+        previous_position = track.history[-2]  # Previous frame position
         
-        # Get sides for both positions
+        # Get sides for both positions (returns 'side1' or 'side2')
         current_side = self._get_side(current_position)
         previous_side = self._get_side(previous_position)
         
         # Initialize tracking for this track if needed
         if track.track_id not in self._touch_tracking:
             self._touch_tracking[track.track_id] = {
-                'touched': False,
+                'initial_side': current_side,  # Store the FIRST side we saw this track on
                 'last_side': current_side,
-                'counted': False,
-                'direction': None
+                'counted': False,  # PERMANENT flag - once True, never count again
+                'direction': None,
+                'count_frame': None  # Frame when counted (for debugging)
             }
-            # Store initial side
-            self._touch_tracking[track.track_id]['last_side'] = current_side
             return None
         
         touch_info = self._touch_tracking[track.track_id]
         
-        # Check for crossing: moved from one side to the other (like old code)
-        # This is the KEY difference: we detect crossing, not just touching
+        # CRITICAL: If this track has already been counted, NEVER count again
+        # This prevents jitter-based double counting on conveyor belts
+        if touch_info['counted']:
+            touch_info['last_side'] = current_side
+            return None
+        
+        # Check for crossing: moved from one side to the other
         if previous_side != current_side:
             # Object crossed the line!
             
-            # If already counted for this track, don't count again (prevent duplicates)
-            if touch_info['counted']:
-                touch_info['last_side'] = current_side
-                return None
-            
-            # Determine direction based on line orientation and movement
-            # Generic rules:
-            # - Horizontal line: bottom-to-top = "in", top-to-bottom = "out"
-            # - Vertical line: right-to-left = "in", left-to-right = "out"
+            # Determine direction based on side transition
+            # For conveyor loading (right to left movement):
+            # - side2 (right) -> side1 (left) = ENTRY (loading)
+            # - side1 (left) -> side2 (right) = EXIT (unloading)
             direction = None
-            is_horizontal = self._is_horizontal_line()
-            
-            if is_horizontal:
-                # Horizontal line: bottom-to-top = "in", top-to-bottom = "out"
-                if previous_side == 'bottom_side' and current_side == 'top_side':
-                    direction = 'entry'  # Moving from bottom to top = IN
-                elif previous_side == 'top_side' and current_side == 'bottom_side':
-                    direction = 'exit'   # Moving from top to bottom = OUT
-            else:
-                # Vertical line: right-to-left = "in", left-to-right = "out"
-                if previous_side == 'right_side' and current_side == 'left_side':
-                    direction = 'entry'  # Moving from right to left = IN
-                elif previous_side == 'left_side' and current_side == 'right_side':
-                    direction = 'exit'   # Moving from left to right = OUT
+            if previous_side == 'side2' and current_side == 'side1':
+                direction = 'entry'  # Moving from right to left = LOADING = IN
+            elif previous_side == 'side1' and current_side == 'side2':
+                direction = 'exit'   # Moving from left to right = UNLOADING = OUT
             
             # If direction couldn't be determined, skip (shouldn't happen)
             if direction is None:
@@ -563,18 +770,18 @@ class LineCrossingCounter:
                 should_count = True
             
             if should_count:
-                # Count the crossing (only once per track to prevent duplicates)
-                touch_info['touched'] = True
-                touch_info['counted'] = True
+                # Count the crossing - PERMANENTLY mark as counted
+                touch_info['counted'] = True  # PERMANENT - this track will never be counted again
                 touch_info['direction'] = direction
                 touch_info['last_side'] = current_side
+                touch_info['count_frame'] = track.frame_id
                 
                 if direction == 'entry':
                     self.entry_count += 1
-                    print(f"[CROSSING_COUNT] ✅ Track {track.track_id} CROSSED LINE (ENTRY) - Center: ({track.center[0]:.1f}, {track.center[1]:.1f}), Total IN: {self.entry_count}")
+                    print(f"[LINE_COUNTER] ✅ Track {track.track_id} ENTRY (side2→side1) | Total IN: {self.entry_count}")
                 else:
                     self.exit_count += 1
-                    print(f"[CROSSING_COUNT] ✅ Track {track.track_id} CROSSED LINE (EXIT) - Center: ({track.center[0]:.1f}, {track.center[1]:.1f}), Total OUT: {self.exit_count}")
+                    print(f"[LINE_COUNTER] ✅ Track {track.track_id} EXIT (side1→side2) | Total OUT: {self.exit_count}")
                 
                 return direction
         
@@ -586,7 +793,10 @@ class LineCrossingCounter:
         """Check if a track's center point is currently touching the line."""
         if self.line_start is None or self.line_vector is None:
             return False
-        return self.is_point_on_line(track.center, threshold_pixels=self.touch_threshold_pixels)
+        
+        is_touching = self._is_point_on_line(track.center, threshold_pixels=self.touch_threshold_pixels)
+        
+        return is_touching
     
     def get_track_touch_info(self, track_id: int) -> Optional[Dict[str, Any]]:
         """Get touch tracking information for a track."""
@@ -597,5 +807,4 @@ class LineCrossingCounter:
         self.entry_count = 0
         self.exit_count = 0
         self.boxes_counted = 0
-        self.track_sides.clear()
         self._touch_tracking.clear()

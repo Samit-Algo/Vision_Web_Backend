@@ -8,7 +8,7 @@ Used by the pipeline runner and executor for visualization and event frames.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 try:
     import cv2  # type: ignore
@@ -143,4 +143,125 @@ def draw_pose_keypoints(
             if a is not None and b is not None:
                 cv2.line(out, a, b, skeleton_color, skeleton_thickness, cv2.LINE_AA)
 
+    return out
+
+
+def draw_box_count_annotations(
+    frame: np.ndarray,
+    track_info: List[Dict[str, Any]],
+    line_zone: Optional[Dict[str, Any]],
+    counts: Optional[Dict[str, int]],
+    target_class: str,
+    active_tracks_count: int = 0
+) -> np.ndarray:
+    """
+    Draw box counting annotations with side-transition based colors.
+    
+    Color Logic (based on crossing direction):
+    ═══════════════════════════════════════════════════════════════════
+    - GREEN (0, 255, 0):  Not crossed yet - object still on initial side
+    - ORANGE (0, 165, 255): Crossed Side 2 → Side 1 (ENTRY/ADD direction)
+    - YELLOW (0, 255, 255): Crossed Side 1 → Side 2 (EXIT/OUT direction)
+    ═══════════════════════════════════════════════════════════════════
+    
+    Draws:
+    - Bounding boxes (color based on crossing direction)
+    - Center points (filled circle, same color as box)
+    - Track ID labels
+    - "ADD!" or "OUT!" text when crossed
+    - Count text at top
+    
+    Note: Line is drawn by frontend based on user requirement, not here.
+    
+    Args:
+        frame: BGR image (numpy array, HxWx3)
+        track_info: List of track info dicts with keys: track_id, center, bbox, counted, direction
+        line_zone: Line zone dict (not used for drawing, kept for compatibility)
+        counts: Counts dict with entry_count, exit_count, boxes_counted, etc.
+        target_class: Target class name (e.g., "box")
+        active_tracks_count: Number of active tracks being tracked
+        
+    Returns:
+        New BGR image with annotations drawn (frame is copied; original unchanged).
+    """
+    _ensure_cv2()
+    out = frame.copy()
+    
+    if not track_info:
+        return out
+    
+    # Color definitions (BGR format)
+    COLOR_GREEN = (0, 255, 0)      # Not crossed yet
+    COLOR_ORANGE = (0, 165, 255)   # Side 2 → Side 1 (ENTRY/ADD)
+    COLOR_YELLOW = (0, 255, 255)   # Side 1 → Side 2 (EXIT/OUT)
+    
+    # Draw each tracked box with side-transition based colors
+    for track in track_info:
+        if not track.get("bbox") or len(track["bbox"]) < 4:
+            continue
+            
+        x1, y1, x2, y2 = [int(coord) for coord in track["bbox"][:4]]
+        track_id = track.get("track_id")
+        counted = track.get("counted", False)
+        direction = track.get("direction")  # 'entry' or 'exit' or None
+        
+        # Determine box color based on crossing direction:
+        # - Not counted: GREEN (still on initial side)
+        # - Entry (side2→side1): ORANGE (ADD direction)
+        # - Exit (side1→side2): YELLOW (OUT direction)
+        if not counted:
+            box_color = COLOR_GREEN  # Not crossed yet
+        elif direction == 'entry':
+            box_color = COLOR_ORANGE  # Side 2 → Side 1 = ADD
+        elif direction == 'exit':
+            box_color = COLOR_YELLOW  # Side 1 → Side 2 = OUT
+        else:
+            box_color = COLOR_GREEN  # Default to green
+        
+        # Draw bounding box (thickness 2)
+        cv2.rectangle(out, (x1, y1), (x2, y2), box_color, 2)
+        
+        # Draw center point (radius 5, filled)
+        if track.get("center") and len(track["center"]) >= 2:
+            center_x, center_y = [int(c) for c in track["center"][:2]]
+            cv2.circle(out, (center_x, center_y), 5, box_color, -1)
+        
+        # Draw track ID
+        if track_id is not None:
+            label = f"ID:{track_id}"
+            cv2.putText(out, label, (x1, y1 - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
+        
+        # Draw direction label when crossed
+        if counted and direction:
+            if direction == 'entry':
+                direction_text = "ADD!"
+                text_color = COLOR_ORANGE
+            else:  # exit
+                direction_text = "OUT!"
+                text_color = COLOR_YELLOW
+            cv2.putText(out, direction_text, (x1, y1 - 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, text_color, 2)
+    
+    # Draw count at top
+    if counts:
+        # Entry/exit mode
+        entry_count = counts.get("entry_count", 0)
+        exit_count = counts.get("exit_count", 0)
+        
+        # Show ADD and OUT counts with their respective colors
+        add_text = f"ADD: {entry_count}"
+        out_text = f"OUT: {exit_count}"
+        tracking_text = f"TRACKING: {active_tracks_count}"
+        
+        # Draw ADD count in orange
+        cv2.putText(out, add_text, (10, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLOR_ORANGE, 2)
+        # Draw OUT count in yellow
+        cv2.putText(out, out_text, (150, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLOR_YELLOW, 2)
+        # Draw tracking count in green
+        cv2.putText(out, tracking_text, (280, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLOR_GREEN, 2)
+    
     return out
