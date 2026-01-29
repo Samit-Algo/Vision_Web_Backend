@@ -1,2 +1,1 @@
-# Utils package for agent utilities
-
+"""Utils package for agent utilities."""

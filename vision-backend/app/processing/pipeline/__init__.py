@@ -8,7 +8,7 @@ Orchestrates the processing pipeline stages:
 - Stages: Individual processing stages
 """
 
-from app.processing.pipeline.runner import PipelineRunner
 from app.processing.pipeline.context import PipelineContext
+from app.processing.pipeline.runner import PipelineRunner
 
 __all__ = ["PipelineRunner", "PipelineContext"]

@@ -7,27 +7,30 @@ Manages the main processing loop, FPS pacing, and stage sequencing.
 """
 
 import time
-from typing import Optional, List, Any, Dict
 from datetime import datetime
+from typing import Any, Dict, List, Optional
 
-from app.processing.sources.contracts import FramePacket
-from app.processing.sources.source_factory import Source
+from app.processing.detections.contracts import DetectionPacket
+from app.processing.models.contracts import Model
 from app.processing.pipeline.context import PipelineContext
+from app.processing.pipeline.contracts import RuleMatch
 from app.processing.pipeline.stages import (
     acquire_frame_stage,
+    evaluate_rules_stage,
     inference_stage,
     merge_detections_stage,
-    evaluate_rules_stage
 )
-from app.processing.pipeline.contracts import RuleMatch
-from app.processing.models.contracts import Model
-from app.utils.db import get_collection
-from app.utils.datetime_utils import now, utc_now
-from app.utils.event_notifier import send_event_to_backend_sync
-from app.utils.event_session_manager import get_event_session_manager
+from app.processing.sources.contracts import FramePacket
+from app.processing.sources.source_factory import Source
 from app.processing.worker.frame_processor import draw_bounding_boxes, draw_pose_keypoints
-from app.processing.detections.contracts import DetectionPacket
+from app.utils.db import get_collection
+from app.utils.datetime_utils import utc_now
+from app.utils.event_session_manager import get_event_session_manager
 
+
+# ============================================================================
+# UTILITIES
+# ============================================================================
 
 def format_video_time_ms(milliseconds: float) -> str:
     """Convert milliseconds to H:MM:SS.mmm string."""
@@ -38,6 +41,10 @@ def format_video_time_ms(milliseconds: float) -> str:
     minutes, seconds = divmod(remaining_seconds, 60)
     return f"{hours:d}:{minutes:02d}:{seconds:02d}.{milliseconds_remainder:03d}"
 
+
+# ============================================================================
+# PIPELINE RUNNER
+# ============================================================================
 
 class PipelineRunner:
     """
@@ -221,49 +228,38 @@ class PipelineRunner:
                 self.context.last_seen_hub_index = hub_index
                 self.context.frame_index += 1
                 processed_in_window += 1
-                
-                # Status logging
-            if (time.time() - last_status) >= 1.0:
-                base_fps = frame_packet.fps if frame_packet.fps is not None else 0.0
-                hub_index_status = self.context.last_seen_hub_index or 0
-                print(f"[worker {self.context.task_id}] ⏱️ sampling(agent patrol) agent_fps={fps} base_fps={base_fps} processed={processed_in_window}/s skipped={skipped_in_window} hub_frame_index={hub_index_status} camera_id={self.context.camera_id}")
-                processed_in_window = 0
-                skipped_in_window = 0
-                last_status = time.time()
-                
-                # Stage 2: Inference
+
+                if (time.time() - last_status) >= 1.0:
+                    base_fps = frame_packet.fps if frame_packet.fps is not None else 0.0
+                    hub_index_status = self.context.last_seen_hub_index or 0
+                    print(f"[worker {self.context.task_id}] ⏱️ sampling(agent patrol) agent_fps={fps} base_fps={base_fps} processed={processed_in_window}/s skipped={skipped_in_window} hub_frame_index={hub_index_status} camera_id={self.context.camera_id}")
+                    processed_in_window = 0
+                    skipped_in_window = 0
+                    last_status = time.time()
+
                 detection_packets = inference_stage(self.context, frame_packet, self.models)
-                
-                # Stage 3: Merge detections
                 merged_packet = merge_detections_stage(detection_packets)
-                
-                # Stage 4: Evaluate rules (uses rules field from database)
-                # Rules can use traditional handlers OR scenario implementations internally
+
                 rule_match = None
                 all_matched_indices = []
                 if self.context.rules:
                     rule_match, all_matched_indices = evaluate_rules_stage(
                         self.context,
                         merged_packet,
-                        frame_packet  # Pass frame for scenario-based rules
+                        frame_packet
                     )
-                
-                # Convert detections to dict for drawing/events
+
                 detections = merged_packet.to_dict()
-                
-                # Draw and publish frame
                 processed_frame = self._draw_and_publish_frame(
                     frame_packet,
                     merged_packet,
                     detections,
                     all_matched_indices
                 )
-                
-                # Handle rule events (rules can use traditional handlers or scenario implementations)
+
                 if rule_match:
                     self._handle_event(rule_match, processed_frame, frame_packet, detections, fps)
-                
-                # Heartbeat
+
                 try:
                     from bson import ObjectId
                     self.tasks_collection.update_one(
@@ -272,7 +268,7 @@ class PipelineRunner:
                     )
                 except Exception:
                     pass
-            
+
             print(f"[worker {self.context.task_id}] 💤 Patrol window ended; going back to sleep")
     
     def _sleep_with_heartbeat(self, seconds: int) -> bool:
@@ -334,6 +330,14 @@ class PipelineRunner:
             else:
                 f_boxes, f_classes, f_scores = [], [], []
             
+            # Collect scenario overlays (e.g., loom ROI boxes with state labels)
+            scenario_overlays = []
+            if hasattr(self.context, '_scenario_instances'):
+                for scenario_instance in self.context._scenario_instances.values():
+                    overlay_data = scenario_instance.get_overlay_data()
+                    if overlay_data:
+                        scenario_overlays.append(overlay_data)
+            
             # Publish to shared_store
             self.shared_store[self.context.agent_id] = {
                 "shape": (height, width, 3),
@@ -350,6 +354,7 @@ class PipelineRunner:
                     "classes": f_classes,
                     "scores": f_scores,
                 },
+                "scenario_overlays": scenario_overlays,  # Add scenario overlays
                 "rules": self.context.rules,
                 "camera_id": self.context.camera_id,
             }

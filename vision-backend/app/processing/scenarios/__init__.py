@@ -13,28 +13,27 @@ Scenarios are stateful processors that:
 Each scenario defines its own internal DTOs and flow.
 """
 
-from app.processing.scenarios.contracts import (
+from app.processing.scenarios.models import (
     BaseScenario,
+    ScenarioEvent,
     ScenarioFrameContext,
-    ScenarioEvent
 )
-from app.processing.scenarios.registry import (
-    register_scenario,
+from app.processing.scenarios.orchestrator import ScenarioEngine
+from app.processing.scenarios.providers import (
     get_scenario_class,
-    scenario_registry
+    register_scenario,
+    scenario_registry,
 )
-from app.processing.scenarios.engine import ScenarioEngine
 
 # Import all scenarios to trigger registration decorators
-# This ensures @register_scenario decorators execute when the module is imported
 from app.processing.scenarios.weapon_detection import scenario as weapon_detection_scenario  # noqa: F401
 from app.processing.scenarios.class_count import scenario as class_count_scenario  # noqa: F401
+from app.processing.scenarios.loom_machine_state import scenario as loom_machine_state_scenario  # noqa: F401
 
-# Check for class_presence scenario if it exists
 try:
     from app.processing.scenarios.class_presence import scenario as class_presence_scenario  # noqa: F401
 except ImportError:
-    pass  # class_presence might not have a scenario.py yet
+    pass
 
 __all__ = [
     "BaseScenario",

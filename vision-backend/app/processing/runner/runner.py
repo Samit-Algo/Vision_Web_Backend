@@ -13,27 +13,29 @@ Data flow:
 - Tasks Collection → Worker (one per task)
 - Both read from shared_store[camera_id] independently
 """
+
 import os
 import sys
 import time
 from datetime import datetime
-from multiprocessing import Process, Manager, Queue
-from typing import Dict, Any, List, Tuple, Optional
+from multiprocessing import Manager, Process, Queue
+from typing import Any, Dict, List, Optional, Tuple
 
-# Ensure project root is on sys.path for both direct execution and module import
-# This is needed because uvicorn worker processes may not have the correct Python path
 _current_file = os.path.abspath(__file__)
 _current_dir = os.path.dirname(_current_file)
-# Go up from app/processing/runner -> app/processing -> app -> project root (vision-backend)
 _project_root = os.path.abspath(os.path.join(_current_dir, "..", "..", ".."))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-from app.utils.db import get_collection
-from app.utils.datetime_utils import now, utc_now, parse_iso, mongo_datetime_to_app_timezone
 from app.processing.worker.agent_main import run_task_worker
-from app.processing.worker.frame_hub import CameraPublisher, CameraCommand
+from app.processing.worker.frame_hub import CameraCommand, CameraPublisher
+from app.utils.db import get_collection
+from app.utils.datetime_utils import mongo_datetime_to_app_timezone, now, parse_iso, utc_now
 
+
+# ============================================================================
+# MAIN RUNNER
+# ============================================================================
 
 def main(shared_store=None) -> None:
     """

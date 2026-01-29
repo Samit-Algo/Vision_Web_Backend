@@ -8,7 +8,7 @@ from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.genai import types
 
 from ...dto.chat_dto import ChatMessageRequest, ChatMessageResponse
-from ....agents.general_chat_agent import create_general_chat_agent
+from ....agents.general_chat import create_general_chat_agent
 
 
 class GeneralChatUseCase:
@@ -91,8 +91,54 @@ class GeneralChatUseCase:
                         session_id=session_id
                     )
         
-        # Create agent instance for general chat
-        agent = create_general_chat_agent()
+        # Import the tools for wrapping
+        from ....agents.general_chat.tools import (
+            list_my_cameras, find_camera, check_camera_health, 
+            get_recent_detections, get_deployed_agents_summary, get_event_details
+        )
+        
+        # Create tool wrappers with current user context
+        def list_cameras_wrapper():
+            """List all cameras owned by the current user."""
+            return list_my_cameras(user_id=user_id)
+            
+        def find_camera_wrapper(name_or_id: str):
+            """Find a specific camera by name or ID for the current user."""
+            return find_camera(name_or_id=name_or_id, user_id=user_id)
+
+        def check_camera_health_wrapper(camera_id: str):
+            """Check if a specific camera is online and working. Requires a camera_id."""
+            return check_camera_health(camera_id=camera_id, user_id=user_id)
+
+        def get_detections_wrapper(camera_id: str = "", days_ago: int = 0, limit: int = 10):
+            """
+            Search for vision detections/events. 
+            - camera_id: (Optional) ID of a specific camera.
+            - days_ago: 0 for today, 1 for yesterday, 2 for two days ago, etc.
+            - limit: How many events to show.
+            """
+            return get_recent_detections(user_id=user_id, camera_id=camera_id, days_ago=days_ago, limit=limit)
+            
+        def get_deployed_agents_wrapper():
+            """Get a summary of all vision agents currently deployed by the current user."""
+            return get_deployed_agents_summary(user_id=user_id)
+            
+        def get_event_details_wrapper(event_id: str):
+            """Get technical details and metadata for a specific event by ID."""
+            return get_event_details(user_id=user_id, event_id=event_id)
+            
+        # Create agent instance for general chat with wrapped tools
+        agent_tools = [
+            list_cameras_wrapper, find_camera_wrapper, check_camera_health_wrapper,
+            get_detections_wrapper, get_deployed_agents_wrapper, get_event_details_wrapper
+        ]
+        
+        # Add dynamic time context
+        from ....agents.utils.time_context import get_current_time_context
+        def instruction_provider(context):
+            return get_current_time_context()
+            
+        agent = create_general_chat_agent(tools=agent_tools, instruction=instruction_provider)
         
         # Store session mapping
         self._sessions[session_id] = (adk_session, agent)
@@ -223,7 +269,55 @@ class GeneralChatUseCase:
                         session_id=session_id,
                     )
 
-        agent = create_general_chat_agent()
+        # Import the tools for wrapping
+        from ....agents.general_chat.tools import (
+            list_my_cameras, find_camera, check_camera_health, 
+            get_recent_detections, get_deployed_agents_summary, get_event_details
+        )
+        
+        # Create tool wrappers with current user context
+        def list_cameras_wrapper():
+            """List all cameras owned by the current user."""
+            return list_my_cameras(user_id=user_id)
+            
+        def find_camera_wrapper(name_or_id: str):
+            """Find a specific camera by name or ID for the current user."""
+            return find_camera(name_or_id=name_or_id, user_id=user_id)
+
+        def check_camera_health_wrapper(camera_id: str):
+            """Check if a specific camera is online and working. Requires a camera_id."""
+            return check_camera_health(camera_id=camera_id, user_id=user_id)
+
+        def get_detections_wrapper(camera_id: str = "", days_ago: int = 0, limit: int = 10):
+            """
+            Search for vision detections/events. 
+            - camera_id: (Optional) ID of a specific camera.
+            - days_ago: 0 for today, 1 for yesterday, 2 for two days ago, etc.
+            - limit: How many events to show.
+            """
+            return get_recent_detections(user_id=user_id, camera_id=camera_id, days_ago=days_ago, limit=limit)
+            
+        def get_deployed_agents_wrapper():
+            """Get a summary of all vision agents currently deployed by the current user."""
+            return get_deployed_agents_summary(user_id=user_id)
+            
+        def get_event_details_wrapper(event_id: str):
+            """Get technical details and metadata for a specific event by ID."""
+            return get_event_details(user_id=user_id, event_id=event_id)
+            
+        # Create agent instance for general chat with wrapped tools
+        agent_tools = [
+            list_cameras_wrapper, find_camera_wrapper, check_camera_health_wrapper,
+            get_detections_wrapper, get_deployed_agents_wrapper, get_event_details_wrapper
+        ]
+        
+        # Add dynamic time context
+        from ....agents.utils.time_context import get_current_time_context
+        def instruction_provider(context):
+            return get_current_time_context()
+            
+        agent = create_general_chat_agent(tools=agent_tools, instruction=instruction_provider)
+        
         self._sessions[session_id] = (adk_session, agent)
         self._session_user_map[session_id] = user_id
 

@@ -8,6 +8,6 @@ Provides frame acquisition from RTSP cameras:
 """
 
 from app.processing.sources.hub_source import HubSource
-from app.processing.sources.source_factory import create_source, Source
+from app.processing.sources.source_factory import Source, create_source
 
 __all__ = ["HubSource", "create_source", "Source"]

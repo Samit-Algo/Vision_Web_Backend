@@ -8,7 +8,7 @@ Provides detection extraction, normalization, and merging:
 """
 
 from app.processing.detections.builder import DetectionBuilder
-from app.processing.detections.merger import DetectionMerger
 from app.processing.detections.contracts import DetectionPacket
+from app.processing.detections.merger import DetectionMerger
 
 __all__ = ["DetectionBuilder", "DetectionMerger", "DetectionPacket"]

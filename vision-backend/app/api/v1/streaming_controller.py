@@ -307,6 +307,9 @@ async def websocket_agent_overlay(websocket: WebSocket, agent_id: str) -> None:
             boxes = det.get("boxes") or []
             classes = det.get("classes") or []
             scores = det.get("scores") or []
+            
+            # Get scenario overlays (e.g., loom ROI boxes with state labels)
+            scenario_overlays = entry.get("scenario_overlays") or []
 
             payload = {
                 "type": "agent_overlay",
@@ -321,6 +324,7 @@ async def websocket_agent_overlay(websocket: WebSocket, agent_id: str) -> None:
                     "classes": classes,
                     "scores": scores,
                 },
+                "scenario_overlays": scenario_overlays,  # Add scenario overlays
             }
             await websocket.send_json(payload)
     except WebSocketDisconnect:

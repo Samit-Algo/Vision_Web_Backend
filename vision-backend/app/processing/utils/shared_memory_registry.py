@@ -4,7 +4,7 @@ Shared Memory Registry
 
 Registry for cross-module access to shared memory store.
 
-FastAPI `main.py` creates the multiprocessing.Manager().dict() shared_store used by:
+FastAPI main.py creates the multiprocessing.Manager().dict() shared_store used by:
 - CameraPublisher (writes shared_store[camera_id])
 - Task workers (write shared_store[task_id] for annotated frames)
 
@@ -15,6 +15,11 @@ We keep this tiny registry to avoid circular imports.
 from __future__ import annotations
 
 from typing import Any, Optional
+
+
+# ============================================================================
+# REGISTRY
+# ============================================================================
 
 _shared_store: Optional[Any] = None
 

@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
-from ..session_state.agent_state import reset_agent_state, get_agent_state
-from .kb_utils import get_rule, compute_missing_fields, apply_rule_defaults
+from ..session_state.agent_state import get_agent_state, reset_agent_state
+from .kb_utils import apply_rule_defaults, compute_missing_fields, get_rule
 
+
+# ============================================================================
+# STATE INITIALIZATION
+# ============================================================================
 
 def initialize_state(rule_id: str, session_id: str = "default", user_id: Optional[str] = None) -> Dict:
     """
@@ -15,12 +19,8 @@ def initialize_state(rule_id: str, session_id: str = "default", user_id: Optiona
         session_id: Session identifier for state management
         user_id: Optional user ID to store in agent state (for camera selection)
 
-    Returns a lightweight summary for the calling agent:
-    {
-        "rule_id": ...,
-        "missing_fields": [...],
-        "status": "COLLECTING"
-    }
+    Returns:
+        Dict with rule_id, status, and message
     """
     try:
         rule = get_rule(rule_id)
@@ -36,11 +36,10 @@ def initialize_state(rule_id: str, session_id: str = "default", user_id: Optiona
         agent = reset_agent_state(session_id)
         agent.rule_id = rule_id
         agent.fields["rules"] = [{"type": rule_id}]
-        
-        # Store user_id in agent state if provided (for camera selection)
+
         if user_id:
             agent.user_id = user_id
-        
+
         apply_rule_defaults(agent, rule)
         agent.status = "COLLECTING"
 

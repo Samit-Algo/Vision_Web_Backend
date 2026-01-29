@@ -9,7 +9,8 @@ Handles loading and initialization of YOLO pose models.
 import os
 from typing import Optional
 
-# Optional YOLO (used if installed)
+from app.processing.models.contracts import Model, Provider
+
 try:
     from ultralytics import YOLO  # type: ignore
     YOLO_AVAILABLE = True
@@ -17,58 +18,47 @@ except Exception:  # noqa: BLE001
     YOLO = None  # type: ignore[assignment]
     YOLO_AVAILABLE = False
 
-from app.processing.models.contracts import Provider, Model
 
+# ============================================================================
+# YOLO POSE PROVIDER
+# ============================================================================
 
 class YOLOPoseProvider(Provider):
     """
     Provider for YOLO pose detection models.
-    
+
     Handles loading of YOLO pose models (e.g., yolov8n-pose.pt).
     Uses the same YOLO class as detector, but registered separately for clarity.
     """
-    
+
     def load(self, model_id: str) -> Optional[Model]:
-        """
-        Load a YOLO pose model.
-        
-        Args:
-            model_id: Model identifier (path or standard model name like "yolov8n-pose.pt")
-        
-        Returns:
-            Loaded YOLO model instance or None if loading failed
-        """
+        """Load a YOLO pose model."""
         if not YOLO_AVAILABLE:
             print("[YOLOPoseProvider] ⚠️ YOLO not available (ultralytics not installed). Skipping pose detection.")
             return None
-        
-        # Clean model name: remove trailing slashes, whitespace, and normalize
+
         model_name = model_id.strip().rstrip('/').rstrip('\\')
-        
-        # Check if it's a standard YOLO model name (will be auto-downloaded if not found)
+
         is_standard_model = (
-            model_name.startswith("yolov8") or 
-            model_name.startswith("yolov5") or 
+            model_name.startswith("yolov8") or
+            model_name.startswith("yolov5") or
             model_name.startswith("yolo11") or
             model_name.startswith("yolo10") or
             model_name.startswith("yolo9")
         ) and model_name.endswith(".pt")
-        
-        # If it's a file path (contains path separators), check if file exists
+
         is_file_path = os.sep in model_name or '/' in model_name or '\\' in model_name
-        
+
         if is_file_path and not os.path.exists(model_name):
             print(f"[YOLOPoseProvider] ❌ Model file not found: {model_name}")
             return None
-        
+
         try:
-            # YOLO will automatically download standard models if they don't exist
             print(f"[YOLOPoseProvider] 📥 Loading YOLO pose model: {model_name}...")
             model = YOLO(model_name)
             print(f"[YOLOPoseProvider] ✅ YOLO pose model loaded: {model_name}")
             return model
-        except FileNotFoundError as exc:
-            # If it's a standard model and download failed, provide helpful message
+        except FileNotFoundError:
             if is_standard_model:
                 print(f"[YOLOPoseProvider] ⚠️ Model file not found locally: {model_name}")
                 print(f"[YOLOPoseProvider] 💡 Attempting to download '{model_name}' automatically...")
