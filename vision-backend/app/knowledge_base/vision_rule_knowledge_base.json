@@ -660,6 +660,96 @@
           "min_height_for_standing": 300,
           "confirm_frames": 3
         }
+      },
+
+      {
+        "rule_id": "fire_detection",
+        "rule_name": "Fire Detection",
+        "description": "Detects fire and smoke in the camera view using a fine-tuned YOLO model. Triggers critical alerts when fire is detected. Uses consecutive frame confirmation to reduce false positives from flickering lights or reflections.",
+      
+        "intent_examples": [
+          "Alert me if any fire detected",
+          "If any fire detected alert me",
+          "Notify me when there is fire",
+          "Detect fire in the area",
+          "Alert if fire is detected",
+          "Tell me if there is a fire",
+          "Monitor for fire",
+          "Detect flames",
+          "Alert on fire detection",
+          "Notify when fire is detected",
+          "Alert me if there is smoke",
+          "Detect smoke or fire",
+          "Fire alarm",
+          "Fire alert",
+          "Watch for fire",
+          "Fire monitoring"
+        ],
+      
+        "model": "C:\\AlgoOrange Task\\Vision_Web_Backend\\vision-backend\\fire_detection.pt",
+      
+        "detectable_classes": [
+          "fire",
+          "flame",
+          "smoke"
+        ],
+      
+        "required_fields_from_user": [],
+      
+        "time_window": {
+          "supported": true,
+          "required": true
+        },
+      
+        "zone_support": {
+          "supported": true,
+          "required": false,
+          "zone_type": "polygon",
+          "min_points": 3,
+          "max_points": null,
+          "supports_polygon": true,
+          "supports_line": false,
+          "description": "Optional polygon zone to monitor specific areas for fire. User can draw MINIMUM 3 POINTS to define the monitoring zone. If no zone is specified, the entire camera view is monitored for fire."
+        },
+      
+        "execution_modes": {
+          "continuous": {
+            "description": "Continuously monitors for fire detection. Recommended for safety-critical applications.",
+            "required_fields": [],
+            "forbidden_fields": [
+              "interval_minutes",
+              "check_duration_seconds"
+            ],
+            "zone_required": false
+          },
+      
+          "patrol": {
+            "description": "Checks periodically for fire detection",
+            "required_fields": [
+              "interval_minutes",
+              "check_duration_seconds"
+            ],
+            "zone_required": false
+          }
+        },
+      
+        "rules_config_fields": [
+          "classes",
+          "label",
+          "alert_cooldown_seconds",
+          "confidence_threshold",
+          "confirm_frames"
+        ],
+      
+        "defaults": {
+          "fps": 5,
+          "confidence": 0.5,
+          "run_mode": "continuous",
+          "classes": ["fire", "flame", "smoke"],
+          "alert_cooldown_seconds": 10,
+          "confidence_threshold": 0.5,
+          "confirm_frames": 2
+        }
       }
       
       

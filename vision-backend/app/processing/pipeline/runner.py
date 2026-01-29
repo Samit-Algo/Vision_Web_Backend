@@ -366,6 +366,9 @@ class PipelineRunner:
             # Check scenario types
             is_restricted_zone = False
             is_line_counting = False
+            is_fire_detection = False
+            fire_detected = False  # Whether fire is currently detected
+            fire_classes = []  # Target classes for fire detection
             
             if hasattr(self.context, '_scenario_instances'):
                 for rule_idx, scenario_instance in self.context._scenario_instances.items():
@@ -381,6 +384,18 @@ class PipelineRunner:
                             state = scenario_instance._state
                             if state.get('objects_in_zone', False):
                                 zone_violated = True
+                    
+                    # Check if this is a fire detection scenario
+                    elif scenario_type == 'fire_detection':
+                        is_fire_detection = True
+                        if hasattr(scenario_instance, 'config_obj') and hasattr(scenario_instance.config_obj, 'target_classes'):
+                            fire_classes = scenario_instance.config_obj.target_classes
+                        # Check if fire is currently detected (from scenario state)
+                        if hasattr(scenario_instance, '_state'):
+                            state = scenario_instance._state
+                            # Fire is detected if we have consecutive frames with fire above threshold
+                            if state.get('fire_detected', False) or state.get('consecutive_fire_frames', 0) >= 1:
+                                fire_detected = True
                     
                     # Check if this is a line-based counting scenario (class_count or box_count)
                     elif scenario_type in ['class_count', 'box_count']:
@@ -470,6 +485,12 @@ class PipelineRunner:
                 f_boxes, f_classes, f_scores = self._filter_detections_by_class(
                     target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores
                 )
+            elif is_fire_detection and fire_classes:
+                # Show ALL fire-related detections (fire, flame, smoke)
+                # This ensures fire bounding boxes are always visible
+                f_boxes, f_classes, f_scores = self._filter_detections_by_fire_classes(
+                    fire_classes, merged_packet.boxes, merged_packet.classes, merged_packet.scores
+                )
             elif is_line_counting and target_class:
                 # Show ALL detections of target class for line counting
                 f_boxes, f_classes, f_scores = self._filter_detections_by_class(
@@ -523,6 +544,7 @@ class PipelineRunner:
                 "line_crossed": len(line_crossed_indices) > 0,  # Whether any object crossed the line
                 "line_crossed_indices": line_crossed_indices,  # Indices of filtered detections that crossed the line
                 "track_info": track_info,  # Track information (center points, track IDs) for visualization
+                "fire_detected": fire_detected,  # Fire detection status (for red bounding boxes)
             }
             
             return processed_frame
@@ -612,6 +634,44 @@ class PipelineRunner:
             print(f"[worker {self.context.task_id}] ✅ Found {len(f_boxes)} '{target_class}' detections (confidence >= {confidence_threshold})")
         if filtered_count > 0:
             print(f"[worker {self.context.task_id}] 🔽 Filtered out {filtered_count} low-confidence '{target_class}' detections (< {confidence_threshold})")
+        
+        return f_boxes, f_classes, f_scores
+    
+    def _filter_detections_by_fire_classes(
+        self,
+        fire_classes: List[str],
+        boxes: List[List[float]],
+        classes: List[str],
+        scores: List[float],
+    ) -> tuple[List[List[float]], List[str], List[float]]:
+        """
+        Filter detections to only fire-related classes (fire, flame, smoke, etc.).
+        
+        Uses a lower confidence threshold (0.5) for fire detection since it's safety-critical.
+        """
+        f_boxes: List[List[float]] = []
+        f_classes: List[str] = []
+        f_scores: List[float] = []
+        fire_classes_lower = [c.lower() for c in fire_classes]
+        confidence_threshold = 0.5  # Lower threshold for fire detection (safety-critical)
+        
+        for idx, (box, cls, score) in enumerate(zip(boxes, classes, scores)):
+            if isinstance(cls, str):
+                cls_lower = cls.lower()
+                # Check if class matches any fire-related class
+                is_fire_class = any(
+                    target in cls_lower or cls_lower in target
+                    for target in fire_classes_lower
+                )
+                
+                if is_fire_class and score >= confidence_threshold:
+                    f_boxes.append(box)
+                    f_classes.append(cls)
+                    f_scores.append(score)
+        
+        # Debug: Log fire detections
+        if len(f_boxes) > 0:
+            print(f"[worker {self.context.task_id}] 🔥 Found {len(f_boxes)} fire-related detections (confidence >= {confidence_threshold})")
         
         return f_boxes, f_classes, f_scores
     

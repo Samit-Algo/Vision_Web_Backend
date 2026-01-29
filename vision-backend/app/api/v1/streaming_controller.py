@@ -331,6 +331,9 @@ async def websocket_agent_overlay(websocket: WebSocket, agent_id: str) -> None:
             # Get zone violation status from entry
             zone_violated = entry.get("zone_violated", False)
             
+            # Get fire detection status (for red bounding boxes on overlay)
+            fire_detected = entry.get("fire_detected", False)
+            
             # Get line crossing/touch status
             line_crossed = entry.get("line_crossed", False)
             line_crossed_indices = entry.get("line_crossed_indices", [])
@@ -362,6 +365,7 @@ async def websocket_agent_overlay(websocket: WebSocket, agent_id: str) -> None:
                 "zones": zones,  # Include all zones (polygon and line) for visualization
                 "zone": zones[0] if zones else None,  # Backward compatibility
                 "zone_violated": zone_violated,  # Include zone violation status
+                "fire_detected": fire_detected,  # Fire detection status (red bounding boxes)
                 "line_crossed": line_crossed,  # Whether any object crossed/touched the line
                 "line_crossed_indices": line_crossed_indices,  # Indices of detections that crossed
                 "track_info": track_info,  # Track information (center points, track IDs, touch status) for visualization
