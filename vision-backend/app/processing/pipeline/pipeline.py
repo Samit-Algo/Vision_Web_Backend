@@ -1,0 +1,693 @@
+"""
+Pipeline Runner and Stages
+--------------------------
+
+Orchestrates the processing pipeline and defines the individual stages.
+Manages the main processing loop, FPS pacing, and stage sequencing.
+"""
+
+import dataclasses
+import time
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from app.processing.processing_output.data_models import DetectionPacket
+from app.processing.models.data_models import Model
+from app.processing.pipeline.context import PipelineContext
+from app.processing.pipeline.data_models import RuleMatch
+from app.processing.processing_output import convert_from_yolo_result
+from app.processing.processing_output.merger import DetectionMerger
+from app.processing.vision_tasks.data_models import ScenarioFrameContext
+from app.processing.vision_tasks.task_lookup import get_scenario_class
+from app.processing.data_input.data_models import FramePacket
+from app.processing.data_input.source_factory import Source
+from app.processing.drawing.frame_processor import (
+    draw_bounding_boxes,
+    draw_pose_keypoints,
+    draw_box_count_annotations,
+)
+from app.utils.db import get_collection
+from app.utils.datetime_utils import utc_now, now
+from app.utils.event_session_manager import get_event_session_manager
+
+# Import scenarios module to trigger registration decorators
+from app.processing.vision_tasks import scenario_registry  # noqa: F401
+
+# ============================================================================
+# PIPELINE STAGES
+# ============================================================================
+
+def acquire_frame_stage(source: Source) -> Optional[FramePacket]:
+    """Stage 1: Acquire frame from source."""
+    return source.read_frame()
+
+def _any_scenario_requires_yolo(context: PipelineContext) -> bool:
+    """Check if any scenario in the rules requires YOLO detections."""
+    if not context.rules:
+        return False
+
+    if hasattr(context, '_scenario_instances'):
+        for scenario_instance in context._scenario_instances.values():
+            if scenario_instance.requires_yolo_detections():
+                return True
+
+    for rule_idx, rule in enumerate(context.rules):
+        rule_type = str(rule.get("type", "")).strip().lower()
+        scenario_class = get_scenario_class(rule_type)
+
+        if scenario_class is None:
+            continue
+
+        if hasattr(context, '_scenario_instances') and rule_idx in context._scenario_instances:
+            if context._scenario_instances[rule_idx].requires_yolo_detections():
+                return True
+        else:
+            try:
+                scenario_config = {k: v for k, v in rule.items() if k != "type"}
+                temp_instance = scenario_class(scenario_config, context)
+                if temp_instance.requires_yolo_detections():
+                    return True
+            except Exception:
+                return True
+
+    return False
+
+def inference_stage(
+    context: PipelineContext,
+    frame_packet: FramePacket,
+    models: List[Model]
+) -> List[DetectionPacket]:
+    """Stage 2: Run model inference on frame."""
+    if not _any_scenario_requires_yolo(context):
+        return []
+
+    frame = frame_packet.frame
+    detection_packets: List[DetectionPacket] = []
+
+    for model in models:
+        try:
+            results = model(frame, verbose=False)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[worker {context.task_id}] ⚠️ YOLO error: {exc}")
+            continue
+        if results:
+            first_result = results[0]
+            packet = convert_from_yolo_result(first_result, now())
+            detection_packets.append(packet)
+
+    return detection_packets
+
+def merge_detections_stage(detection_packets: List[DetectionPacket]) -> DetectionPacket:
+    """Stage 3: Merge detections from multiple models."""
+    return DetectionMerger.merge(detection_packets, now())
+
+
+def _overlay_data_to_dict_list(overlay_data: Any) -> List[Dict[str, Any]]:
+    """Normalize scenario overlay output to a list of JSON-serializable dicts."""
+    if isinstance(overlay_data, list):
+        out = []
+        for item in overlay_data:
+            if dataclasses.is_dataclass(item) and not isinstance(item, type):
+                out.append(dataclasses.asdict(item))
+            elif isinstance(item, dict):
+                out.append(item)
+            else:
+                out.append(item)
+        return out
+    if isinstance(overlay_data, dict):
+        # Loom-style: {boxes, labels, colors} -> list of {box, label, color}
+        boxes = overlay_data.get("boxes") or []
+        labels = overlay_data.get("labels") or []
+        colors = overlay_data.get("colors") or []
+        n = max(len(boxes), len(labels), len(colors))
+        return [
+            {
+                "box": boxes[i] if i < len(boxes) else None,
+                "label": labels[i] if i < len(labels) else None,
+                "color": colors[i] if i < len(colors) else None,
+            }
+            for i in range(n)
+        ]
+    return []
+
+
+def evaluate_rules_stage(
+    context: PipelineContext,
+    merged_packet: DetectionPacket,
+    frame_packet: Optional[FramePacket] = None
+) -> tuple[Optional[RuleMatch], List[int]]:
+    """
+    Stage 4: Evaluate rules against detections.
+
+    All rules now use scenario implementations.
+    Each rule type must have a corresponding scenario registered.
+    """
+    if not context.rules:
+        return None, []
+
+    detections = merged_packet.to_dict()
+
+    if not hasattr(context, '_scenario_instances'):
+        context._scenario_instances: Dict[int, Any] = {}
+
+    all_matched_indices: List[int] = []
+    event = None
+
+    for rule_idx, rule in enumerate(context.rules):
+        rule_type = str(rule.get("type", "")).strip().lower()
+
+        scenario_class = get_scenario_class(rule_type)
+        if scenario_class is None:
+            print(f"[evaluate_rules_stage] ⚠️  No scenario found for rule type '{rule_type}'. Skipping.")
+            continue
+
+        if frame_packet is None:
+            print(f"[evaluate_rules_stage] ⚠️  Frame packet required for scenario '{rule_type}'. Skipping.")
+            continue
+
+        try:
+            if rule_idx not in context._scenario_instances:
+                scenario_config = {k: v for k, v in rule.items() if k != "type"}
+                context._scenario_instances[rule_idx] = scenario_class(scenario_config, context)
+
+            scenario_instance = context._scenario_instances[rule_idx]
+
+            frame_timestamp = datetime.fromtimestamp(frame_packet.timestamp)
+            frame_context = ScenarioFrameContext(
+                frame=frame_packet.frame,
+                frame_index=context.frame_index,
+                timestamp=frame_timestamp,
+                detections=merged_packet,
+                rule_matches=[],
+                pipeline_context=context
+            )
+
+            scenario_events = scenario_instance.process(frame_context)
+
+            if scenario_events:
+                scenario_event = scenario_events[0]
+
+                report = None
+                if scenario_event.metadata:
+                    report = scenario_event.metadata.get("report")
+                    if report is None:
+                        report = {k: v for k, v in scenario_event.metadata.items() if k != "report"}
+
+                rule_result = {
+                    "label": scenario_event.label,
+                    "matched_detection_indices": scenario_event.detection_indices,
+                    "report": report
+                }
+
+                if rule_result:
+                    idx_list = rule_result.get("matched_detection_indices")
+                    if isinstance(idx_list, list):
+                        all_matched_indices.extend(idx_list)
+                    if not event and rule_result.get("label"):
+                        event = rule_result
+                        event.setdefault("rule_index", rule_idx)
+        except Exception as exc:
+            print(f"[evaluate_rules_stage] ⚠️  Error processing scenario '{rule_type}': {exc}")
+            continue
+
+    rule_match = None
+    if event and event.get("label"):
+        rule_match = RuleMatch(
+            label=str(event["label"]).strip(),
+            rule_index=event.get("rule_index", 0),
+            matched_detection_indices=event.get("matched_detection_indices", []),
+            report=event.get("report")
+        )
+
+    return rule_match, all_matched_indices
+
+# ============================================================================
+# UTILITIES
+# ============================================================================
+
+def format_video_time_ms(milliseconds: float) -> str:
+    """Convert milliseconds to H:MM:SS.mmm string."""
+    if milliseconds < 0:
+        milliseconds = 0
+    total_seconds, milliseconds_remainder = divmod(int(milliseconds), 1000)
+    hours, remaining_seconds = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remaining_seconds, 60)
+    return f"{hours:d}:{minutes:02d}:{seconds:02d}.{milliseconds_remainder:03d}"
+
+# ============================================================================
+# PIPELINE RUNNER
+# ============================================================================
+
+class PipelineRunner:
+    """
+    Orchestrates the processing pipeline.
+    
+    Manages the main loop, FPS pacing, and calls stages in sequence.
+    Handles both continuous and patrol modes.
+    """
+    
+    def __init__(
+        self,
+        context: PipelineContext,
+        source: Source,
+        models: List[Model],
+        shared_store: Optional[Dict[str, Any]] = None
+    ):
+        """
+        Initialize pipeline runner.
+        
+        Args:
+            context: Pipeline context (task config and state)
+            source: Source instance for frame acquisition
+            models: List of loaded models
+            shared_store: Optional shared memory dict for publishing frames
+        """
+        self.context = context
+        self.source = source
+        self.models = models
+        self.shared_store = shared_store
+        self.tasks_collection = get_collection()
+    
+    def run_continuous(self) -> None:
+        """Run pipeline in continuous mode (process frames indefinitely at target FPS)."""
+        fps = self.context.fps
+        min_interval = 1.0 / max(1, fps)
+        next_tick = time.time()
+        self.context.frame_index = 0
+        last_status = time.time()
+        processed_in_window = 0
+        skipped_in_window = 0
+        
+        while True:
+            # Check stop conditions
+            stop_reason = self.context.get_stop_condition(self.tasks_collection)
+            if stop_reason:
+                status = "cancelled" if stop_reason == "stop_requested" else "completed"
+                self.context.update_status(self.tasks_collection, status)
+                print(f"[worker {self.context.task_id}] ⏹️ Stopping (reason={stop_reason})")
+                return
+            
+            # FPS pacing
+            now_timestamp = time.time()
+            if now_timestamp < next_tick:
+                time.sleep(max(0.0, next_tick - now_timestamp))
+            next_tick = max(next_tick + min_interval, time.time())
+            
+            # Stage 1: Acquire frame
+            frame_packet = acquire_frame_stage(self.source)
+            if frame_packet is None:
+                time.sleep(0.05)
+                continue
+            
+            # Update context tracking
+            hub_index = frame_packet.frame_index
+            if self.context.last_seen_hub_index is not None and hub_index > self.context.last_seen_hub_index + 1:
+                skipped_in_window += (hub_index - self.context.last_seen_hub_index - 1)
+            self.context.last_seen_hub_index = hub_index
+            self.context.frame_index += 1
+            processed_in_window += 1
+            
+            # Status logging (once per second)
+            if (time.time() - last_status) >= 1.0:
+                base_fps = frame_packet.fps if frame_packet.fps is not None else 0.0
+                hub_index_status = self.context.last_seen_hub_index or 0
+                print(f"[worker {self.context.task_id}] ⏱️ sampling agent_fps={fps} base_fps={base_fps} processed={processed_in_window}/s skipped={skipped_in_window} hub_frame_index={hub_index_status} camera_id={self.context.camera_id}")
+                processed_in_window = 0
+                skipped_in_window = 0
+                last_status = time.time()
+            
+            # Stage 2: Inference
+            detection_packets = inference_stage(self.context, frame_packet, self.models)
+            
+            # Stage 3: Merge detections
+            merged_packet = merge_detections_stage(detection_packets)
+            
+            # Debug logging
+            if self.context.frame_index == 1 or self.context.frame_index % 30 == 0:
+                if merged_packet.keypoints:
+                    print(f"[worker {self.context.task_id}] ✅ Keypoints extracted: {len(merged_packet.keypoints)} person(s) with pose data")
+                else:
+                    print(f"[worker {self.context.task_id}] ⚠️ No keypoints extracted! Check if model is a pose model (e.g., yolov8n-pose.pt)")
+            
+            # Stage 4: Evaluate rules (uses rules field from database)
+            # Rules can use traditional handlers OR scenario implementations internally
+            rule_match = None
+            all_matched_indices = []
+            if self.context.rules:
+                rule_match, all_matched_indices = evaluate_rules_stage(
+                    self.context,
+                    merged_packet,
+                    frame_packet  # Pass frame for scenario-based rules
+                )
+            
+            # Convert detections to dict for drawing/events (backward compatibility)
+            detections = merged_packet.to_dict()
+            
+            # Draw and publish frame (if shared_store available)
+            processed_frame = self._draw_and_publish_frame(
+                frame_packet,
+                merged_packet,
+                detections,
+                all_matched_indices,
+                rule_match,
+            )
+            
+            # Handle rule events (rules can use traditional handlers or scenario implementations)
+            if rule_match:
+                self._handle_event(rule_match, processed_frame, frame_packet, detections, fps)
+            
+            # Heartbeat
+            try:
+                from bson import ObjectId
+                self.tasks_collection.update_one(
+                    {"_id": ObjectId(self.context.task_id)},
+                    {"$set": {"updated_at": utc_now()}}
+                )
+            except Exception:
+                pass
+    
+    def run_patrol(self) -> None:
+        """Run pipeline in patrol mode (sleep interval, then process window, repeat)."""
+        interval_seconds = max(0, int(self.context.interval_minutes) * 60)
+        window_seconds = max(1, int(self.context.check_duration_seconds))
+        fps = self.context.fps
+        
+        print(f"[worker {self.context.task_id}] 💤 Patrol mode | sleep={interval_seconds}s window={window_seconds}s fps={fps}")
+        
+        while True:
+            # Sleep with heartbeat and stop checks
+            if self._sleep_with_heartbeat(interval_seconds):
+                return
+            
+            # Detection window
+            window_end = time.time() + window_seconds
+            min_interval = 1.0 / max(1, fps)
+            next_tick = time.time()
+            print(f"[worker {self.context.task_id}] 🔎 Patrol window started ({window_seconds}s)")
+            
+            # Reset per-window state
+            self.context.rule_state = {}
+            self.context.frame_index = 0
+            last_status = time.time()
+            processed_in_window = 0
+            skipped_in_window = 0
+            self.context.last_seen_hub_index = None
+            
+            while time.time() < window_end:
+                # Check stop conditions
+                stop_reason = self.context.get_stop_condition(self.tasks_collection)
+                if stop_reason:
+                    status = "cancelled" if stop_reason == "stop_requested" else "completed"
+                    self.context.update_status(self.tasks_collection, status)
+                    print(f"[worker {self.context.task_id}] ⏹️ Stopping (reason={stop_reason})")
+                    return
+                
+                # FPS pacing
+                now_timestamp = time.time()
+                if now_timestamp < next_tick:
+                    time.sleep(max(0.0, next_tick - now_timestamp))
+                next_tick = max(next_tick + min_interval, time.time())
+                
+                # Stage 1: Acquire frame
+                frame_packet = acquire_frame_stage(self.source)
+                if frame_packet is None:
+                    time.sleep(0.05)
+                    continue
+                
+                # Update context tracking
+                hub_index = frame_packet.frame_index
+                if self.context.last_seen_hub_index is not None and hub_index > self.context.last_seen_hub_index + 1:
+                    skipped_in_window += (hub_index - self.context.last_seen_hub_index - 1)
+                self.context.last_seen_hub_index = hub_index
+                self.context.frame_index += 1
+                processed_in_window += 1
+
+                if (time.time() - last_status) >= 1.0:
+                    base_fps = frame_packet.fps if frame_packet.fps is not None else 0.0
+                    hub_index_status = self.context.last_seen_hub_index or 0
+                    print(f"[worker {self.context.task_id}] ⏱️ sampling(agent patrol) agent_fps={fps} base_fps={base_fps} processed={processed_in_window}/s skipped={skipped_in_window} hub_frame_index={hub_index_status} camera_id={self.context.camera_id}")
+                    processed_in_window = 0
+                    skipped_in_window = 0
+                    last_status = time.time()
+
+                detection_packets = inference_stage(self.context, frame_packet, self.models)
+                merged_packet = merge_detections_stage(detection_packets)
+
+                rule_match = None
+                all_matched_indices = []
+                if self.context.rules:
+                    rule_match, all_matched_indices = evaluate_rules_stage(
+                        self.context,
+                        merged_packet,
+                        frame_packet
+                    )
+
+                detections = merged_packet.to_dict()
+                processed_frame = self._draw_and_publish_frame(
+                    frame_packet,
+                    merged_packet,
+                    detections,
+                    all_matched_indices,
+                    rule_match,
+                )
+
+                if rule_match:
+                    self._handle_event(rule_match, processed_frame, frame_packet, detections, fps)
+
+                try:
+                    from bson import ObjectId
+                    self.tasks_collection.update_one(
+                        {"_id": ObjectId(self.context.task_id)},
+                        {"$set": {"updated_at": utc_now()}}
+                    )
+                except Exception:
+                    pass
+
+            print(f"[worker {self.context.task_id}] 💤 Patrol window ended; going back to sleep")
+    
+    def _sleep_with_heartbeat(self, seconds: int) -> bool:
+        """Sleep with periodic heartbeat and stop checks. Returns True if should stop."""
+        from bson import ObjectId
+        
+        end_time = time.time() + max(0, seconds)
+        while time.time() < end_time:
+            # Heartbeat
+            try:
+                self.tasks_collection.update_one(
+                    {"_id": ObjectId(self.context.task_id)},
+                    {"$set": {"updated_at": utc_now()}}
+                )
+            except Exception:
+                pass
+            
+            # Check stop condition
+            stop_reason = self.context.get_stop_condition(self.tasks_collection)
+            if stop_reason:
+                status = "cancelled" if stop_reason == "stop_requested" else "completed"
+                self.context.update_status(self.tasks_collection, status)
+                print(f"[worker {self.context.task_id}] ⏹️ Stopping (reason={stop_reason})")
+                return True
+            
+            time.sleep(1)
+        return False
+    
+    def _draw_and_publish_frame(
+        self,
+        frame_packet: FramePacket,
+        merged_packet: DetectionPacket,
+        detections: Dict[str, Any],
+        all_matched_indices: List[int],
+        rule_match: Optional[RuleMatch] = None,
+    ) -> Optional[Any]:
+        """Draw bounding boxes and publish processed frame to shared_store."""
+        if self.shared_store is None or not self.context.rules:
+            return None
+        
+        try:
+            frame = frame_packet.frame.copy()
+            
+            # Draw pose keypoints if available; otherwise draw bounding boxes
+            if detections.get("keypoints"):
+                processed_frame = draw_pose_keypoints(frame, detections, self.context.rules)
+            else:
+                processed_frame = draw_bounding_boxes(frame, detections, self.context.rules)
+            
+            # For class_count: draw count overlay (ADD/OUT/TRACKING text at top)
+            # For box_count: draw track_info + entry/exit counts
+            if rule_match and rule_match.report:
+                rule_index = getattr(rule_match, "rule_index", None)
+                if rule_index is not None and rule_index < len(self.context.rules):
+                    rule = self.context.rules[rule_index]
+                    rule_type = str(rule.get("type", "")).strip().lower()
+                    report = rule_match.report
+                    target_class = rule.get("target_class") or report.get("target_class") or "person"
+                    if rule_type == "class_count":
+                        current_count = report.get("current_count", 0)
+                        processed_frame = draw_box_count_annotations(
+                            processed_frame,
+                            [],
+                            None,
+                            {"entry_count": current_count, "exit_count": 0},
+                            target_class,
+                            0,
+                        )
+                    elif rule_type == "box_count" and report.get("track_info") is not None:
+                        track_info = report.get("track_info", [])
+                        counts = {
+                            "entry_count": report.get("entry_count", 0),
+                            "exit_count": report.get("exit_count", 0),
+                        }
+                        active_tracks = report.get("active_tracks", len(track_info))
+                        target_class = rule.get("target_class") or report.get("target_class") or "box"
+                        processed_frame = draw_box_count_annotations(
+                            processed_frame,
+                            track_info,
+                            None,
+                            counts,
+                            target_class,
+                            active_tracks,
+                        )
+            
+            # Convert to bytes
+            frame_bytes = processed_frame.tobytes()
+            height, width = processed_frame.shape[0], processed_frame.shape[1]
+            
+            # Filter overlay detections using matched_detection_indices
+            if all_matched_indices:
+                unique_indices = sorted(set(all_matched_indices))
+                f_boxes, f_classes, f_scores = self._filter_detections_by_indices(
+                    unique_indices, merged_packet.boxes, merged_packet.classes, merged_packet.scores
+                )
+            else:
+                f_boxes, f_classes, f_scores = [], [], []
+            
+            # Collect scenario overlays (e.g., loom ROI boxes with state labels)
+            # Normalize to list of JSON-serializable dicts for WebSocket payload
+            scenario_overlays = []
+            if hasattr(self.context, '_scenario_instances'):
+                frame_timestamp = datetime.fromtimestamp(frame_packet.timestamp)
+                frame_context = ScenarioFrameContext(
+                    frame=frame_packet.frame,
+                    frame_index=self.context.frame_index,
+                    timestamp=frame_timestamp,
+                    detections=merged_packet,
+                    rule_matches=[],
+                    pipeline_context=self.context
+                )
+                for scenario_instance in self.context._scenario_instances.values():
+                    overlay_data = scenario_instance.get_overlay_data(frame_context)
+                    if overlay_data:
+                        scenario_overlays.extend(
+                            _overlay_data_to_dict_list(overlay_data)
+                        )
+            
+            # Publish to shared_store
+            self.shared_store[self.context.agent_id] = {
+                "shape": (height, width, 3),
+                "dtype": "uint8",
+                "frame_index": frame_packet.frame_index,
+                "ts_monotonic": time.time(),
+                "camera_fps": frame_packet.fps,
+                "actual_fps": frame_packet.fps if frame_packet.fps is not None else self.context.fps,
+                "bytes": frame_bytes,
+                "agent_id": self.context.agent_id,
+                "task_name": self.context.agent_name,
+                "detections": {
+                    "boxes": f_boxes,
+                    "classes": f_classes,
+                    "scores": f_scores,
+                },
+                "scenario_overlays": scenario_overlays,  # Add scenario overlays
+                "rules": self.context.rules,
+                "camera_id": self.context.camera_id,
+            }
+            
+            return processed_frame
+        except Exception as exc:  # noqa: BLE001
+            print(f"[worker {self.context.task_id}] ⚠️  Error processing frame for stream: {exc}")
+            return None
+    
+    def _filter_detections_by_indices(
+        self,
+        indices: List[int],
+        boxes: List[List[float]],
+        classes: List[str],
+        scores: List[float],
+    ) -> tuple[List[List[float]], List[str], List[float]]:
+        """Filter detections to only those at specified indices."""
+        if not indices:
+            return [], [], []
+        f_boxes: List[List[float]] = []
+        f_classes: List[str] = []
+        f_scores: List[float] = []
+        for idx in indices:
+            if 0 <= idx < len(boxes) and idx < len(classes) and idx < len(scores):
+                f_boxes.append(boxes[idx])
+                f_classes.append(classes[idx])
+                f_scores.append(scores[idx])
+        return f_boxes, f_classes, f_scores
+    
+    def _handle_event(
+        self,
+        rule_match: RuleMatch,
+        processed_frame: Optional[Any],
+        frame_packet: FramePacket,
+        detections: Dict[str, Any],
+        fps: int
+    ) -> None:
+        """Handle rule match event (drawing, notifications). DEPRECATED: Use scenarios instead."""
+        event_label = rule_match.label
+        video_ms = (self.context.frame_index / float(max(1, self.context.fps))) * 1000.0
+        video_ts = format_video_time_ms(video_ms)
+        
+        print(f"[worker {self.context.task_id}] 🔔 {event_label} | agent='{self.context.agent_name}' | video_time={video_ts}")
+        
+        # Include report in detections if present (contains VLM description, weapon_type, etc.)
+        if rule_match.report and detections is not None:
+            detections = detections.copy()
+            detections["rule_report"] = rule_match.report
+        
+        # Handle event through session manager
+        if processed_frame is not None:
+            try:
+                session_manager = get_event_session_manager()
+                session_manager.handle_event_frame(
+                    agent_id=self.context.agent_id,
+                    rule_index=rule_match.rule_index,
+                    event_label=event_label,
+                    frame=processed_frame,
+                    camera_id=self.context.camera_id,
+                    agent_name=self.context.agent_name,
+                    detections=detections,
+                    video_timestamp=video_ts,
+                    fps=fps
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[worker {self.context.task_id}] ⚠️  Error handling event frame: {exc}")
+        elif self.context.rules:
+            # Create processed frame if not already created
+            try:
+                frame = frame_packet.frame.copy()
+                if detections.get("keypoints"):
+                    processed_frame = draw_pose_keypoints(frame, detections, self.context.rules)
+                else:
+                    processed_frame = draw_bounding_boxes(frame, detections, self.context.rules)
+                
+                if rule_match.report and detections is not None:
+                    detections = detections.copy()
+                    detections["rule_report"] = rule_match.report
+                
+                session_manager = get_event_session_manager()
+                session_manager.handle_event_frame(
+                    agent_id=self.context.agent_id,
+                    rule_index=rule_match.rule_index,
+                    event_label=event_label,
+                    frame=processed_frame,
+                    camera_id=self.context.camera_id,
+                    agent_name=self.context.agent_name,
+                    detections=detections,
+                    video_timestamp=video_ts,
+                    fps=fps
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[worker {self.context.task_id}] ⚠️  Error creating/handling event frame: {exc}")

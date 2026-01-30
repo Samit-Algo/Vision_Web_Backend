@@ -19,8 +19,8 @@ from .infrastructure.notifications import WebSocketManager, NotificationService
 from .infrastructure.streaming import WsFmp4Service
 from .infrastructure.messaging import KafkaEventConsumer
 from .di.container import get_container
-from .processing.runner.runner import main as run_runner
-from .processing.shared_store_registry import set_shared_store
+from .processing.main_process.run_vision_app import main as run_runner
+from .processing.helpers import set_shared_store
 from .utils.event_session_manager import get_event_session_manager
 
 logger = logging.getLogger(__name__)

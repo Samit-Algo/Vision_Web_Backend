@@ -23,15 +23,15 @@ from bson.errors import InvalidId
 
 # Allow running when imported without installed package by ensuring project root is on sys.path
 if __package__ is None or __package__ == "":
-    ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
     if ROOT_DIR not in sys.path:
         sys.path.insert(0, ROOT_DIR)
 
 from app.utils.db import get_collection
-from app.processing.models.manager import ModelManager
-from app.processing.sources.source_factory import create_source
+from app.processing.models.model_loader import ModelLoader
+from app.processing.data_input.source_factory import create_source
 from app.processing.pipeline.context import PipelineContext
-from app.processing.pipeline.runner import PipelineRunner
+from app.processing.pipeline.pipeline import PipelineRunner
 import numpy as np
 
 
@@ -77,7 +77,7 @@ def run_task_worker(task_id: str, shared_store: Optional["Dict[str, Any]"] = Non
     print(f"[worker {task_id}] ▶️ Starting '{agent_name}' | mode={run_mode} fps={fps} models={model_ids}")
 
     # Load models using ModelManager
-    model_manager = ModelManager()
+    model_manager = ModelLoader()
     models = model_manager.load_models(model_ids)
     if not models:
         print(f"[worker {task_id}] ❌ No models loaded. Exiting.")

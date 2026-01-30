@@ -9,7 +9,7 @@ Handles loading and initialization of YOLO detection models.
 import os
 from typing import Any, Optional
 
-from app.processing.models.contracts import Model, Provider
+from app.processing.models.data_models import Model, Provider
 
 try:
     from ultralytics import YOLO  # type: ignore

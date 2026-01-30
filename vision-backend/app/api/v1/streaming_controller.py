@@ -1,5 +1,6 @@
 # Standard library imports
-from typing import Optional
+import dataclasses
+from typing import Any, List, Optional
 import subprocess
 
 # External package imports
@@ -13,7 +14,7 @@ from ...application.use_cases.camera.get_camera import GetCameraUseCase
 from ...domain.repositories.agent_repository import AgentRepository
 from ...infrastructure.streaming import WsFmp4Service
 from ...di.container import get_container
-from ...processing.shared_store_registry import get_shared_store
+from ...processing.helpers import get_shared_store
 from .dependencies import get_current_user
 import logging
 import asyncio
@@ -309,7 +310,16 @@ async def websocket_agent_overlay(websocket: WebSocket, agent_id: str) -> None:
             scores = det.get("scores") or []
             
             # Get scenario overlays (e.g., loom ROI boxes with state labels)
-            scenario_overlays = entry.get("scenario_overlays") or []
+            # Ensure JSON-serializable (pipeline stores dicts; convert any dataclass leftovers)
+            raw_overlays = entry.get("scenario_overlays") or []
+            scenario_overlays: List[Any] = []
+            for item in raw_overlays:
+                if dataclasses.is_dataclass(item) and not isinstance(item, type):
+                    scenario_overlays.append(dataclasses.asdict(item))
+                elif isinstance(item, dict):
+                    scenario_overlays.append(item)
+                else:
+                    scenario_overlays.append(item)
 
             payload = {
                 "type": "agent_overlay",
@@ -324,7 +334,7 @@ async def websocket_agent_overlay(websocket: WebSocket, agent_id: str) -> None:
                     "classes": classes,
                     "scores": scores,
                 },
-                "scenario_overlays": scenario_overlays,  # Add scenario overlays
+                "scenario_overlays": scenario_overlays,
             }
             await websocket.send_json(payload)
     except WebSocketDisconnect:
