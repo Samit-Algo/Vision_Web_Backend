@@ -479,12 +479,25 @@ class PipelineRunner:
             frame_bytes = processed_frame.tobytes()
             height, width = processed_frame.shape[0], processed_frame.shape[1]
             
+            # For restricted zone: indices into filtered detections that are inside the zone (for per-box red coloring)
+            in_zone_indices: List[int] = []
+
             # Filter detections based on scenario type
             if is_restricted_zone and target_class:
                 # Show ALL detections of target class (e.g., all persons)
                 f_boxes, f_classes, f_scores = self._filter_detections_by_class(
                     target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores
                 )
+                # Map merged_packet indices (in zone) to filtered indices for overlay coloring
+                orig_in_zone = set(all_matched_indices)
+                filtered_idx = 0
+                for orig_idx in range(len(merged_packet.boxes)):
+                    if orig_idx < len(merged_packet.classes):
+                        det_class = merged_packet.classes[orig_idx]
+                        if isinstance(det_class, str) and det_class.lower() == target_class:
+                            if orig_idx in orig_in_zone:
+                                in_zone_indices.append(filtered_idx)
+                            filtered_idx += 1
             elif is_fire_detection and fire_classes:
                 # Show ALL fire-related detections (fire, flame, smoke)
                 # This ensures fire bounding boxes are always visible
@@ -545,6 +558,7 @@ class PipelineRunner:
                 "line_crossed_indices": line_crossed_indices,  # Indices of filtered detections that crossed the line
                 "track_info": track_info,  # Track information (center points, track IDs) for visualization
                 "fire_detected": fire_detected,  # Fire detection status (for red bounding boxes)
+                "in_zone_indices": in_zone_indices,  # Restricted zone: indices of filtered detections inside zone (red box only these)
             }
             
             return processed_frame

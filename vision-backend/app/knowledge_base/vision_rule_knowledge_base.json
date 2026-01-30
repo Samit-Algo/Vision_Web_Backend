@@ -353,7 +353,7 @@
           "count the workers"
         ],
       
-        "model": "yolov8m.pt",
+        "model": "yolov8l.pt",
       
         "detectable_classes": [
           "person",
@@ -594,7 +594,7 @@
           "Notify when fall is detected"
         ],
       
-        "model": "yolov8m-pose.pt",
+        "model": "yolov8l-pose.pt",
       
         "detectable_classes": [
           "person"

@@ -215,10 +215,12 @@ class SimpleTracker:
         normalized_dist = best_dist_matrix / max_dist
         
         # Combined score: IoU + (1 - normalized_distance) * weight
-        # Higher IoU is better, lower distance is better
-        # Weight 0.4 means distance matters significantly (increased from 0.1)
-        distance_weight = 0.4
+        # Prefer IoU when overlap is strong to reduce ID switches when objects cross paths
+        distance_weight = 0.35
         combined_score = best_iou_matrix + (1.0 - normalized_dist) * distance_weight
+        # Bonus for strong IoU so we keep the same track when overlap is clear
+        iou_bonus = np.where(best_iou_matrix >= 0.4, 0.15, 0.0)
+        combined_score = combined_score + iou_bonus
         
         # Lower IoU threshold for conveyor belts (fast-moving boxes)
         # Use 0.15 instead of self.iou_threshold for better matching
