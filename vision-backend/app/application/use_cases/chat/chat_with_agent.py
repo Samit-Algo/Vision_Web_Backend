@@ -30,7 +30,7 @@ from ....infrastructure.external.agent_client import AgentClient
 logger = logging.getLogger(__name__)
 
 
-def _detect_zone_request(response_text: str, missing_fields: List[str]) -> bool:
+def _detect_zone_request(response_text: str, missing_fields: List[str], agent_state=None) -> bool:
     """
     Detect if LLM response is asking for zone input.
     
@@ -39,19 +39,48 @@ def _detect_zone_request(response_text: str, missing_fields: List[str]) -> bool:
     Args:
         response_text: The LLM's response text
         missing_fields: List of missing fields from agent state
+        agent_state: Optional agent state to check rule context
         
     Returns:
         True if LLM is asking for zone input, False otherwise
     """
     # Primary check: zone must be in missing_fields
     if "zone" not in missing_fields:
+        # Special case: For counting rules with crossing intent, offer zone drawing
+        # even though zone is optional
+        if agent_state and agent_state.rule_id in ["class_count", "box_count"]:
+            # Check if this is a confirmation stage (all required fields collected)
+            from ....agents.tools.kb_utils import get_rule, compute_requires_zone
+            try:
+                rule = get_rule(agent_state.rule_id)
+                run_mode = agent_state.fields.get("run_mode", "continuous")
+                requires_zone = compute_requires_zone(rule, run_mode)
+                zone = agent_state.fields.get("zone")
+                # Check if zone is empty
+                zone_is_empty = not zone or (isinstance(zone, (dict, list)) and not zone)
+                
+                # If zone is optional (not required), check if zone is empty
+                if not requires_zone and zone_is_empty and not missing_fields:
+                    # Check if user intent or response mentions crossing/line drawing
+                    response_lower = response_text.lower()
+                    crossing_keywords = [
+                        "cross", "crossing", "line", "draw", "gate", "door", 
+                        "entrance", "exit", "entry", "boundary"
+                    ]
+                    if any(keyword in response_lower for keyword in crossing_keywords):
+                        # This is crossing detection - should offer zone drawing
+                        return True
+            except (ValueError, KeyError):
+                pass
+        
         return False
     
     # Secondary check: response contains zone-related language
     zone_keywords = [
         "zone", "area", "region", "draw", "define", "select",
         "polygon", "boundary", "outline", "mark", "highlight",
-        "detection zone", "monitoring area", "restricted area"
+        "detection zone", "monitoring area", "restricted area",
+        "line", "cross", "crossing"  # Add crossing-related keywords
     ]
     
     response_lower = response_text.lower()
@@ -68,7 +97,7 @@ def _compute_zone_required(agent_state, response_text: str = "") -> bool:
         response_text: Optional response text to infer rule if state not initialized
         
     Returns:
-        True if zone is required (requires_zone is True from KB and zone is None)
+        True if zone is required (requires_zone is True from KB and zone is None/empty)
     """
     # If state is initialized, compute from KB
     if agent_state.rule_id:
@@ -82,9 +111,20 @@ def _compute_zone_required(agent_state, response_text: str = "") -> bool:
             # Rule not found or error - assume zone not required
             requires_zone = False
         
-        # Zone is required if KB says so AND zone is not yet set
+        # Check if zone is empty or not set
         zone = agent_state.fields.get("zone")
-        return bool(requires_zone and zone is None)
+        zone_is_empty = not zone or (isinstance(zone, (dict, list)) and not zone)
+        
+        # Zone is required if KB says so AND zone is not yet set/empty
+        zone_required_by_kb = bool(requires_zone and zone_is_empty)
+        
+        # Special case: For counting rules, treat zone as "needed for UI" if zone is empty
+        if not zone_required_by_kb and agent_state.rule_id in ["class_count", "box_count"]:
+            # Zone is optional but we should show UI if zone is empty
+            if zone_is_empty:
+                zone_required_by_kb = True
+        
+        return zone_required_by_kb
     
     # State not initialized - check if agent is asking for zone in response
     # Check for rules that require zone (object_enter_zone, class_count, etc.)
@@ -336,6 +376,8 @@ class ChatWithAgentUseCase:
                 camera_id=camera_id,
                 zone_required=zone_required,
                 awaiting_zone_input=awaiting_zone_input,
+                frame_snapshot_url=None,
+                zone_type=None,
             )
 
         # Prefer response_to_return; fall back to last_model_response
@@ -387,15 +429,48 @@ class ChatWithAgentUseCase:
         awaiting_zone_input = _detect_zone_request(
             response_text_for_zone,
             agent_state.missing_fields,
+            agent_state,  # Pass agent_state for crossing detection logic
         )
+
+        # Generate snapshot URL and zone type if zone drawing is needed
+        frame_snapshot_url = None
+        zone_type = None
+        camera_id = agent_state.fields.get("camera_id")
+        
+        if awaiting_zone_input or zone_required:
+            print(f"[CHAT_RESPONSE] 🎯 Zone UI needed: awaiting_zone_input={awaiting_zone_input}, zone_required={zone_required}")
+            print(f"[CHAT_RESPONSE] 📷 Camera ID from agent_state.fields: {camera_id}")
+            
+            if camera_id:
+                # Generate snapshot URL for the camera
+                frame_snapshot_url = f"/api/v1/cameras/{camera_id}/snapshot"
+                print(f"[CHAT_RESPONSE] ✅ Frame snapshot URL set: {frame_snapshot_url}")
+                
+                # Determine zone type from rule
+                if agent_state.rule_id:
+                    from ....agents.tools.kb_utils import get_rule
+                    try:
+                        rule = get_rule(agent_state.rule_id)
+                        zone_support = rule.get("zone_support", {})
+                        zone_type = zone_support.get("zone_type", "polygon")  # Default to polygon
+                        print(f"[CHAT_RESPONSE] 📐 Zone type from rule: {zone_type}")
+                    except (ValueError, KeyError):
+                        zone_type = "polygon"  # Default
+                        print(f"[CHAT_RESPONSE] ⚠️  Could not get zone_type from rule, defaulting to polygon")
+            else:
+                print(f"[CHAT_RESPONSE] ⚠️  Camera ID is None - cannot set frame_snapshot_url for zone editor")
+                print(f"[CHAT_RESPONSE] 📋 Agent state fields: {list(agent_state.fields.keys())}")
+                print(f"[CHAT_RESPONSE] 📋 Missing fields: {agent_state.missing_fields}")
 
         return ChatMessageResponse(
             response=response_text,
             session_id=session_id,
             status="success",
-            camera_id=agent_state.fields.get("camera_id"),
+            camera_id=camera_id,  # Always include camera_id if available
             zone_required=zone_required,
             awaiting_zone_input=awaiting_zone_input,
+            frame_snapshot_url=frame_snapshot_url,
+            zone_type=zone_type,
             flow_diagram_data=flow_diagram_data,
         )
 

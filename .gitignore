@@ -25,3 +25,10 @@ PHONEIX UI/
 vlm_frames/
 event_videos/
 sachin_vision/
+vision-backend/venv
+vision-backend/debug_frames
+vision-backend/frames
+vision-backend/env
+vision-backend/*.pyc
+vision-backend/*.pt
+vision-backend/event_videos/*.mp4

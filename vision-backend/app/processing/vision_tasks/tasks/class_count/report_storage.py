@@ -87,10 +87,6 @@ def save_counting_event(
         # Insert into MongoDB
         result = collection.insert_one(report_doc)
 
-        # Print confirmation (like the existing print statements)
-        print(f"[REPORT] ✅ Saved {event_type.upper()} event: Track ID {track_id} | "
-              f"IN: {entry_count}, OUT: {exit_count}, STANDBY: {active_tracks}")
-
         return True
 
     except Exception as e:

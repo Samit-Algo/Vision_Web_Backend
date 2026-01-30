@@ -96,6 +96,20 @@ def compute_missing_fields(agent: AgentState, rule: Dict) -> None:
     execution_zone_required = execution_config.get("zone_required", False)
     if execution_zone_required or requires_zone:
         add_unique("zone")
+    else:
+        # Special case: For counting rules, zone is optional but we should ask about it
+        # This allows users to draw a line for crossing detection
+        rule_id = rule.get("rule_id")
+        if rule_id in ["class_count", "box_count"]:
+            # Only add zone to missing fields if zone is not set or empty
+            # Check for None, empty dict, empty list, or any falsy value
+            zone_value = agent.fields.get("zone")
+            zone_is_empty = not zone_value or (isinstance(zone_value, (dict, list)) and not zone_value)
+            print(f"[compute_missing_fields] Counting rule detected: {rule_id}")
+            print(f"[compute_missing_fields] Zone value: {zone_value}, is_empty: {zone_is_empty}")
+            if zone_is_empty:
+                add_unique("zone")
+                print(f"[compute_missing_fields] ✅ Zone added to missing fields for counting rule")
 
     for f in execution_required:
         add_unique(f)
@@ -105,7 +119,17 @@ def compute_missing_fields(agent: AgentState, rule: Dict) -> None:
         add_unique("start_time")
         add_unique("end_time")
 
-    agent.missing_fields = [f for f in ordered_required if agent.fields.get(f) is None]
+    # Zone: treat None or empty dict/list as missing; other fields: None only
+    missing = []
+    for f in ordered_required:
+        value = agent.fields.get(f)
+        if f == "zone":
+            if not value or (isinstance(value, (dict, list)) and not value):
+                missing.append(f)
+        else:
+            if value is None:
+                missing.append(f)
+    agent.missing_fields = missing
 
     print(f"[compute_missing_fields] Rule: {rule.get('rule_id')}, run_mode: {run_mode}")
     print(f"[compute_missing_fields] Ordered required fields: {ordered_required}")

@@ -270,6 +270,17 @@ class PipelineRunner:
     
     def run_continuous(self) -> None:
         """Run pipeline in continuous mode (process frames indefinitely at target FPS)."""
+        # Check if any rules are counting rules (box_count or class_count)
+        # For counting rules, use camera FPS instead of configured FPS
+        use_camera_fps = False
+        if self.context.rules:
+            for rule in self.context.rules:
+                rule_type = str(rule.get("type", "")).strip().lower()
+                if rule_type in ['box_count', 'class_count']:
+                    use_camera_fps = True
+                    break
+        
+        # Default to configured FPS
         fps = self.context.fps
         min_interval = 1.0 / max(1, fps)
         next_tick = time.time()
@@ -287,17 +298,22 @@ class PipelineRunner:
                 print(f"[worker {self.context.task_id}] ⏹️ Stopping (reason={stop_reason})")
                 return
             
-            # FPS pacing
-            now_timestamp = time.time()
-            if now_timestamp < next_tick:
-                time.sleep(max(0.0, next_tick - now_timestamp))
-            next_tick = max(next_tick + min_interval, time.time())
-            
             # Stage 1: Acquire frame
             frame_packet = acquire_frame_stage(self.source)
             if frame_packet is None:
                 time.sleep(0.05)
                 continue
+            
+            # For counting rules, use camera FPS if available
+            if use_camera_fps and frame_packet.fps is not None and frame_packet.fps > 0:
+                fps = frame_packet.fps
+                min_interval = 1.0 / max(1, fps)
+            
+            # FPS pacing
+            now_timestamp = time.time()
+            if now_timestamp < next_tick:
+                time.sleep(max(0.0, next_tick - now_timestamp))
+            next_tick = max(next_tick + min_interval, time.time())
             
             # Update context tracking
             hub_index = frame_packet.frame_index
@@ -370,6 +386,18 @@ class PipelineRunner:
         """Run pipeline in patrol mode (sleep interval, then process window, repeat)."""
         interval_seconds = max(0, int(self.context.interval_minutes) * 60)
         window_seconds = max(1, int(self.context.check_duration_seconds))
+        
+        # Check if any rules are counting rules (box_count or class_count)
+        # For counting rules, use camera FPS instead of configured FPS
+        use_camera_fps = False
+        if self.context.rules:
+            for rule in self.context.rules:
+                rule_type = str(rule.get("type", "")).strip().lower()
+                if rule_type in ['box_count', 'class_count']:
+                    use_camera_fps = True
+                    break
+        
+        # Default to configured FPS
         fps = self.context.fps
         
         print(f"[worker {self.context.task_id}] 💤 Patrol mode | sleep={interval_seconds}s window={window_seconds}s fps={fps}")
@@ -402,17 +430,22 @@ class PipelineRunner:
                     print(f"[worker {self.context.task_id}] ⏹️ Stopping (reason={stop_reason})")
                     return
                 
-                # FPS pacing
-                now_timestamp = time.time()
-                if now_timestamp < next_tick:
-                    time.sleep(max(0.0, next_tick - now_timestamp))
-                next_tick = max(next_tick + min_interval, time.time())
-                
                 # Stage 1: Acquire frame
                 frame_packet = acquire_frame_stage(self.source)
                 if frame_packet is None:
                     time.sleep(0.05)
                     continue
+                
+                # For counting rules, use camera FPS if available
+                if use_camera_fps and frame_packet.fps is not None and frame_packet.fps > 0:
+                    fps = frame_packet.fps
+                    min_interval = 1.0 / max(1, fps)
+                
+                # FPS pacing
+                now_timestamp = time.time()
+                if now_timestamp < next_tick:
+                    time.sleep(max(0.0, next_tick - now_timestamp))
+                next_tick = max(next_tick + min_interval, time.time())
                 
                 # Update context tracking
                 hub_index = frame_packet.frame_index
@@ -506,9 +539,126 @@ class PipelineRunner:
         try:
             frame = frame_packet.frame.copy()
             
-            # Draw pose keypoints if available; otherwise draw bounding boxes
+            # For restricted zone scenarios: show ALL person detections, not just those in zone
+            # For class_count/box_count with line: show ALL detections of target class
+            # For other scenarios: show only matched detections
+            zone_violated = False
+            target_class = None
+            line_crossed_indices = []  # Indices of objects that crossed the line
+            line_zone = None  # Line zone data for visualization
+            track_info = []  # Track information (center points, track IDs) for visualization
+            counts = None  # Counts for box/class counting scenarios
+            active_tracks_count = 0  # Number of active tracks
+            
+            # Check scenario types
+            is_restricted_zone = False
+            is_line_counting = False
+            is_fire_detection = False
+            fire_detected = False  # Whether fire is currently detected
+            fire_classes = []  # Target classes for fire detection
+            
+            if hasattr(self.context, '_scenario_instances'):
+                for rule_idx, scenario_instance in self.context._scenario_instances.items():
+                    scenario_type = getattr(scenario_instance, 'scenario_id', '')
+                    
+                    # Check if this is a restricted zone scenario
+                    if scenario_type == 'restricted_zone':
+                        is_restricted_zone = True
+                        if hasattr(scenario_instance, 'config_obj') and hasattr(scenario_instance.config_obj, 'target_class'):
+                            target_class = scenario_instance.config_obj.target_class
+                        # Check if zone is violated
+                        if hasattr(scenario_instance, '_state'):
+                            state = scenario_instance._state
+                            if state.get('objects_in_zone', False):
+                                zone_violated = True
+                    
+                    # Check if this is a fire detection scenario
+                    elif scenario_type == 'fire_detection':
+                        is_fire_detection = True
+                        if hasattr(scenario_instance, 'config_obj') and hasattr(scenario_instance.config_obj, 'target_classes'):
+                            fire_classes = scenario_instance.config_obj.target_classes
+                        # Check if fire is currently detected (from scenario state)
+                        if hasattr(scenario_instance, '_state'):
+                            state = scenario_instance._state
+                            # Fire is detected if we have consecutive frames with fire above threshold
+                            if state.get('fire_detected', False) or state.get('consecutive_fire_frames', 0) >= 1:
+                                fire_detected = True
+                    
+                    # Check if this is a line-based counting scenario (class_count or box_count)
+                    elif scenario_type in ['class_count', 'box_count']:
+                        is_line_counting = True
+                        
+                        if hasattr(scenario_instance, 'config_obj') and hasattr(scenario_instance.config_obj, 'target_class'):
+                            target_class = scenario_instance.config_obj.target_class
+                        
+                        # Get line zone data for visualization
+                        if hasattr(scenario_instance, 'config_obj') and hasattr(scenario_instance.config_obj, 'zone_type'):
+                            if scenario_instance.config_obj.zone_type == 'line' and scenario_instance.config_obj.zone_coordinates:
+                                line_zone = {
+                                    "type": "line",
+                                    "coordinates": scenario_instance.config_obj.zone_coordinates,
+                                    "direction": scenario_instance.config_obj.zone_direction
+                                }
+                        
+                        # Get objects that touched the line (for visualization)
+                        if hasattr(scenario_instance, '_state'):
+                            state = scenario_instance._state
+                            
+                            # Get track info with center points and touch status for visualization
+                            scenario_track_info = state.get('track_info', [])
+                            
+                            if scenario_track_info:
+                                track_info = scenario_track_info.copy()  # Make a copy to avoid reference issues
+                            else:
+                                track_info = []  # Ensure track_info is always a list
+                            
+                            # Get counts from line counter if available
+                            if hasattr(scenario_instance, 'line_counter') and scenario_instance.line_counter:
+                                counts = scenario_instance.line_counter.get_counts()
+                            
+                            # Get active tracks count
+                            if hasattr(scenario_instance, 'tracker') and scenario_instance.tracker:
+                                all_active_tracks = scenario_instance.tracker.get_all_active_tracks()
+                                active_tracks_count = len(all_active_tracks)
+                            
+                            # Match tracks that are currently touching the line to detection indices
+                            # Use track_info which already has touching_line flag (more accurate than matching touched_track_ids)
+                            if track_info and hasattr(scenario_instance, 'tracker') and scenario_instance.tracker:
+                                # Get active tracks from tracker for matching
+                                active_tracks = scenario_instance.tracker.tracks
+                                
+                                # Create a map of track_id to track_info for quick lookup
+                                track_info_map = {t.get('track_id'): t for t in track_info if t.get('track_id') is not None}
+                                
+                                # Match tracks that are touching the line to detection indices by IoU
+                                for track in active_tracks:
+                                    track_info_item = track_info_map.get(track.track_id)
+                                    # Only match tracks that are currently touching the line
+                                    if track_info_item and track_info_item.get('touching_line', False):
+                                        # Find matching detection index
+                                        track_bbox = track.bbox
+                                        for idx, det_box in enumerate(merged_packet.boxes):
+                                            if idx >= len(merged_packet.classes):
+                                                continue
+                                            # Check if class matches
+                                            det_class = merged_packet.classes[idx]
+                                            if isinstance(det_class, str) and det_class.lower() == target_class:
+                                                # Calculate IoU
+                                                iou = self._calculate_iou(track_bbox, det_box)
+                                                if iou >= 0.3:  # Match threshold
+                                                    if idx not in line_crossed_indices:
+                                                        line_crossed_indices.append(idx)
+                                                    break
+            
+            # Draw annotations based on scenario type
+            # For line-based counting (box_count/class_count), frontend handles drawing
+            # Backend only draws for pose keypoints or regular bounding boxes
             if detections.get("keypoints"):
                 processed_frame = draw_pose_keypoints(frame, detections, self.context.rules)
+            elif is_line_counting:
+                # For line counting, frontend draws boxes/center points based on track_info
+                # Don't draw boxes here to avoid duplicates
+                processed_frame = frame.copy()
             else:
                 processed_frame = draw_bounding_boxes(frame, detections, self.context.rules)
             
@@ -552,8 +702,54 @@ class PipelineRunner:
             frame_bytes = processed_frame.tobytes()
             height, width = processed_frame.shape[0], processed_frame.shape[1]
             
-            # Filter overlay detections using matched_detection_indices
-            if all_matched_indices:
+            # For restricted zone: indices into filtered detections that are inside the zone (for per-box red coloring)
+            in_zone_indices: List[int] = []
+
+            # Filter detections based on scenario type
+            if is_restricted_zone and target_class:
+                # Show ALL detections of target class (e.g., all persons)
+                f_boxes, f_classes, f_scores = self._filter_detections_by_class(
+                    target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores
+                )
+                # Map merged_packet indices (in zone) to filtered indices for overlay coloring
+                orig_in_zone = set(all_matched_indices)
+                filtered_idx = 0
+                for orig_idx in range(len(merged_packet.boxes)):
+                    if orig_idx < len(merged_packet.classes):
+                        det_class = merged_packet.classes[orig_idx]
+                        if isinstance(det_class, str) and det_class.lower() == target_class:
+                            if orig_idx in orig_in_zone:
+                                in_zone_indices.append(filtered_idx)
+                            filtered_idx += 1
+            elif is_fire_detection and fire_classes:
+                # Show ALL fire-related detections (fire, flame, smoke)
+                # This ensures fire bounding boxes are always visible
+                f_boxes, f_classes, f_scores = self._filter_detections_by_fire_classes(
+                    fire_classes, merged_packet.boxes, merged_packet.classes, merged_packet.scores
+                )
+            elif is_line_counting and target_class:
+                # Show ALL detections of target class for line counting
+                f_boxes, f_classes, f_scores = self._filter_detections_by_class(
+                    target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores
+                )
+                
+                # Map line_crossed_indices from merged_packet indices to filtered indices
+                if line_crossed_indices:
+                    # Create mapping: original index -> filtered index
+                    filtered_crossed_indices = []
+                    original_to_filtered = {}
+                    filtered_idx = 0
+                    for orig_idx in range(len(merged_packet.boxes)):
+                        if orig_idx < len(merged_packet.classes):
+                            det_class = merged_packet.classes[orig_idx]
+                            if isinstance(det_class, str) and det_class.lower() == target_class:
+                                if orig_idx in line_crossed_indices:
+                                    filtered_crossed_indices.append(filtered_idx)
+                                original_to_filtered[orig_idx] = filtered_idx
+                                filtered_idx += 1
+                    line_crossed_indices = filtered_crossed_indices
+            elif all_matched_indices:
+                # Other scenarios: show only matched detections
                 unique_indices = sorted(set(all_matched_indices))
                 f_boxes, f_classes, f_scores = self._filter_detections_by_indices(
                     unique_indices, merged_packet.boxes, merged_packet.classes, merged_packet.scores
@@ -600,12 +796,42 @@ class PipelineRunner:
                 "scenario_overlays": scenario_overlays,  # Add scenario overlays
                 "rules": self.context.rules,
                 "camera_id": self.context.camera_id,
+                "zone_violated": zone_violated,  # Zone violation status
+                "line_zone": line_zone,  # Line zone data for visualization
+                "line_crossed": len(line_crossed_indices) > 0,  # Whether any object crossed the line
+                "line_crossed_indices": line_crossed_indices,  # Indices of filtered detections that crossed the line
+                "track_info": track_info,  # Track information (center points, track IDs) for visualization
+                "fire_detected": fire_detected,  # Fire detection status (for red bounding boxes)
+                "in_zone_indices": in_zone_indices,  # Restricted zone: indices of filtered detections inside zone (red box only these)
             }
             
             return processed_frame
         except Exception as exc:  # noqa: BLE001
             print(f"[worker {self.context.task_id}] ⚠️  Error processing frame for stream: {exc}")
             return None
+    
+    def _calculate_iou(self, box1: List[float], box2: List[float]) -> float:
+        """Calculate Intersection over Union between two boxes."""
+        x1_1, y1_1, x2_1, y2_1 = box1
+        x1_2, y1_2, x2_2, y2_2 = box2
+        
+        overlap_left = max(x1_1, x1_2)
+        overlap_top = max(y1_1, y1_2)
+        overlap_right = min(x2_1, x2_2)
+        overlap_bottom = min(y2_1, y2_2)
+        
+        if overlap_right < overlap_left or overlap_bottom < overlap_top:
+            return 0.0
+        
+        intersection = (overlap_right - overlap_left) * (overlap_bottom - overlap_top)
+        area1 = (x2_1 - x1_1) * (y2_1 - y1_1)
+        area2 = (x2_2 - x1_2) * (y2_2 - y1_2)
+        union = area1 + area2 - intersection
+        
+        if union == 0:
+            return 0.0
+        
+        return intersection / union
     
     def _filter_detections_by_indices(
         self,
@@ -614,17 +840,97 @@ class PipelineRunner:
         classes: List[str],
         scores: List[float],
     ) -> tuple[List[List[float]], List[str], List[float]]:
-        """Filter detections to only those at specified indices."""
+        """Filter detections to only those at specified indices with confidence >= 0.7."""
         if not indices:
             return [], [], []
         f_boxes: List[List[float]] = []
         f_classes: List[str] = []
         f_scores: List[float] = []
+        confidence_threshold = 0.7  # Minimum confidence level
+        
         for idx in indices:
             if 0 <= idx < len(boxes) and idx < len(classes) and idx < len(scores):
-                f_boxes.append(boxes[idx])
-                f_classes.append(classes[idx])
-                f_scores.append(scores[idx])
+                # Apply confidence threshold
+                if scores[idx] >= confidence_threshold:
+                    f_boxes.append(boxes[idx])
+                    f_classes.append(classes[idx])
+                    f_scores.append(scores[idx])
+        return f_boxes, f_classes, f_scores
+    
+    def _filter_detections_by_class(
+        self,
+        target_class: str,
+        boxes: List[List[float]],
+        classes: List[str],
+        scores: List[float],
+    ) -> tuple[List[List[float]], List[str], List[float]]:
+        """Filter detections to only those matching target class (e.g., 'person') with confidence >= 0.7."""
+        f_boxes: List[List[float]] = []
+        f_classes: List[str] = []
+        f_scores: List[float] = []
+        target_lower = target_class.lower()
+        confidence_threshold = 0.7  # Minimum confidence level
+        
+        # Debug: Log all detected classes
+        if len(classes) > 0:
+            unique_classes = set(cls.lower() if isinstance(cls, str) else str(cls) for cls in classes)
+            print(f"[worker {self.context.task_id}] 🔍 YOLO detected classes: {unique_classes} (total: {len(classes)} objects)")
+        
+        filtered_count = 0
+        for idx, (box, cls, score) in enumerate(zip(boxes, classes, scores)):
+            if isinstance(cls, str) and cls.lower() == target_lower:
+                # Apply confidence threshold
+                if score >= confidence_threshold:
+                    f_boxes.append(box)
+                    f_classes.append(cls)
+                    f_scores.append(score)
+                else:
+                    filtered_count += 1
+        
+        # Debug: Log filtering results
+        if len(f_boxes) > 0:
+            print(f"[worker {self.context.task_id}] ✅ Found {len(f_boxes)} '{target_class}' detections (confidence >= {confidence_threshold})")
+        if filtered_count > 0:
+            print(f"[worker {self.context.task_id}] 🔽 Filtered out {filtered_count} low-confidence '{target_class}' detections (< {confidence_threshold})")
+        
+        return f_boxes, f_classes, f_scores
+    
+    def _filter_detections_by_fire_classes(
+        self,
+        fire_classes: List[str],
+        boxes: List[List[float]],
+        classes: List[str],
+        scores: List[float],
+    ) -> tuple[List[List[float]], List[str], List[float]]:
+        """
+        Filter detections to only fire-related classes (fire, flame, smoke, etc.).
+        
+        Uses a lower confidence threshold (0.5) for fire detection since it's safety-critical.
+        """
+        f_boxes: List[List[float]] = []
+        f_classes: List[str] = []
+        f_scores: List[float] = []
+        fire_classes_lower = [c.lower() for c in fire_classes]
+        confidence_threshold = 0.5  # Lower threshold for fire detection (safety-critical)
+        
+        for idx, (box, cls, score) in enumerate(zip(boxes, classes, scores)):
+            if isinstance(cls, str):
+                cls_lower = cls.lower()
+                # Check if class matches any fire-related class
+                is_fire_class = any(
+                    target in cls_lower or cls_lower in target
+                    for target in fire_classes_lower
+                )
+                
+                if is_fire_class and score >= confidence_threshold:
+                    f_boxes.append(box)
+                    f_classes.append(cls)
+                    f_scores.append(score)
+        
+        # Debug: Log fire detections
+        if len(f_boxes) > 0:
+            print(f"[worker {self.context.task_id}] 🔥 Found {len(f_boxes)} fire-related detections (confidence >= {confidence_threshold})")
+        
         return f_boxes, f_classes, f_scores
     
     def _handle_event(

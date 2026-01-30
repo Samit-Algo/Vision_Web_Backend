@@ -114,6 +114,10 @@ def _analyze_person_fall(
     return falling, lying, metrics
 
 
+# =============================
+# SCENARIO CLASS
+# =============================
+
 @register_scenario("fall_detection")
 class FallDetectionScenario(BaseScenario):
     """

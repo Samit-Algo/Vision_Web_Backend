@@ -72,14 +72,14 @@
       {
         "rule_id": "object_enter_zone",
         "rule_name": "Object Enter Zone",
-        "description": "Triggers when an object enters a defined zone.",
+        "description": "Triggers when an object enters a defined polygon zone. User must draw MINIMUM 3 POINTS to create a polygon. The system checks if the center point of detected objects is inside the polygon.",
       
         "intent_examples": [
           "Alert if someone enters restricted area",
           "Notify when a car enters the gate"
         ],
       
-        "model": "YOLO-Objects-v2",
+        "model": "yolov8n.pt",
       
         "detectable_classes": [
           "person",
@@ -98,7 +98,13 @@
       
         "zone_support": {
           "supported": true,
-          "required": true
+          "required": true,
+          "zone_type": "polygon",
+          "min_points": 3,
+          "max_points": null,
+          "supports_polygon": true,
+          "supports_line": false,
+          "description": "User must draw a POLYGON with MINIMUM 3 POINTS to define the detection zone. NO LINE DRAWING - ONLY POLYGON. The system uses the center point of detected objects to check if they are inside the polygon zone."
         },
       
         "execution_modes": {
@@ -338,21 +344,30 @@
       {
         "rule_id": "class_count",
         "rule_name": "Class Count",
-        "description": "Counts how many objects of a specific class are present (optionally within a zone).",
+        "description": "Counts objects of a specific class. For crossing detection, user must draw exactly 2 points to create a counting line. The system tracks objects and increments count when the center point of an object crosses the line. Without a line, performs simple per-frame counting.",
       
         "intent_examples": [
-          "How many people are in this classroom?",
-          "Count how many cars are in the parking lot",
-          "How many people are present in this area?"
+          "Count how many people entered the room",
+          "Count people crossing the line",
+          "How many cars passed through the gate",
+          "Count objects crossing this line",
+          "How many people are there",
+          "count people",
+          "count cars",
+          "person count",
+          "vehicle count",
+          "count the workers"
         ],
       
-        "model": "yolov8n.pt",
+        "model": "yolov8l.pt",
       
         "detectable_classes": [
           "person",
           "car",
+          "truck",
+          "bicycle",
           "dog",
-          "chair"
+          "cat"
         ],
       
         "required_fields_from_user": [
@@ -366,27 +381,34 @@
       
         "zone_support": {
           "supported": true,
-          "required": true
+          "required": false,
+          "zone_type": "line",
+          "min_points": 2,
+          "max_points": 2,
+          "supports_polygon": false,
+          "supports_line": true,
+          "line_for_crossing": true,
+          "description": "For counting objects crossing a boundary, user draws EXACTLY 2 POINTS to create a line. NO POLYGON NEEDED. The system uses the center point of each detected object - when the center point crosses the user-drawn line, the count increments by 1. Object tracking ensures each object is counted only once. Without a line, the system performs simple per-frame counting of all visible objects."
         },
       
         "execution_modes": {
           "continuous": {
-            "description": "Continuously counts objects in the zone",
+            "description": "Continuously counts objects (with or without zone)",
             "required_fields": [],
             "forbidden_fields": [
               "interval_minutes",
               "check_duration_seconds"
             ],
-            "zone_required": true
+            "zone_required": false
           },
       
           "patrol": {
-            "description": "Counts objects in the zone periodically",
+            "description": "Counts objects periodically",
             "required_fields": [
               "interval_minutes",
               "check_duration_seconds"
             ],
-            "zone_required": true
+            "zone_required": false
           }
         },
       
@@ -399,6 +421,340 @@
           "fps": 1,
           "confidence": 0.7,
           "run_mode": "continuous"
+        }
+      },
+
+      {
+        "rule_id": "box_count",
+        "rule_name": "Box Count",
+        "description": "Counts boxes or packages. For crossing detection, user must draw exactly 2 points to create a counting line. The system tracks boxes and increments count when the center point of a box crosses the line. Without a line, performs simple per-frame counting.",
+      
+        "intent_examples": [
+          "Count boxes",
+          "How many boxes are there",
+          "Count boxes crossing the line",
+          "Count how many packages passed through",
+          "How many boxes entered",
+          "box count",
+          "count the boxes"
+        ],
+      
+        "model": "C:\\AlgoOrange Task\\Vision_Web_Backend\\vision-backend\\box_detection.pt",
+      
+        "detectable_classes": [
+          "box",
+          "package",
+          "container",
+          "bag",
+          "suitcase"
+        ],
+      
+        "required_fields_from_user": [
+          "class"
+        ],
+      
+        "time_window": {
+          "supported": true,
+          "required": true
+        },
+      
+        "zone_support": {
+          "supported": true,
+          "required": false,
+          "zone_type": "line",
+          "min_points": 2,
+          "max_points": 2,
+          "supports_polygon": false,
+          "supports_line": true,
+          "line_for_crossing": true,
+          "description": "For counting boxes crossing a boundary, user draws EXACTLY 2 POINTS to create a line. NO POLYGON NEEDED. The system uses the center point of each detected box - when the center point crosses the user-drawn line, the count increments by 1. Box tracking ensures each box is counted only once. Without a line, the system performs simple per-frame counting of all visible boxes."
+        },
+      
+        "execution_modes": {
+          "continuous": {
+            "description": "Continuously counts boxes (with or without zone/line)",
+            "required_fields": [],
+            "forbidden_fields": [
+              "interval_minutes",
+              "check_duration_seconds"
+            ],
+            "zone_required": false
+          },
+      
+          "patrol": {
+            "description": "Counts boxes periodically",
+            "required_fields": [
+              "interval_minutes",
+              "check_duration_seconds"
+            ],
+            "zone_required": false
+          }
+        },
+      
+        "rules_config_fields": [
+          "class",
+          "label"
+        ],
+      
+        "defaults": {
+          "fps": 1,
+          "confidence": 0.7,
+          "run_mode": "continuous"
+        }
+      },
+
+      {
+        "rule_id": "restricted_zone",
+        "rule_name": "Restricted Zone Detection",
+        "description": "Triggers an alert when a specified object is detected inside a restricted zone. User must draw MINIMUM 3 POINTS to create a polygon defining the restricted area. The system checks if the center point of detected objects falls inside the polygon. The zone polygon is visible on the live stream. Applies alert cooldown to prevent spam.",
+      
+        "intent_examples": [
+          "Alert if a person is in the restricted zone",
+          "Notify when someone enters the no-go area",
+          "Detect if any person is inside the danger zone",
+          "Alert when a car is parked in the restricted area",
+          "Monitor the restricted zone for unauthorized access"
+        ],
+      
+        "model": "yolov8l.pt",
+      
+        "detectable_classes": [
+          "person",
+          "car",
+          "truck",
+          "bicycle",
+          "motorcycle",
+          "dog"
+        ],
+      
+        "required_fields_from_user": [
+          "class"
+        ],
+      
+        "time_window": {
+          "supported": true,
+          "required": true
+        },
+
+        "zone_support": {
+          "supported": true,
+          "required": true,
+          "zone_type": "polygon",
+          "min_points": 3,
+          "max_points": null,
+          "supports_polygon": true,
+          "supports_line": false,
+          "description": "User must draw a POLYGON with MINIMUM 3 POINTS to define the restricted area. NO LINE DRAWING - ONLY POLYGON. The system uses the center point of each detected object to check if it's inside the polygon zone. If the object's center point is within the polygon boundaries, an alert is triggered. The zone polygon is continuously monitored and visible on the live stream."
+        },
+
+        "execution_modes": {
+          "continuous": {
+            "description": "Continuously monitors the restricted zone for object presence",
+            "required_fields": [],
+            "forbidden_fields": [
+              "interval_minutes",
+              "check_duration_seconds"
+            ],
+            "zone_required": true
+          },
+      
+          "patrol": {
+            "description": "Periodically checks the restricted zone for object presence",
+            "required_fields": [
+              "interval_minutes",
+              "check_duration_seconds"
+            ],
+            "zone_required": true
+          }
+        },
+      
+        "rules_config_fields": [
+          "class",
+          "label",
+          "alert_cooldown_seconds"
+        ],
+      
+        "defaults": {
+          "fps": 2,
+          "confidence": 0.7,
+          "run_mode": "continuous",
+          "alert_cooldown_seconds": 10
+        }
+      },
+
+      {
+        "rule_id": "fall_detection",
+        "rule_name": "Fall Detection",
+        "description": "Detects when a person falls down using pose keypoint analysis. Monitors body angle, height, and sudden downward movement to identify falls. Requires pose detection model (YOLOv8 Pose). Triggers alert when fall is confirmed after multiple consecutive frames.",
+      
+        "intent_examples": [
+          "Alert me if any person fall detected",
+          "Alert me if any fall detected",
+          "Notify me when someone falls down",
+          "Detect if a person falls",
+          "Alert if someone falls",
+          "Tell me if a person falls",
+          "Monitor for falls",
+          "Detect human falls",
+          "Alert on fall detection",
+          "Notify when fall is detected"
+        ],
+      
+        "model": "yolov8l-pose.pt",
+      
+        "detectable_classes": [
+          "person"
+        ],
+      
+        "required_fields_from_user": [],
+      
+        "time_window": {
+          "supported": true,
+          "required": true
+        },
+      
+        "zone_support": {
+          "supported": false,
+          "required": false
+        },
+      
+        "execution_modes": {
+          "continuous": {
+            "description": "Continuously monitors for fall detection",
+            "required_fields": [],
+            "forbidden_fields": [
+              "interval_minutes",
+              "check_duration_seconds"
+            ],
+            "zone_required": false
+          },
+      
+          "patrol": {
+            "description": "Checks periodically for fall detection",
+            "required_fields": [
+              "interval_minutes",
+              "check_duration_seconds"
+            ],
+            "zone_required": false
+          }
+        },
+      
+        "rules_config_fields": [
+          "class",
+          "label",
+          "alert_cooldown_seconds",
+          "confidence_threshold",
+          "kp_confidence_threshold",
+          "lying_angle_threshold",
+          "hip_drop_threshold",
+          "height_drop_ratio",
+          "min_height_for_standing",
+          "confirm_frames"
+        ],
+      
+        "defaults": {
+          "fps": 5,
+          "confidence": 0.5,
+          "run_mode": "continuous",
+          "class": "person",
+          "alert_cooldown_seconds": 10,
+          "confidence_threshold": 0.5,
+          "kp_confidence_threshold": 0.3,
+          "lying_angle_threshold": 50,
+          "hip_drop_threshold": 15,
+          "height_drop_ratio": 0.25,
+          "min_height_for_standing": 300,
+          "confirm_frames": 3
+        }
+      },
+
+      {
+        "rule_id": "fire_detection",
+        "rule_name": "Fire Detection",
+        "description": "Detects fire and smoke in the camera view using a fine-tuned YOLO model. Triggers critical alerts when fire is detected. Uses consecutive frame confirmation to reduce false positives from flickering lights or reflections.",
+      
+        "intent_examples": [
+          "Alert me if any fire detected",
+          "If any fire detected alert me",
+          "Notify me when there is fire",
+          "Detect fire in the area",
+          "Alert if fire is detected",
+          "Tell me if there is a fire",
+          "Monitor for fire",
+          "Detect flames",
+          "Alert on fire detection",
+          "Notify when fire is detected",
+          "Alert me if there is smoke",
+          "Detect smoke or fire",
+          "Fire alarm",
+          "Fire alert",
+          "Watch for fire",
+          "Fire monitoring"
+        ],
+      
+        "model": "C:\\AlgoOrange Task\\Vision_Web_Backend\\vision-backend\\fire_detection.pt",
+      
+        "detectable_classes": [
+          "fire",
+          "flame",
+          "smoke"
+        ],
+      
+        "required_fields_from_user": [],
+      
+        "time_window": {
+          "supported": true,
+          "required": true
+        },
+      
+        "zone_support": {
+          "supported": true,
+          "required": false,
+          "zone_type": "polygon",
+          "min_points": 3,
+          "max_points": null,
+          "supports_polygon": true,
+          "supports_line": false,
+          "description": "Optional polygon zone to monitor specific areas for fire. User can draw MINIMUM 3 POINTS to define the monitoring zone. If no zone is specified, the entire camera view is monitored for fire."
+        },
+      
+        "execution_modes": {
+          "continuous": {
+            "description": "Continuously monitors for fire detection. Recommended for safety-critical applications.",
+            "required_fields": [],
+            "forbidden_fields": [
+              "interval_minutes",
+              "check_duration_seconds"
+            ],
+            "zone_required": false
+          },
+      
+          "patrol": {
+            "description": "Checks periodically for fire detection",
+            "required_fields": [
+              "interval_minutes",
+              "check_duration_seconds"
+            ],
+            "zone_required": false
+          }
+        },
+      
+        "rules_config_fields": [
+          "classes",
+          "label",
+          "alert_cooldown_seconds",
+          "confidence_threshold",
+          "confirm_frames"
+        ],
+      
+        "defaults": {
+          "fps": 5,
+          "confidence": 0.5,
+          "run_mode": "continuous",
+          "classes": ["fire", "flame", "smoke"],
+          "alert_cooldown_seconds": 10,
+          "confidence_threshold": 0.5,
+          "confirm_frames": 2
         }
       }
       

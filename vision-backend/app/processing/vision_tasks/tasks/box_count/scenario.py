@@ -160,7 +160,6 @@ class BoxCountScenario(BaseScenario):
         matched_count, matched_indices = count_class_detections(
             frame_context.detections,
             self.config_obj.target_class,
-            self.config_obj.zone_coordinates,
         )
         report = generate_report(
             self._state, matched_count, frame_context.timestamp, self.config_obj.zone_applied
