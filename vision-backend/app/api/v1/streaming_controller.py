@@ -308,6 +308,47 @@ async def websocket_agent_overlay(websocket: WebSocket, agent_id: str) -> None:
             classes = det.get("classes") or []
             scores = det.get("scores") or []
 
+            # Collect zones from agent configuration and rules
+            zones = []
+            
+            # Add agent-level zone if exists
+            if agent and hasattr(agent, "zone") and agent.zone:
+                zones.append(agent.zone)
+            
+            # Add zones from rules (including line zones for class_count/box_count)
+            rules = entry.get("rules", [])
+            if rules:
+                for rule in rules:
+                    rule_zone = rule.get("zone")
+                    if rule_zone:
+                        zones.append(rule_zone)
+            
+            # Also check for line_zone in entry (from scenario)
+            line_zone = entry.get("line_zone")
+            if line_zone and line_zone not in zones:
+                zones.append(line_zone)
+            
+            # Get zone violation status from entry
+            zone_violated = entry.get("zone_violated", False)
+            
+            # Get fire detection status (for red bounding boxes on overlay)
+            fire_detected = entry.get("fire_detected", False)
+            
+            # Get line crossing/touch status
+            line_crossed = entry.get("line_crossed", False)
+            line_crossed_indices = entry.get("line_crossed_indices", [])
+            track_info = entry.get("track_info", [])  # Track information with center points and touch status
+            in_zone_indices = entry.get("in_zone_indices", [])  # Restricted zone: only these detection indices get red box
+            
+            # Build detection colors based on touch status
+            # Yellow for boxes touching the line, default color for others
+            detection_colors = []
+            for idx, track_item in enumerate(track_info):
+                if track_item.get("touching_line", False):
+                    detection_colors.append("yellow")  # Yellow when touching line
+                else:
+                    detection_colors.append("green")  # Default green for normal boxes
+            
             payload = {
                 "type": "agent_overlay",
                 "agent_id": agent_id,
@@ -320,7 +361,16 @@ async def websocket_agent_overlay(websocket: WebSocket, agent_id: str) -> None:
                     "boxes": boxes,
                     "classes": classes,
                     "scores": scores,
+                    "colors": detection_colors,  # Box colors: yellow when touching, green otherwise
                 },
+                "zones": zones,  # Include all zones (polygon and line) for visualization
+                "zone": zones[0] if zones else None,  # Backward compatibility
+                "zone_violated": zone_violated,  # Include zone violation status
+                "fire_detected": fire_detected,  # Fire detection status (red bounding boxes)
+                "line_crossed": line_crossed,  # Whether any object crossed/touched the line
+                "line_crossed_indices": line_crossed_indices,  # Indices of detections that crossed
+                "track_info": track_info,  # Track information (center points, track IDs, touch status) for visualization
+                "in_zone_indices": in_zone_indices,  # Restricted zone: only these box indices are red (violation)
             }
             await websocket.send_json(payload)
     except WebSocketDisconnect:

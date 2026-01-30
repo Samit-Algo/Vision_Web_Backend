@@ -56,16 +56,24 @@ def inference_stage(
     frame = frame_packet.frame
     detection_packets: List[DetectionPacket] = []
     
+    if not models:
+        print(f"[worker {context.task_id}] ⚠️ No models loaded!")
+        return detection_packets
+    
     for model in models:
         try:
             results = model(frame, verbose=False)
         except Exception as exc:  # noqa: BLE001
             print(f"[worker {context.task_id}] ⚠️ YOLO error: {exc}")
+            import traceback
+            print(f"[worker {context.task_id}] Traceback: {traceback.format_exc()}")
             continue
         if results:
             first_result = results[0]
             packet = DetectionBuilder.from_yolo_result(first_result, now())
             detection_packets.append(packet)
+            # Debug: Log detection counts
+            print(f"[worker {context.task_id}] 🎯 YOLO inference: {len(packet.boxes)} objects detected")
     
     return detection_packets
 
@@ -139,13 +147,17 @@ def evaluate_rules_stage(
                 # Convert rule to scenario config format
                 # Rule fields (except "type") become scenario config
                 scenario_config = {k: v for k, v in rule.items() if k != "type"}
-                context._scenario_instances[rule_idx] = scenario_class(scenario_config, context)
+                scenario_instance = scenario_class(scenario_config, context)
+                # Explicitly set scenario_id from rule type (since we removed "type" from config)
+                scenario_instance.scenario_id = rule_type
+                context._scenario_instances[rule_idx] = scenario_instance
             
             scenario_instance = context._scenario_instances[rule_idx]
             
             # Build ScenarioFrameContext
-            from datetime import datetime
-            frame_timestamp = datetime.fromtimestamp(frame_packet.timestamp)
+            # Note: frame_packet.timestamp is a monotonic timestamp (relative time),
+            # not a Unix timestamp, so we use current time instead
+            frame_timestamp = now()
             frame_context = ScenarioFrameContext(
                 frame=frame_packet.frame,
                 frame_index=context.frame_index,

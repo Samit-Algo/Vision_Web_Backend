@@ -1,10 +1,12 @@
 """
-Class Count Scenario
---------------------
+Box Count Scenario
+------------------
 
-Counts detections of a specified class with two modes:
+Counts boxes (or specified class) with two modes:
 1. Simple per-frame counting (no zone)
-2. Line-based counting with tracking (objects touching a line)
+2. Line-based counting with tracking (boxes crossing a line)
+
+Same as ClassCountScenario but defaults to "box" class.
 """
 
 from typing import List, Dict, Any, Optional
@@ -16,7 +18,7 @@ from app.processing.scenarios.contracts import (
     ScenarioEvent
 )
 from app.processing.scenarios.registry import register_scenario
-from app.processing.scenarios.class_count.config import ClassCountConfig
+from app.processing.scenarios.box_count.config import BoxCountConfig
 from app.processing.scenarios.class_count.counter import (
     count_class_detections,
     generate_count_label,
@@ -31,21 +33,19 @@ from app.processing.scenarios.class_count.report_storage import (
 from app.processing.scenarios.tracking import SimpleTracker, LineCrossingCounter
 
 
-@register_scenario("class_count")
-class ClassCountScenario(BaseScenario):
+@register_scenario("box_count")
+class BoxCountScenario(BaseScenario):
     """
-    Counts class detections with optional line-based counting.
+    Counts boxes with optional line crossing.
     
-    Modes:
-    - No zone: Simple per-frame count
-    - Line zone: Counts objects when center point touches the line (with tracking)
+    Same as class_count but defaults to "box" class.
     """
     
     def __init__(self, config: Dict[str, Any], pipeline_context):
         super().__init__(config, pipeline_context)
         
         # Load configuration
-        self.config_obj = ClassCountConfig(config, pipeline_context.task)
+        self.config_obj = BoxCountConfig(config, pipeline_context.task)
         
         # Initialize tracker and line counter for line-based counting
         self.tracker: Optional[SimpleTracker] = None
@@ -58,9 +58,12 @@ class ClassCountScenario(BaseScenario):
                 iou_threshold=self.config_obj.iou_threshold,
                 score_threshold=self.config_obj.score_threshold
             )
+            # Use "entry_exit" count mode to track separate in/out counts
+            # This allows users to see how many boxes entered vs exited
             self.line_counter = LineCrossingCounter(
                 line_coordinates=self.config_obj.zone_coordinates,
-                direction=self.config_obj.zone_direction
+                direction=self.config_obj.zone_direction,
+                count_mode="entry_exit"  # Entry/exit mode: separate counts for entry and exit
             )
         
         # Initialize report session when agent starts
@@ -101,10 +104,18 @@ class ClassCountScenario(BaseScenario):
         
         # Debug: Log detection count
         if len(class_detections) > 0:
-            print(f"[CLASS_COUNT] 📦 Filtered {len(class_detections)} '{self.config_obj.target_class}' detections for tracking")
+            print(f"[BOX_COUNT] 📦 Filtered {len(class_detections)} '{self.config_obj.target_class}' detections for tracking")
+        
+        # Store track ID counter before update (to detect new IDs)
+        prev_track_count = self.tracker.track_id_counter
         
         # Update tracker
         active_tracks = self.tracker.update(class_detections)
+        
+        # Log if new track IDs were created
+        new_track_count = self.tracker.track_id_counter - prev_track_count
+        if new_track_count > 0:
+            print(f"[BOX_COUNT] 🆕 Created {new_track_count} new track ID(s), next ID: {self.tracker.track_id_counter}")
         
         # Also get all active tracks (including unconfirmed) for line crossing detection
         # This ensures we detect crossings even for tracks that haven't been confirmed yet
@@ -112,10 +123,10 @@ class ClassCountScenario(BaseScenario):
         
         # Debug: Log tracking status
         if len(all_active_tracks) > 0:
-            print(f"[CLASS_COUNT] 🎯 Tracking {len(active_tracks)} confirmed {self.config_obj.target_class} tracks (total active: {len(all_active_tracks)})")
+            print(f"[BOX_COUNT] 🎯 Tracking {len(active_tracks)} confirmed box tracks (total active: {len(all_active_tracks)})")
             # Log current counts
             counts = self.line_counter.get_counts()
-            print(f"[CLASS_COUNT] 📊 Current counts - IN: {counts.get('entry_count', 0)}, OUT: {counts.get('exit_count', 0)}, NET: {counts.get('net_count', 0)}")
+            print(f"[BOX_COUNT] 📊 Current counts - IN: {counts.get('entry_count', 0)}, OUT: {counts.get('exit_count', 0)}, NET: {counts.get('net_count', 0)}")
         
         # Check for line touches using ALL active tracks (not just confirmed)
         # This uses touch detection: count when center point touches the line
@@ -129,11 +140,11 @@ class ClassCountScenario(BaseScenario):
                 # Print alert with ===================
                 print("=" * 50)
                 if touch_result == 'entry':
-                    print(f"[CLASS_COUNT] ✅ {self.config_obj.target_class.capitalize()} TOUCHED LINE (ENTRY) - Track ID: {track.track_id}, Total IN: {self.line_counter.entry_count}")
-                    print(f"[CLASS_COUNT]   Center point: ({track.center[0]:.1f}, {track.center[1]:.1f})")
+                    print(f"[BOX_COUNT] ✅ {self.config_obj.target_class.capitalize()} TOUCHED LINE (ENTRY) - Track ID: {track.track_id}, Total IN: {self.line_counter.entry_count}")
+                    print(f"[BOX_COUNT]   Center point: ({track.center[0]:.1f}, {track.center[1]:.1f})")
                 elif touch_result == 'exit':
-                    print(f"[CLASS_COUNT] ✅ {self.config_obj.target_class.capitalize()} TOUCHED LINE (EXIT) - Track ID: {track.track_id}, Total OUT: {self.line_counter.exit_count}")
-                    print(f"[CLASS_COUNT]   Center point: ({track.center[0]:.1f}, {track.center[1]:.1f})")
+                    print(f"[BOX_COUNT] ✅ {self.config_obj.target_class.capitalize()} TOUCHED LINE (EXIT) - Track ID: {track.track_id}, Total OUT: {self.line_counter.exit_count}")
+                    print(f"[BOX_COUNT]   Center point: ({track.center[0]:.1f}, {track.center[1]:.1f})")
                 print("=" * 50)
                 
                 # Store touch event in state
@@ -187,13 +198,17 @@ class ClassCountScenario(BaseScenario):
         # Get counts
         counts = self.line_counter.get_counts()
         
-        # Determine which count to display based on direction
-        if self.config_obj.zone_direction == "entry":
-            count = counts["entry_count"]
-        elif self.config_obj.zone_direction == "exit":
-            count = counts["exit_count"]
-        else:  # both
-            count = counts["net_count"]
+        # For single count mode, use boxes_counted
+        if self.line_counter.count_mode == "single":
+            count = counts["boxes_counted"]
+        else:
+            # Determine which count to display based on direction (entry_exit mode)
+            if self.config_obj.zone_direction == "entry":
+                count = counts["entry_count"]
+            elif self.config_obj.zone_direction == "exit":
+                count = counts["exit_count"]
+            else:  # both
+                count = counts["net_count"]
         
         # Generate label
         label = self._generate_line_count_label(counts)
@@ -216,21 +231,32 @@ class ClassCountScenario(BaseScenario):
         )
         
         # Emit event
+        metadata = {
+            "count": count,
+            "target_class": self.config_obj.target_class,
+            "zone_type": "line",
+            "zone_direction": self.config_obj.zone_direction,
+            "active_tracks": len(active_tracks),
+            "report": report
+        }
+        
+        # Add count details based on mode
+        if self.line_counter and self.line_counter.count_mode == "single":
+            metadata["boxes_counted"] = counts.get("boxes_counted", 0)
+            # For compatibility, also include entry_count
+            metadata["entry_count"] = counts.get("boxes_counted", 0)
+            metadata["exit_count"] = 0
+            metadata["net_count"] = counts.get("boxes_counted", 0)
+        else:
+            metadata["entry_count"] = counts["entry_count"]
+            metadata["exit_count"] = counts["exit_count"]
+            metadata["net_count"] = counts["net_count"]
+        
         event = ScenarioEvent(
-            event_type="class_count",
+            event_type="box_count",
             label=label,
             confidence=1.0,
-            metadata={
-                "count": count,
-                "entry_count": counts["entry_count"],
-                "exit_count": counts["exit_count"],
-                "net_count": counts["net_count"],
-                "target_class": self.config_obj.target_class,
-                "zone_type": "line",
-                "zone_direction": self.config_obj.zone_direction,
-                "active_tracks": len(active_tracks),
-                "report": report
-            },
+            metadata=metadata,
             detection_indices=matched_indices,
             timestamp=frame_context.timestamp,
             frame_index=frame_context.frame_index
@@ -263,7 +289,7 @@ class ClassCountScenario(BaseScenario):
         
         # Emit event
         event = ScenarioEvent(
-            event_type="class_count",
+            event_type="box_count",
             label=label,
             confidence=1.0,
             metadata={
@@ -282,6 +308,16 @@ class ClassCountScenario(BaseScenario):
     
     def _generate_line_count_label(self, counts: Dict[str, int]) -> str:
         """Generate label for line-based counting."""
+        # For single count mode, use simple label like old code
+        if self.line_counter and self.line_counter.count_mode == "single":
+            boxes_counted = counts.get("boxes_counted", 0)
+            custom_label = self.config_obj.custom_label
+            if custom_label and isinstance(custom_label, str) and custom_label.strip():
+                return f"{custom_label.strip()}: {boxes_counted}"
+            else:
+                return f"BOXES COUNTED: {boxes_counted}"
+        
+        # Entry/exit mode (original behavior)
         custom_label = self.config_obj.custom_label
         direction = self.config_obj.zone_direction
         target_class = self.config_obj.target_class
@@ -301,9 +337,9 @@ class ClassCountScenario(BaseScenario):
             if direction == "both":
                 return f"{target_class} count: {net_count} (IN: {entry_count}, OUT: {exit_count})"
             elif direction == "entry":
-                return f"{entry_count} {target_class}(s) entered"
+                return f"{entry_count} {target_class}(s) crossed in"
             else:  # exit
-                return f"{exit_count} {target_class}(s) exited"
+                return f"{exit_count} {target_class}(s) crossed out"
     
     def _match_tracks_to_detections(self, tracks: List, detections) -> List[int]:
         """Match active tracks to detection indices for visualization."""
@@ -375,7 +411,7 @@ class ClassCountScenario(BaseScenario):
                 agent_id=agent_id,
                 agent_name=agent_name,
                 camera_id=camera_id,
-                report_type="class_count",
+                report_type="box_count",
                 target_class=self.config_obj.target_class
             )
             
@@ -383,24 +419,24 @@ class ClassCountScenario(BaseScenario):
                 self._report_initialized = True
         except Exception as e:
             # Don't crash if report initialization fails
-            print(f"[CLASS_COUNT] ⚠️ Failed to initialize report session: {e}")
+            print(f"[BOX_COUNT] ⚠️ Failed to initialize report session: {e}")
     
     def _save_counting_event_to_db(
         self,
         track_id: int,
-        event_type: str,  # "entry" or "exit"
+        event_type: str,  # "entry", "exit", or "crossed"
         timestamp: datetime,
         active_tracks: int
     ) -> None:
         """
-        Save a single touch event to MongoDB.
+        Save a single counting event to MongoDB.
         
-        This is called every time an object's center point touches the counting line.
+        This is called every time an object crosses the counting line.
         Stores the event immediately to MongoDB.
         
         Args:
             track_id: Unique track ID of the object
-            event_type: "entry" or "exit" (based on which side object came from)
+            event_type: "entry", "exit", or "crossed" (for single mode)
             timestamp: When the event happened
             active_tracks: Number of objects currently being tracked
         """
@@ -413,8 +449,14 @@ class ClassCountScenario(BaseScenario):
             # Get current counts from line counter
             if self.line_counter:
                 counts = self.line_counter.get_counts()
-                entry_count = counts["entry_count"]
-                exit_count = counts["exit_count"]
+                if self.line_counter.count_mode == "single":
+                    # Single mode: use boxes_counted
+                    entry_count = counts.get("boxes_counted", 0)
+                    exit_count = 0
+                else:
+                    # Entry/exit mode
+                    entry_count = counts["entry_count"]
+                    exit_count = counts["exit_count"]
             else:
                 entry_count = 0
                 exit_count = 0
@@ -424,7 +466,7 @@ class ClassCountScenario(BaseScenario):
                 agent_id=agent_id,
                 agent_name=agent_name,
                 camera_id=camera_id,
-                report_type="class_count",
+                report_type="box_count",
                 track_id=track_id,
                 event_type=event_type,
                 timestamp=timestamp,
@@ -435,7 +477,7 @@ class ClassCountScenario(BaseScenario):
             )
         except Exception as e:
             # Don't crash if saving fails
-            print(f"[CLASS_COUNT] ⚠️ Failed to save counting event: {e}")
+            print(f"[BOX_COUNT] ⚠️ Failed to save counting event: {e}")
     
     def _finalize_report_session(self) -> None:
         """
@@ -454,8 +496,14 @@ class ClassCountScenario(BaseScenario):
             # Get final counts
             if self.line_counter:
                 counts = self.line_counter.get_counts()
-                final_entry_count = counts["entry_count"]
-                final_exit_count = counts["exit_count"]
+                if self.line_counter.count_mode == "single":
+                    # Single mode: use boxes_counted
+                    final_entry_count = counts.get("boxes_counted", 0)
+                    final_exit_count = 0
+                else:
+                    # Entry/exit mode
+                    final_entry_count = counts["entry_count"]
+                    final_exit_count = counts["exit_count"]
                 # Get active tracks as final standby count
                 if self.tracker:
                     all_active_tracks = self.tracker.get_all_active_tracks()
@@ -470,14 +518,14 @@ class ClassCountScenario(BaseScenario):
             # Finalize session in MongoDB
             finalize_report_session(
                 agent_id=agent_id,
-                report_type="class_count",
+                report_type="box_count",
                 final_entry_count=final_entry_count,
                 final_exit_count=final_exit_count,
                 final_standby_count=final_standby_count
             )
         except Exception as e:
             # Don't crash if finalization fails
-            print(f"[CLASS_COUNT] ⚠️ Failed to finalize report session: {e}")
+            print(f"[BOX_COUNT] ⚠️ Failed to finalize report session: {e}")
     
     def reset(self) -> None:
         """Reset scenario state."""
