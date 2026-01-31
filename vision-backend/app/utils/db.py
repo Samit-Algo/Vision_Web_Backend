@@ -11,37 +11,60 @@ Note: This uses synchronous PyMongo (not Motor) because runner/worker run in
 separate processes and use blocking operations. Vision-backend's main app uses
 async Motor, but this is for the processing pipeline.
 """
+from typing import Optional
+
 from pymongo import MongoClient
 from pymongo.collection import Collection
-from app.core.config import get_settings
+from pymongo.database import Database
+
+from ..core.config import get_settings
+
+# Singleton client to avoid creating new connections on every call (was causing 1-2 min delays)
+_mongo_client: Optional[MongoClient] = None
+_mongo_db: Optional[Database] = None
+
+
+def _get_client() -> MongoClient:
+    """Get or create singleton MongoClient with connection timeouts (fail fast)."""
+    global _mongo_client, _mongo_db
+    if _mongo_client is not None:
+        return _mongo_client
+
+    settings = get_settings()
+    mongo_uri = settings.mongo_uri
+    if not mongo_uri:
+        raise RuntimeError("❌ MONGO_URI not set. Please configure it in your .env file.")
+
+    # Use explicit timeouts to fail fast instead of hanging 30+ seconds on unreachable MongoDB
+    # On Windows, prefer 127.0.0.1 over localhost to avoid IPv6 resolution delays
+    client = MongoClient(
+        mongo_uri,
+        serverSelectionTimeoutMS=10000,
+        connectTimeoutMS=10000,
+    )
+    try:
+        client.admin.command("ping")
+    except Exception as e:
+        client.close()
+        raise RuntimeError(f"❌ Failed to connect to MongoDB: {e}") from e
+    _mongo_client = client
+    return _mongo_client
 
 
 def get_collection(collection_name: str = "agents") -> Collection:
     """
-    Connect to MongoDB and return a collection (synchronous PyMongo).
-    
+    Get MongoDB collection (singleton client, sync PyMongo).
+
     Uses vision-backend's configuration (MONGO_URI, MONGO_DB_NAME).
-    
+
     Args:
-        collection_name: Name of the collection (default: 'agents' to match vision-backend convention)
-    
+        collection_name: Name of the collection (default: 'agents')
+
     Returns:
         MongoDB Collection object (synchronous PyMongo)
     """
-    settings = get_settings()
-    mongo_uri = settings.mongo_uri
-    db_name = settings.mongo_database_name
-    
-    if not mongo_uri:
-        raise RuntimeError("❌ MONGO_URI not set. Please configure it in your .env file.")
-    
-    client = MongoClient(mongo_uri)
-    collection = client[db_name][collection_name]
-    
-    # Verify connection
-    try:
-        client.admin.command('ping')
-    except Exception as e:
-        raise RuntimeError(f"❌ Failed to connect to MongoDB: {e}")
-    
-    return collection
+    global _mongo_db
+    client = _get_client()
+    if _mongo_db is None:
+        _mongo_db = client[get_settings().mongo_database_name]
+    return _mongo_db[collection_name]

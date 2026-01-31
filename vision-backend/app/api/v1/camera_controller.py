@@ -1,7 +1,9 @@
 # Standard library imports
-from typing import List
+from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 from datetime import datetime
+
+import numpy as np
 
 # External package imports
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -17,8 +19,7 @@ from ...application.use_cases.camera.get_camera import GetCameraUseCase
 from ...application.use_cases.agent.list_agents_by_camera import ListAgentsByCameraUseCase
 from ...infrastructure.external.camera_client import CameraClient
 from ...di.container import get_container
-from ...processing.shared_store_registry import get_shared_store
-from ...processing.worker.frame_hub import reconstruct_frame
+from ...processing.helpers import get_shared_store
 from ...utils.event_notifier import encode_frame_to_base64
 from .dependencies import get_current_user
 
@@ -28,6 +29,23 @@ try:
     CV2_AVAILABLE = True
 except ImportError:
     CV2_AVAILABLE = False
+
+
+def _reconstruct_frame(entry: Dict[str, Any]) -> Optional[np.ndarray]:
+    """Rebuild a numpy array from a shared_store frame entry. Returns None if invalid."""
+    try:
+        if not entry or "bytes" not in entry or "shape" not in entry or "dtype" not in entry:
+            return None
+        buffer_bytes = entry["bytes"]
+        shape: Tuple[int, ...] = tuple(entry["shape"])
+        dtype = np.dtype(entry["dtype"])
+        flat_array = np.frombuffer(buffer_bytes, dtype=dtype)
+        expected_size = int(shape[0]) * int(shape[1]) * int(shape[2])
+        if flat_array.size != expected_size:
+            return None
+        return flat_array.reshape(shape)
+    except Exception:
+        return None
 
 
 router = APIRouter(tags=["cameras"])
@@ -263,7 +281,7 @@ async def get_camera_snapshot(
                 print(f"[SNAPSHOT] 📊 Entry has 'bytes': {'bytes' in entry}, has 'shape': {'shape' in entry}, has 'dtype': {'dtype' in entry}")
                 
                 # Reconstruct frame from shared store
-                frame = reconstruct_frame(entry)
+                frame = _reconstruct_frame(entry)
                 if frame is not None:
                     print(f"[SNAPSHOT] ✅ Frame reconstructed from shared_store: shape={frame.shape}, dtype={frame.dtype}")
         

@@ -443,10 +443,11 @@ def create_agent_for_session(session_id: str = "default", user_id: Optional[str]
 
     dynamic_instruction = create_dynamic_instruction_provider(session_id)
 
+    # Limit thinking for faster responses (unlimited budget was causing 10-30s delays)
     planner = BuiltInPlanner(
         thinking_config=types.ThinkingConfig(
-            include_thoughts=True,
-            thinking_budget=-1,
+            include_thoughts=False,  # Disable for snappy chat; set True + budget for complex flows
+            thinking_budget=0,
         )
     )
 

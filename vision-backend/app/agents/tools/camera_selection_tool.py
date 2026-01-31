@@ -1,18 +1,14 @@
 from __future__ import annotations
 
-import asyncio
+import re
 from typing import Any, Dict
 
-import nest_asyncio
-
-from ...application.use_cases.camera.list_cameras import ListCamerasUseCase
-from ..session_state.agent_state import get_agent_state
+from ...domain.constants.camera_fields import CameraFields
+from ...utils.db import get_collection
 from .save_to_db_tool import (
     get_camera_repository as _get_camera_repository_shared,
     set_camera_repository as _set_camera_repository_shared,
 )
-
-nest_asyncio.apply()
 
 
 # ============================================================================
@@ -30,8 +26,19 @@ def _get_camera_repository():
     return _get_camera_repository_shared()
 
 
+def _cameras_collection():
+    """Sync PyMongo collection for cameras. No async, works in Docker and any context."""
+    return get_collection("cameras")
+
+
+def _doc_to_camera_item(doc: Dict[str, Any]) -> Dict[str, str]:
+    """Extract id and name from a camera document."""
+    camera_id = doc.get(CameraFields.ID) or (str(doc[CameraFields.MONGO_ID]) if doc.get(CameraFields.MONGO_ID) else "")
+    return {"id": camera_id, "name": doc.get(CameraFields.NAME, "")}
+
+
 # ============================================================================
-# CAMERA OPERATIONS
+# CAMERA OPERATIONS (sync only – no asyncio, no nest_asyncio)
 # ============================================================================
 
 def list_cameras(user_id: str, session_id: str = "default") -> Dict[str, Any]:
@@ -57,37 +64,17 @@ def list_cameras(user_id: str, session_id: str = "default") -> Dict[str, Any]:
             "cameras": []
         }
 
-    camera_repository = _get_camera_repository()
-    if not camera_repository:
-        return {
-            "error": "Camera repository not initialized. Call set_camera_repository() first.",
-            "cameras": []
-        }
-
     try:
-        list_cameras_use_case = ListCamerasUseCase(camera_repository)
-        camera_responses = asyncio.run(list_cameras_use_case.execute(user_id))
-
-        cameras = []
-        for camera_response in camera_responses:
-            cameras.append({
-                "id": camera_response.id,
-                "name": camera_response.name
-            })
-
+        coll = _cameras_collection()
+        cursor = coll.find({CameraFields.OWNER_USER_ID: user_id})
+        cameras = [_doc_to_camera_item(doc) for doc in cursor]
         print(f"[list_cameras] Found {len(cameras)} cameras for user {user_id}")
-        return {
-            "cameras": cameras
-        }
+        return {"cameras": cameras}
     except Exception as e:
         import traceback
-        error_trace = traceback.format_exc()
         print(f"[list_cameras] ERROR: Failed to list cameras for user {user_id}: {str(e)}")
-        print(f"[list_cameras] Traceback: {error_trace}")
-        return {
-            "error": f"Failed to list cameras: {str(e)}",
-            "cameras": []
-        }
+        print(traceback.format_exc())
+        return {"error": f"Failed to list cameras: {str(e)}", "cameras": []}
 
 
 def resolve_camera(name_or_id: str, user_id: str, session_id: str = "default") -> Dict[str, Any]:
@@ -100,89 +87,52 @@ def resolve_camera(name_or_id: str, user_id: str, session_id: str = "default") -
         session_id: Session identifier (for consistency with other tools)
 
     Returns:
-        Dict with status:
-        {
-            "status": "exact_match",
-            "camera_id": "CAM-001",
-            "camera_name": "Front Gate"
-        }
-        OR
-        {
-            "status": "multiple_matches",
-            "cameras": [...]
-        }
-        OR
-        {
-            "status": "not_found"
-        }
+        Dict with status: exact_match, multiple_matches, or not_found
     """
     if not name_or_id or not user_id:
-        return {
-            "status": "not_found",
-            "error": "name_or_id and user_id are required"
-        }
-
-    camera_repository = _get_camera_repository()
-    if not camera_repository:
-        return {
-            "status": "not_found",
-            "error": "Camera repository not initialized. Call set_camera_repository() first."
-        }
+        return {"status": "not_found", "error": "name_or_id and user_id are required"}
 
     try:
-        camera_by_id = asyncio.run(camera_repository.find_by_id(name_or_id))
+        coll = _cameras_collection()
 
-        if camera_by_id:
-            if camera_by_id.owner_user_id == user_id:
-                print(f"[resolve_camera] Found exact match by ID: {camera_by_id.id} ({camera_by_id.name})")
-                return {
-                    "status": "exact_match",
-                    "camera_id": camera_by_id.id or "",
-                    "camera_name": camera_by_id.name
-                }
-            else:
-                print(f"[resolve_camera] Camera {camera_by_id.id} found but belongs to different user")
+        # Try by ID first only if it looks like ObjectId (24 hex chars)
+        if len(name_or_id) == 24 and all(c in "0123456789abcdefABCDEF" for c in name_or_id):
+            try:
+                from bson import ObjectId
+                doc = coll.find_one({CameraFields.MONGO_ID: ObjectId(name_or_id)})
+                if doc and doc.get(CameraFields.OWNER_USER_ID) == user_id:
+                    item = _doc_to_camera_item(doc)
+                    print(f"[resolve_camera] Found exact match by ID: {item['id']} ({item['name']})")
+                    return {"status": "exact_match", "camera_id": item["id"], "camera_name": item["name"]}
+            except Exception:
+                pass
 
-        print(f"[resolve_camera] Searching by name: '{name_or_id}' for user {user_id}")
-        cameras_by_name = asyncio.run(
-            camera_repository.search_by_name(name_or_id, user_id, limit=10)
-        )
+        # Try by string id field (e.g. CAM-xxx)
+        doc = coll.find_one({CameraFields.ID: name_or_id})
+        if doc and doc.get(CameraFields.OWNER_USER_ID) == user_id:
+            item = _doc_to_camera_item(doc)
+            print(f"[resolve_camera] Found exact match by ID: {item['id']} ({item['name']})")
+            return {"status": "exact_match", "camera_id": item["id"], "camera_name": item["name"]}
 
-        cameras_by_name = [c for c in cameras_by_name if c.owner_user_id == user_id]
+        # Search by name (partial, case-insensitive)
+        escaped = re.escape(name_or_id)
+        pattern = re.compile(f".*{escaped}.*", re.I)
+        cursor = coll.find({
+            CameraFields.OWNER_USER_ID: user_id,
+            CameraFields.NAME: pattern
+        }).limit(10)
+        cameras_by_name = [_doc_to_camera_item(doc) for doc in cursor]
 
-        print(f"[resolve_camera] Found {len(cameras_by_name)} cameras matching '{name_or_id}'")
-
-        if len(cameras_by_name) == 0:
-            return {
-                "status": "not_found"
-            }
-        elif len(cameras_by_name) == 1:
-            camera = cameras_by_name[0]
-            print(f"[resolve_camera] Found exact match by name: {camera.id} ({camera.name})")
-            return {
-                "status": "exact_match",
-                "camera_id": camera.id or "",
-                "camera_name": camera.name
-            }
-        else:
-            cameras_list = []
-            for camera in cameras_by_name:
-                cameras_list.append({
-                    "id": camera.id or "",
-                    "name": camera.name
-                })
-            print(f"[resolve_camera] Found {len(cameras_list)} multiple matches")
-            return {
-                "status": "multiple_matches",
-                "cameras": cameras_list
-            }
-
+        if not cameras_by_name:
+            return {"status": "not_found"}
+        if len(cameras_by_name) == 1:
+            c = cameras_by_name[0]
+            print(f"[resolve_camera] Found exact match by name: {c['id']} ({c['name']})")
+            return {"status": "exact_match", "camera_id": c["id"], "camera_name": c["name"]}
+        print(f"[resolve_camera] Found {len(cameras_by_name)} multiple matches")
+        return {"status": "multiple_matches", "cameras": cameras_by_name}
     except Exception as e:
         import traceback
-        error_trace = traceback.format_exc()
         print(f"[resolve_camera] ERROR: Failed to resolve camera '{name_or_id}' for user {user_id}: {str(e)}")
-        print(f"[resolve_camera] Traceback: {error_trace}")
-        return {
-            "status": "not_found",
-            "error": f"Failed to resolve camera: {str(e)}"
-        }
+        print(traceback.format_exc())
+        return {"status": "not_found", "error": str(e)}

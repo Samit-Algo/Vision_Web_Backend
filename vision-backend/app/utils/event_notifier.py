@@ -30,10 +30,10 @@ except ImportError:
     KafkaProducer = None  # type: ignore
     KafkaError = Exception  # type: ignore
 
-from app.utils.datetime_utils import now, utc_now, ensure_utc, now_iso, parse_iso
-from app.utils.db import get_collection
-from app.domain.constants.event_fields import EventFields
-from app.core.config import get_settings
+from .datetime_utils import now, utc_now, ensure_utc, now_iso, parse_iso
+from .db import get_collection
+from ..domain.constants.event_fields import EventFields
+from ..core.config import get_settings
 
 # Base directory for storing event images (same pattern as event_storage.py)
 EVENTS_BASE_DIR = Path("events")

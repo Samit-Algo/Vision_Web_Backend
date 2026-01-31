@@ -15,7 +15,11 @@ httpx[http2]>=0.24.0
 kafka-python>=2.0.2
 pytest>=7.0.0
 pytest-asyncio>=0.21.0
+pytest-cov>=4.0.0
 av
+opencv-python>=4.8.0
+ultralytics>=8.0.0
+Pillow>=10.0.0
 pydub>=0.25.1
 faster-whisper>=1.0.0
-edge-tts>=6.1.0
+edge-tts>=6.1.0 

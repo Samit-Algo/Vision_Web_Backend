@@ -126,35 +126,13 @@ def _compute_zone_required(agent_state, response_text: str = "") -> bool:
         
         return zone_required_by_kb
     
-    # State not initialized - check if agent is asking for zone in response
-    # Check for rules that require zone (object_enter_zone, class_count, etc.)
-    if response_text:
-        response_lower = response_text.lower()
-        
-        # Check for known rules that require zones
-        zone_required_rules = ["object_enter_zone", "class_count"]
-        
-        for rule_id in zone_required_rules:
-            # Check if response mentions this rule
-            rule_name_variants = [
-                rule_id,
-                rule_id.replace("_", " "),
-            ]
-            if any(variant in response_lower for variant in rule_name_variants):
-                # This rule requires zone
-                from ....agents.tools.kb_utils import get_rule, compute_requires_zone
-                try:
-                    rule = get_rule(rule_id)
-                    requires_zone = compute_requires_zone(rule, "continuous")  # Default to continuous
-                    if requires_zone:
-                        return True
-                except (ValueError, KeyError):
-                    pass
-        
-        # Also check if zone is in missing_fields (agent might have initialized but we're checking before state update)
-        if "zone" in agent_state.missing_fields:
-            return True
-    
+    # State not initialized (no rule_id) - do NOT infer zone from response text.
+    # Listing rules (e.g. "get all rules") produces text that mentions many rules
+    # (object enter zone, class count, etc.), which would incorrectly set zone_required=True.
+    # Only require zone when the agent has explicitly asked for it (zone in missing_fields).
+    if "zone" in agent_state.missing_fields:
+        return True
+
     return False
 
 

@@ -1,0 +1,22 @@
+services:
+  backend:
+    build: ./vision-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      - mongo
+    volumes:
+      - ./event_videos:/app/event_videos
+      - ./models:/app/models
+
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+volumes:
+  mongo_data:

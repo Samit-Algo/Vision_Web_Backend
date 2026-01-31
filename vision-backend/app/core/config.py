@@ -13,7 +13,11 @@ class Settings:
     
     def __init__(self) -> None:
         # Database Configuration
-        self.mongo_uri: Final[str] = os.getenv("MONGO_URI", "mongodb://localhost:27017").split('#')[0].strip()
+        uri = os.getenv("MONGO_URI", "mongodb://localhost:27017").split("#")[0].strip()
+        # On Windows, localhost can cause 30+ sec IPv6 resolution delays; use 127.0.0.1
+        if os.name == "nt" and "localhost" in uri and "127.0.0.1" not in uri:
+            uri = uri.replace("localhost", "127.0.0.1")
+        self.mongo_uri: Final[str] = uri
         self.mongo_database_name: Final[str] = os.getenv("MONGO_DB_NAME", "algo_vision_app_cloud").split('#')[0].strip()
         
         # JWT Configuration
@@ -104,6 +108,12 @@ class Settings:
         self.event_video_resolution_height: Final[int] = int(
             os.getenv("EVENT_VIDEO_RESOLUTION_HEIGHT", "720")
         )
+        # Model directory - YOLO .pt files (for Docker: /app/models, local: ./models)
+        self.model_dir: Final[str] = os.getenv(
+            "MODEL_DIR",
+            os.path.join(os.getcwd(), "models")
+        ).split('#')[0].strip()
+
         # Event Video File Storage
         self.event_video_save_directory: Final[str] = os.getenv(
             "EVENT_VIDEO_SAVE_DIRECTORY",

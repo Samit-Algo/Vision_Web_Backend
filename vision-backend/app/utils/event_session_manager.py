@@ -20,15 +20,15 @@ from typing import Dict, Optional, Any, List
 from queue import Queue
 import numpy as np
 
-from app.utils.datetime_utils import now
-from app.utils.video_encoder import (
+from .datetime_utils import now
+from .video_encoder import (
     encode_frames_to_file,
     get_video_duration_seconds
 )
-from app.utils.event_notifier import send_event_to_backend_sync
-from app.utils.db import get_collection
-from app.domain.constants.event_fields import EventFields
-from app.core.config import get_settings
+from .event_notifier import send_event_to_backend_sync
+from .db import get_collection
+from ..domain.constants.event_fields import EventFields
+from ..core.config import get_settings
 
 
 class SessionState(str, Enum):

@@ -1,0 +1,16 @@
+﻿__pycache__
+*.pyc
+.env
+tests
+.coverage
+htmlcov
+.git
+vnv
+venv
+.venv
+event_videos
+events
+*.pt
+firebase_key.json
+loom_config_*.json
+find_loom_roi.py

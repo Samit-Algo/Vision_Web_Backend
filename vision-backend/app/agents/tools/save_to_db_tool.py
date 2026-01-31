@@ -5,7 +5,6 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-import nest_asyncio
 
 from ...domain.models.agent import Agent
 from ...infrastructure.external.agent_client import AgentClient
@@ -13,7 +12,6 @@ from ...utils.datetime_utils import utc_now
 from ..session_state.agent_state import get_agent_state
 from .flow_diagram_utils import generate_agent_flow_diagram
 
-nest_asyncio.apply()
 
 
 # ============================================================================

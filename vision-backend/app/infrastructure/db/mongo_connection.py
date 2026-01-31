@@ -16,17 +16,24 @@ _mongo_database: Optional[AsyncIOMotorDatabase] = None
 def get_database() -> AsyncIOMotorDatabase:
     """
     Get MongoDB database instance (singleton pattern)
-    
+
+    Uses explicit timeouts to fail fast instead of hanging 30+ seconds on unreachable MongoDB.
+    On Windows, prefer 127.0.0.1 over localhost to avoid IPv6 resolution delays.
+
     Returns:
         MongoDB database instance
     """
     global _mongo_client, _mongo_database
-    
+
     if _mongo_database is not None:
         return _mongo_database
-    
+
     settings = get_settings()
-    _mongo_client = AsyncIOMotorClient(settings.mongo_uri)
+    _mongo_client = AsyncIOMotorClient(
+        settings.mongo_uri,
+        serverSelectionTimeoutMS=10000,
+        connectTimeoutMS=10000,
+    )
     _mongo_database = _mongo_client[settings.mongo_database_name]
     return _mongo_database
 

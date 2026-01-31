@@ -10,6 +10,7 @@ import os
 from typing import Any, Optional
 
 from app.processing.models.data_models import Model, Provider
+from app.core.config import get_settings
 
 try:
     from ultralytics import YOLO  # type: ignore
@@ -38,6 +39,13 @@ class YOLODetectorProvider(Provider):
             return None
 
         model_name = model_id.strip().rstrip('/').rstrip('\\')
+
+        # Resolve bare filenames against MODEL_DIR (Docker: /app/models, local: ./models)
+        is_file_path = os.sep in model_name or '/' in model_name or '\\' in model_name
+        if not is_file_path:
+            model_dir_path = os.path.join(get_settings().model_dir, model_name)
+            if os.path.isfile(model_dir_path):
+                model_name = model_dir_path
 
         is_standard_model = (
             model_name.startswith("yolov8") or
