@@ -1,8 +1,9 @@
 # Standard library imports
-import logging
 import json
-import uuid
+import logging
+import re
 import threading
+import uuid
 from typing import Optional, List, Tuple, AsyncGenerator, Dict, Any
 
 # External package imports
@@ -432,10 +433,14 @@ class ChatWithAgentUseCase:
             agent_state,  # Pass agent_state for crossing detection logic
         )
 
-        # Generate snapshot URL and zone type if zone drawing is needed
+        # Generate snapshot URL and zone type if zone drawing is needed.
+        # Use camera_id from either session state (tools may key by session_id or adk_session.id).
+        camera_id = (
+            agent_state_primary.fields.get("camera_id")
+            or agent_state_adk.fields.get("camera_id")
+        )
         frame_snapshot_url = None
         zone_type = None
-        camera_id = agent_state.fields.get("camera_id")
         
         if awaiting_zone_input or zone_required:
             print(f"[CHAT_RESPONSE] 🎯 Zone UI needed: awaiting_zone_input={awaiting_zone_input}, zone_required={zone_required}")
@@ -648,6 +653,25 @@ class ChatWithAgentUseCase:
                     agent_state.missing_fields.remove("camera_id")
             else:
                 user_message = user_message + f"\n\nCamera ID: {request.camera_id}"
+
+        # If user typed a camera ID in the message (e.g. CAM-45E4728CD081) but the LLM didn't
+        # call set_field_value_wrapper, persist it here so frame_snapshot_url can be set.
+        try:
+            from ....agents.session_state.agent_state import get_agent_state
+
+            agent_state = get_agent_state(session_id)
+            if agent_state.rule_id and not agent_state.fields.get("camera_id"):
+                raw = (user_message or "").strip()
+                # Match explicit camera ID: whole message or anywhere in message (CAM- + alphanumeric)
+                cam_match = re.match(r"^CAM-[A-Za-z0-9]+$", raw)
+                if not cam_match:
+                    cam_match = re.search(r"CAM-[A-Za-z0-9]+", raw)
+                if cam_match:
+                    agent_state.fields["camera_id"] = cam_match.group(0)
+                    if "camera_id" in agent_state.missing_fields:
+                        agent_state.missing_fields.remove("camera_id")
+        except Exception:
+            pass
 
         return user_message
 

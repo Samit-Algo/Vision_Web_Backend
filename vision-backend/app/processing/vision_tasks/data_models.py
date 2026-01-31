@@ -133,7 +133,21 @@ class BaseScenario(ABC):
         Reset scenario state (called on task restart).
         """
         pass
-    
+
+    def requires_yolo_detections(self) -> bool:
+        """
+        Whether this scenario needs YOLO detection/pose output from the pipeline.
+        Default True; override to return False for scenarios that only use raw frames (e.g. motion).
+        """
+        return True
+
+    def get_overlay_data(self, frame_context: Optional["ScenarioFrameContext"] = None) -> List[Any]:
+        """
+        Return overlay data for visualization (boxes, labels, colors).
+        Default: no overlays; override in scenarios that draw on the frame.
+        """
+        return []
+
     def get_state(self) -> Dict[str, Any]:
         """
         Get current scenario state (for debugging/monitoring).

@@ -154,6 +154,9 @@ class ClassCountScenario(BaseScenario):
         report["line_counts"] = counts
         report["active_tracks"] = len(active_tracks)
         report["all_active_tracks"] = len(all_active_tracks)
+        report["track_info"] = track_info
+        report["entry_count"] = counts["entry_count"]
+        report["exit_count"] = counts["exit_count"]
 
         matched_indices = self._match_tracks_to_detections(
             active_tracks,

@@ -6,7 +6,15 @@ Generates statistics and reports for class count scenario.
 """
 
 from typing import Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def _safe_timestamp(dt: datetime) -> float:
+    """Return Unix timestamp for dt; on Windows .timestamp() can raise OSError [Errno 22] for some dates."""
+    try:
+        return dt.timestamp()
+    except OSError:
+        return datetime.now(timezone.utc).timestamp()
 
 
 def generate_report(
@@ -36,7 +44,7 @@ def generate_report(
     count_history.append({
         "count": current_count,
         "timestamp": now.isoformat(),
-        "timestamp_epoch": now.timestamp()
+        "timestamp_epoch": _safe_timestamp(now)
     })
     
     # Limit history size
@@ -57,8 +65,8 @@ def generate_report(
         try:
             if first_time:
                 first_dt = datetime.fromisoformat(first_time.replace('Z', '+00:00'))
-                duration_seconds = int((now.timestamp() - first_dt.timestamp()))
-        except (ValueError, TypeError):
+                duration_seconds = int((_safe_timestamp(now) - _safe_timestamp(first_dt)))
+        except (ValueError, TypeError, OSError):
             pass
         
         report = {

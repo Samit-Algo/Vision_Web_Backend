@@ -11,7 +11,7 @@
           "Tell me if someone enters"
         ],
       
-        "model": "yolov8n.pt",
+        "model": "yolov8m.pt",
       
         "detectable_classes": [
           "person",
@@ -282,7 +282,7 @@
           "Tell me if someone carries a firearm"
         ],
       
-        "model": "yolov8n-pose.pt",
+        "model": "yolov8m-pose.pt",
 
         "detectable_weapons": [
           "gun",

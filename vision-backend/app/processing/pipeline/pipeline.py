@@ -148,7 +148,7 @@ def evaluate_rules_stage(
     detections = merged_packet.to_dict()
 
     if not hasattr(context, '_scenario_instances'):
-        context._scenario_instances: Dict[int, Any] = {}
+        context._scenario_instances = {}
 
     all_matched_indices: List[int] = []
     event = None
@@ -172,7 +172,10 @@ def evaluate_rules_stage(
 
             scenario_instance = context._scenario_instances[rule_idx]
 
-            frame_timestamp = datetime.fromtimestamp(frame_packet.timestamp)
+            # Use wall-clock time for scenarios (frame_packet.timestamp is monotonic; fromtimestamp can produce
+            # 1970-era datetimes that cause OSError [Errno 22] on Windows when .timestamp() is used in reporters)
+            frame_timestamp = utc_now()
+
             frame_context = ScenarioFrameContext(
                 frame=frame_packet.frame,
                 frame_index=context.frame_index,
@@ -662,8 +665,8 @@ class PipelineRunner:
             else:
                 processed_frame = draw_bounding_boxes(frame, detections, self.context.rules)
             
-            # For class_count: draw count overlay (ADD/OUT/TRACKING text at top)
-            # For box_count: draw track_info + entry/exit counts
+            # For line-based counting (class_count or box_count): draw track_info + ADD/OUT/TRACKING
+            # Same behavior for both: colored boxes (green/orange/yellow) and entry/exit counts
             if rule_match and rule_match.report:
                 rule_index = getattr(rule_match, "rule_index", None)
                 if rule_index is not None and rule_index < len(self.context.rules):
@@ -671,27 +674,18 @@ class PipelineRunner:
                     rule_type = str(rule.get("type", "")).strip().lower()
                     report = rule_match.report
                     target_class = rule.get("target_class") or report.get("target_class") or "person"
-                    if rule_type == "class_count":
-                        current_count = report.get("current_count", 0)
-                        processed_frame = draw_box_count_annotations(
-                            processed_frame,
-                            [],
-                            None,
-                            {"entry_count": current_count, "exit_count": 0},
-                            target_class,
-                            0,
-                        )
-                    elif rule_type == "box_count" and report.get("track_info") is not None:
-                        track_info = report.get("track_info", [])
+                    track_info_from_report = report.get("track_info")
+                    if track_info_from_report is not None:
                         counts = {
                             "entry_count": report.get("entry_count", 0),
                             "exit_count": report.get("exit_count", 0),
                         }
-                        active_tracks = report.get("active_tracks", len(track_info))
-                        target_class = rule.get("target_class") or report.get("target_class") or "box"
+                        active_tracks = report.get("active_tracks", len(track_info_from_report))
+                        if rule_type == "box_count":
+                            target_class = rule.get("target_class") or report.get("target_class") or "box"
                         processed_frame = draw_box_count_annotations(
                             processed_frame,
-                            track_info,
+                            track_info_from_report,
                             None,
                             counts,
                             target_class,
@@ -761,7 +755,7 @@ class PipelineRunner:
             # Normalize to list of JSON-serializable dicts for WebSocket payload
             scenario_overlays = []
             if hasattr(self.context, '_scenario_instances'):
-                frame_timestamp = datetime.fromtimestamp(frame_packet.timestamp)
+                frame_timestamp = utc_now()
                 frame_context = ScenarioFrameContext(
                     frame=frame_packet.frame,
                     frame_index=self.context.frame_index,

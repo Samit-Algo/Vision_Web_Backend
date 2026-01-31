@@ -17,8 +17,8 @@ from ...application.use_cases.camera.get_camera import GetCameraUseCase
 from ...application.use_cases.agent.list_agents_by_camera import ListAgentsByCameraUseCase
 from ...infrastructure.external.camera_client import CameraClient
 from ...di.container import get_container
-from ...processing.shared_store_registry import get_shared_store
-from ...processing.worker.frame_hub import reconstruct_frame
+from ...processing.helpers import get_shared_store
+from ...processing.data_input.hub_source import reconstruct_frame
 from ...utils.event_notifier import encode_frame_to_base64
 from .dependencies import get_current_user
 
