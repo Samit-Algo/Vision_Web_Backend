@@ -559,6 +559,7 @@ class PipelineRunner:
             
             # Check scenario types
             is_restricted_zone = False
+            restricted_zone_scenario = None  # Used to read in_zone_indices from state for per-box red coloring
             is_line_counting = False
             is_fire_detection = False
             fire_detected = False  # Whether fire is currently detected
@@ -571,6 +572,7 @@ class PipelineRunner:
                     # Check if this is a restricted zone scenario
                     if scenario_type == 'restricted_zone':
                         is_restricted_zone = True
+                        restricted_zone_scenario = scenario_instance
                         if hasattr(scenario_instance, 'config_obj') and hasattr(scenario_instance.config_obj, 'target_class'):
                             target_class = scenario_instance.config_obj.target_class
                         # Check if zone is violated
@@ -730,8 +732,12 @@ class PipelineRunner:
                     target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores,
                     keypoints_src,
                 )
-                # Map merged_packet indices (in zone) to filtered indices for overlay coloring
-                orig_in_zone = set(all_matched_indices)
+                # Use scenario state in_zone_indices so per-box red is correct even during alert cooldown
+                # (when no event is emitted, all_matched_indices is empty but state still has who is in zone)
+                state_in_zone = []
+                if restricted_zone_scenario and hasattr(restricted_zone_scenario, '_state'):
+                    state_in_zone = restricted_zone_scenario._state.get("in_zone_indices") or []
+                orig_in_zone = set(state_in_zone) if state_in_zone else set(all_matched_indices)
                 filtered_idx = 0
                 for orig_idx in range(len(merged_packet.boxes)):
                     if orig_idx < len(merged_packet.classes):
