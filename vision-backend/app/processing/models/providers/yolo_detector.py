@@ -44,7 +44,9 @@ class YOLODetectorProvider(Provider):
             model_name.startswith("yolov5") or
             model_name.startswith("yolo11") or
             model_name.startswith("yolo10") or
-            model_name.startswith("yolo9")
+            model_name.startswith("yolo9") or 
+            model_name.startswith("box_detection") or
+            model_name.startswith("fire_detection")
         ) and model_name.endswith(".pt")
 
         is_file_path = os.sep in model_name or '/' in model_name or '\\' in model_name

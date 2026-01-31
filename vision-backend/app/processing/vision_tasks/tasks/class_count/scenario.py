@@ -58,9 +58,11 @@ class ClassCountScenario(BaseScenario):
                 iou_threshold=self.config_obj.iou_threshold,
                 score_threshold=self.config_obj.score_threshold
             )
+            # Same count_mode as box_count: entry_exit for separate IN/OUT counts and color by direction
             self.line_counter = LineCrossingCounter(
                 line_coordinates=self.config_obj.zone_coordinates,
-                direction=self.config_obj.zone_direction
+                direction=self.config_obj.zone_direction,
+                count_mode="entry_exit",
             )
 
         # Initialize report session when agent starts

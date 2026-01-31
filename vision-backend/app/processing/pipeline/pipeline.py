@@ -168,7 +168,11 @@ def evaluate_rules_stage(
         try:
             if rule_idx not in context._scenario_instances:
                 scenario_config = {k: v for k, v in rule.items() if k != "type"}
-                context._scenario_instances[rule_idx] = scenario_class(scenario_config, context)
+                scenario_instance = scenario_class(scenario_config, context)
+                # Explicitly set scenario_id from rule type (like old code) so pipeline
+                # recognizes box_count/class_count for line counting and track_info
+                scenario_instance.scenario_id = rule_type
+                context._scenario_instances[rule_idx] = scenario_instance
 
             scenario_instance = context._scenario_instances[rule_idx]
 
@@ -659,37 +663,56 @@ class PipelineRunner:
             if detections.get("keypoints"):
                 processed_frame = draw_pose_keypoints(frame, detections, self.context.rules)
             elif is_line_counting:
-                # For line counting, frontend draws boxes/center points based on track_info
-                # Don't draw boxes here to avoid duplicates
+                # For line counting we draw below using track_info from state
                 processed_frame = frame.copy()
             else:
                 processed_frame = draw_bounding_boxes(frame, detections, self.context.rules)
             
             # For line-based counting (class_count or box_count): draw track_info + ADD/OUT/TRACKING
-            # Same behavior for both: colored boxes (green/orange/yellow) and entry/exit counts
-            if rule_match and rule_match.report:
+            # Use track_info from state (like old code) so colors update properly when box crosses line
+            # Same behavior for both box_count and class_count: green/orange/yellow by counted + direction
+            if is_line_counting and track_info:
+                draw_counts = counts or {}
+                processed_frame = draw_box_count_annotations(
+                    processed_frame,
+                    track_info,
+                    None,
+                    {
+                        "entry_count": draw_counts.get("entry_count", 0),
+                        "exit_count": draw_counts.get("exit_count", 0),
+                    },
+                    (target_class or "object"),
+                    active_tracks_count,
+                )
+            elif rule_match and rule_match.report:
+                # Fallback: draw from report when state track_info not used (e.g. single rule)
                 rule_index = getattr(rule_match, "rule_index", None)
                 if rule_index is not None and rule_index < len(self.context.rules):
                     rule = self.context.rules[rule_index]
-                    rule_type = str(rule.get("type", "")).strip().lower()
                     report = rule_match.report
-                    target_class = rule.get("target_class") or report.get("target_class") or "person"
                     track_info_from_report = report.get("track_info")
-                    if track_info_from_report is not None:
-                        counts = {
-                            "entry_count": report.get("entry_count", 0),
-                            "exit_count": report.get("exit_count", 0),
-                        }
-                        active_tracks = report.get("active_tracks", len(track_info_from_report))
-                        if rule_type == "box_count":
-                            target_class = rule.get("target_class") or report.get("target_class") or "box"
+                    if track_info_from_report is not None and not (is_line_counting and track_info):
+                        # Use rule/report target class only (no hardcoded box/person)
+                        draw_class = (
+                            rule.get("target_class")
+                            or rule.get("class")
+                            or report.get("target_class")
+                            or "object"
+                        )
+                        if isinstance(draw_class, str):
+                            draw_class = draw_class.strip() or "object"
+                        else:
+                            draw_class = "object"
                         processed_frame = draw_box_count_annotations(
                             processed_frame,
                             track_info_from_report,
                             None,
-                            counts,
-                            target_class,
-                            active_tracks,
+                            {
+                                "entry_count": report.get("entry_count", 0),
+                                "exit_count": report.get("exit_count", 0),
+                            },
+                            draw_class,
+                            report.get("active_tracks", len(track_info_from_report)),
                         )
             
             # Convert to bytes
