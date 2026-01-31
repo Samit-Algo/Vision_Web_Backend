@@ -308,6 +308,7 @@ async def websocket_agent_overlay(websocket: WebSocket, agent_id: str) -> None:
             boxes = det.get("boxes") or []
             classes = det.get("classes") or []
             scores = det.get("scores") or []
+            keypoints = det.get("keypoints") or []  # For fall_detection/pose (skeleton overlay)
             
             # Get scenario overlays (e.g., loom ROI boxes with state labels)
             # Ensure JSON-serializable (pipeline stores dicts; convert any dataclass leftovers)
@@ -375,6 +376,7 @@ async def websocket_agent_overlay(websocket: WebSocket, agent_id: str) -> None:
                     "classes": classes,
                     "scores": scores,
                     "colors": detection_colors,  # Box colors: yellow when touching, green otherwise
+                    "keypoints": keypoints,  # For fall_detection/pose UI (skeleton overlay)
                 },
                 "scenario_overlays": scenario_overlays,
                 "zones": zones,

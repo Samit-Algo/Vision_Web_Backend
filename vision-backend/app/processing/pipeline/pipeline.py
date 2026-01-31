@@ -722,11 +722,13 @@ class PipelineRunner:
             # For restricted zone: indices into filtered detections that are inside the zone (for per-box red coloring)
             in_zone_indices: List[int] = []
 
-            # Filter detections based on scenario type
+            # Filter detections based on scenario type (include keypoints for fall_detection/pose)
+            keypoints_src = getattr(merged_packet, "keypoints", None) or []
             if is_restricted_zone and target_class:
                 # Show ALL detections of target class (e.g., all persons)
-                f_boxes, f_classes, f_scores = self._filter_detections_by_class(
-                    target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores
+                f_boxes, f_classes, f_scores, f_keypoints = self._filter_detections_by_class(
+                    target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores,
+                    keypoints_src,
                 )
                 # Map merged_packet indices (in zone) to filtered indices for overlay coloring
                 orig_in_zone = set(all_matched_indices)
@@ -740,14 +742,15 @@ class PipelineRunner:
                             filtered_idx += 1
             elif is_fire_detection and fire_classes:
                 # Show ALL fire-related detections (fire, flame, smoke)
-                # This ensures fire bounding boxes are always visible
-                f_boxes, f_classes, f_scores = self._filter_detections_by_fire_classes(
-                    fire_classes, merged_packet.boxes, merged_packet.classes, merged_packet.scores
+                f_boxes, f_classes, f_scores, f_keypoints = self._filter_detections_by_fire_classes(
+                    fire_classes, merged_packet.boxes, merged_packet.classes, merged_packet.scores,
+                    keypoints_src,
                 )
             elif is_line_counting and target_class:
                 # Show ALL detections of target class for line counting
-                f_boxes, f_classes, f_scores = self._filter_detections_by_class(
-                    target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores
+                f_boxes, f_classes, f_scores, f_keypoints = self._filter_detections_by_class(
+                    target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores,
+                    keypoints_src,
                 )
                 
                 # Map line_crossed_indices from merged_packet indices to filtered indices
@@ -766,13 +769,14 @@ class PipelineRunner:
                                 filtered_idx += 1
                     line_crossed_indices = filtered_crossed_indices
             elif all_matched_indices:
-                # Other scenarios: show only matched detections
+                # Other scenarios (e.g. fall_detection): show only matched detections; include keypoints for pose
                 unique_indices = sorted(set(all_matched_indices))
-                f_boxes, f_classes, f_scores = self._filter_detections_by_indices(
-                    unique_indices, merged_packet.boxes, merged_packet.classes, merged_packet.scores
+                f_boxes, f_classes, f_scores, f_keypoints = self._filter_detections_by_indices(
+                    unique_indices, merged_packet.boxes, merged_packet.classes, merged_packet.scores,
+                    keypoints_src,
                 )
             else:
-                f_boxes, f_classes, f_scores = [], [], []
+                f_boxes, f_classes, f_scores, f_keypoints = [], [], [], []
             
             # Collect scenario overlays (e.g., loom ROI boxes with state labels)
             # Normalize to list of JSON-serializable dicts for WebSocket payload
@@ -809,6 +813,7 @@ class PipelineRunner:
                     "boxes": f_boxes,
                     "classes": f_classes,
                     "scores": f_scores,
+                    "keypoints": f_keypoints,  # For fall_detection/pose UI (skeleton overlay)
                 },
                 "scenario_overlays": scenario_overlays,  # Add scenario overlays
                 "rules": self.context.rules,
@@ -856,15 +861,19 @@ class PipelineRunner:
         boxes: List[List[float]],
         classes: List[str],
         scores: List[float],
-    ) -> tuple[List[List[float]], List[str], List[float]]:
-        """Filter detections to only those at specified indices with confidence >= 0.7."""
+        keypoints: Optional[List[List[List[float]]]] = None,
+    ) -> tuple[List[List[float]], List[str], List[float], List[List[List[float]]]]:
+        """Filter detections to only those at specified indices with confidence >= 0.7.
+        When keypoints is provided (e.g. for fall_detection/pose), returns aligned f_keypoints."""
         if not indices:
-            return [], [], []
+            return [], [], [], []
         f_boxes: List[List[float]] = []
         f_classes: List[str] = []
         f_scores: List[float] = []
+        f_keypoints: List[List[List[float]]] = []
         confidence_threshold = 0.7  # Minimum confidence level
-        
+        kp_list = keypoints if keypoints else []
+
         for idx in indices:
             if 0 <= idx < len(boxes) and idx < len(classes) and idx < len(scores):
                 # Apply confidence threshold
@@ -872,7 +881,9 @@ class PipelineRunner:
                     f_boxes.append(boxes[idx])
                     f_classes.append(classes[idx])
                     f_scores.append(scores[idx])
-        return f_boxes, f_classes, f_scores
+                    if idx < len(kp_list):
+                        f_keypoints.append(kp_list[idx])
+        return f_boxes, f_classes, f_scores, f_keypoints
     
     def _filter_detections_by_class(
         self,
@@ -880,14 +891,18 @@ class PipelineRunner:
         boxes: List[List[float]],
         classes: List[str],
         scores: List[float],
-    ) -> tuple[List[List[float]], List[str], List[float]]:
-        """Filter detections to only those matching target class (e.g., 'person') with confidence >= 0.7."""
+        keypoints: Optional[List[List[List[float]]]] = None,
+    ) -> tuple[List[List[float]], List[str], List[float], List[List[List[float]]]]:
+        """Filter detections to only those matching target class (e.g., 'person') with confidence >= 0.7.
+        When keypoints is provided (e.g. for fall_detection/pose), returns aligned f_keypoints."""
         f_boxes: List[List[float]] = []
         f_classes: List[str] = []
         f_scores: List[float] = []
+        f_keypoints: List[List[List[float]]] = []
         target_lower = target_class.lower()
         confidence_threshold = 0.7  # Minimum confidence level
-        
+        kp_list = keypoints if keypoints else []
+
         # Debug: Log all detected classes
         if len(classes) > 0:
             unique_classes = set(cls.lower() if isinstance(cls, str) else str(cls) for cls in classes)
@@ -901,6 +916,8 @@ class PipelineRunner:
                     f_boxes.append(box)
                     f_classes.append(cls)
                     f_scores.append(score)
+                    if idx < len(kp_list):
+                        f_keypoints.append(kp_list[idx])
                 else:
                     filtered_count += 1
         
@@ -910,7 +927,7 @@ class PipelineRunner:
         if filtered_count > 0:
             print(f"[worker {self.context.task_id}] 🔽 Filtered out {filtered_count} low-confidence '{target_class}' detections (< {confidence_threshold})")
         
-        return f_boxes, f_classes, f_scores
+        return f_boxes, f_classes, f_scores, f_keypoints
     
     def _filter_detections_by_fire_classes(
         self,
@@ -918,37 +935,38 @@ class PipelineRunner:
         boxes: List[List[float]],
         classes: List[str],
         scores: List[float],
-    ) -> tuple[List[List[float]], List[str], List[float]]:
+        keypoints: Optional[List[List[List[float]]]] = None,
+    ) -> tuple[List[List[float]], List[str], List[float], List[List[List[float]]]]:
         """
         Filter detections to only fire-related classes (fire, flame, smoke, etc.).
-        
         Uses a lower confidence threshold (0.5) for fire detection since it's safety-critical.
+        When keypoints is provided, returns aligned f_keypoints (usually empty for fire).
         """
         f_boxes: List[List[float]] = []
         f_classes: List[str] = []
         f_scores: List[float] = []
+        f_keypoints: List[List[List[float]]] = []
         fire_classes_lower = [c.lower() for c in fire_classes]
         confidence_threshold = 0.5  # Lower threshold for fire detection (safety-critical)
-        
+        kp_list = keypoints if keypoints else []
+
         for idx, (box, cls, score) in enumerate(zip(boxes, classes, scores)):
             if isinstance(cls, str):
                 cls_lower = cls.lower()
-                # Check if class matches any fire-related class
                 is_fire_class = any(
                     target in cls_lower or cls_lower in target
                     for target in fire_classes_lower
                 )
-                
                 if is_fire_class and score >= confidence_threshold:
                     f_boxes.append(box)
                     f_classes.append(cls)
                     f_scores.append(score)
-        
-        # Debug: Log fire detections
+                    if idx < len(kp_list):
+                        f_keypoints.append(kp_list[idx])
+
         if len(f_boxes) > 0:
             print(f"[worker {self.context.task_id}] 🔥 Found {len(f_boxes)} fire-related detections (confidence >= {confidence_threshold})")
-        
-        return f_boxes, f_classes, f_scores
+        return f_boxes, f_classes, f_scores, f_keypoints
     
     def _handle_event(
         self,
