@@ -35,20 +35,24 @@ class RestrictedZoneScenario(BaseScenario):
         self.config_obj = RestrictedZoneConfig(config, pipeline_context.task)
         self._state["last_alert_time"] = None
         self._state["objects_in_zone"] = False
+        self._state["in_zone_indices"] = []  # Merged-packet indices of detections inside zone (for per-box red overlay)
 
     def process(self, frame_context: ScenarioFrameContext) -> List[ScenarioEvent]:
         if not self.config_obj.target_class or not self.config_obj.zone_coordinates:
+            self._state["in_zone_indices"] = []
             return []
         matched_indices, matched_classes = self._find_objects_in_zone(frame_context)
+        # Always store who is in zone so pipeline can color only those boxes red (even during alert cooldown)
+        self._state["in_zone_indices"] = list(matched_indices)
         if not matched_indices:
             self._state["last_alert_time"] = None
             self._state["objects_in_zone"] = False
             return []
+        self._state["objects_in_zone"] = True
         now = frame_context.timestamp
         last_alert_time = self._state.get("last_alert_time")
         if last_alert_time and isinstance(last_alert_time, datetime):
             if (now - last_alert_time).total_seconds() < self.config_obj.alert_cooldown_seconds:
-                self._state["objects_in_zone"] = True
                 return []
         label = self._generate_label(len(matched_indices))
         detections = frame_context.detections
@@ -56,7 +60,6 @@ class RestrictedZoneScenario(BaseScenario):
         matched_scores = [scores[i] for i in matched_indices if i < len(scores)]
         avg_confidence = sum(matched_scores) / len(matched_scores) if matched_scores else 0.0
         self._state["last_alert_time"] = now
-        self._state["objects_in_zone"] = True
         return [
             ScenarioEvent(
                 event_type="restricted_zone_detection",
@@ -104,3 +107,4 @@ class RestrictedZoneScenario(BaseScenario):
     def reset(self) -> None:
         self._state["last_alert_time"] = None
         self._state["objects_in_zone"] = False
+        self._state["in_zone_indices"] = []

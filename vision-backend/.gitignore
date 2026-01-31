@@ -1,0 +1,4 @@
+venv
+.env
+sachin_backend
+*.json

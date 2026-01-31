@@ -11,7 +11,7 @@
           "Tell me if someone enters"
         ],
       
-        "model": "yolov8n.pt",
+        "model": "yolov8m.pt",
       
         "detectable_classes": [
           "person",
@@ -282,7 +282,7 @@
           "Tell me if someone carries a firearm"
         ],
       
-        "model": "yolov8n-pose.pt",
+        "model": "yolov8m-pose.pt",
 
         "detectable_weapons": [
           "gun",
@@ -439,7 +439,7 @@
           "count the boxes"
         ],
       
-        "model": "C:\\AlgoOrange Task\\Vision_Web_Backend\\vision-backend\\box_detection.pt",
+        "model": "box_detection.pt",
       
         "detectable_classes": [
           "box",
@@ -692,7 +692,7 @@
           "Fire monitoring"
         ],
       
-        "model": "C:\\AlgoOrange Task\\Vision_Web_Backend\\vision-backend\\fire_detection.pt",
+        "model": "fire_detection.pt",
       
         "detectable_classes": [
           "fire",

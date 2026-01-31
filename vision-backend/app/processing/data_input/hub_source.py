@@ -34,6 +34,10 @@ def _reconstruct_frame(entry: Dict[str, Any]) -> Optional[np.ndarray]:
         return None
 
 
+# Public alias for use by API/controllers that need to reconstruct frames from shared_store entries
+reconstruct_frame = _reconstruct_frame
+
+
 # ============================================================================
 # HUB SOURCE
 # ============================================================================

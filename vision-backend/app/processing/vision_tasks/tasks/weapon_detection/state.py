@@ -9,7 +9,7 @@ Manages internal state for weapon detection scenario:
 - Emitted events tracking
 """
 
-from typing import List, Dict
+from typing import List, Dict, Tuple
 from datetime import datetime
 
 from app.processing.vision_tasks.tasks.weapon_detection.types import (
@@ -32,6 +32,8 @@ class WeaponDetectionState:
         self.buffer_size = buffer_size
         self.pose_buffer: List[PoseFrame] = []
         self.pending_analyses: List[ArmPostureAnalysis] = []
+        # Deferred VLM: (analysis, suspicious_frame_index) — call VLM on next frame with [N-1, N, N+1]
+        self.deferred_vlm: List[Tuple[ArmPostureAnalysis, int]] = []
         self.vlm_cache: Dict[str, VLMConfirmation] = {}
         self.last_vlm_call_time: Dict[str, float] = {}
         self.emitted_events: Dict[str, datetime] = {}
@@ -44,7 +46,7 @@ class WeaponDetectionState:
     
     def cleanup_old_data(self, current_time: datetime) -> None:
         """
-        Remove old pending analyses and emitted events.
+        Remove old pending analyses, deferred VLM, and emitted events.
         
         Args:
             current_time: Current timestamp for age calculation
@@ -52,6 +54,12 @@ class WeaponDetectionState:
         # Remove old pending analyses (older than 5 seconds)
         self.pending_analyses = [
             a for a in self.pending_analyses
+            if (current_time - a.timestamp).total_seconds() < 5.0
+        ]
+        
+        # Remove old deferred VLM (older than 5 seconds)
+        self.deferred_vlm = [
+            (a, n) for a, n in self.deferred_vlm
             if (current_time - a.timestamp).total_seconds() < 5.0
         ]
         
@@ -65,6 +73,7 @@ class WeaponDetectionState:
         """Reset all state."""
         self.pose_buffer.clear()
         self.pending_analyses.clear()
+        self.deferred_vlm.clear()
         self.vlm_cache.clear()
         self.last_vlm_call_time.clear()
         self.emitted_events.clear()

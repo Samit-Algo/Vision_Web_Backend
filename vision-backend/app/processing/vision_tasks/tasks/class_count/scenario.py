@@ -58,9 +58,11 @@ class ClassCountScenario(BaseScenario):
                 iou_threshold=self.config_obj.iou_threshold,
                 score_threshold=self.config_obj.score_threshold
             )
+            # Same count_mode as box_count: entry_exit for separate IN/OUT counts and color by direction
             self.line_counter = LineCrossingCounter(
                 line_coordinates=self.config_obj.zone_coordinates,
-                direction=self.config_obj.zone_direction
+                direction=self.config_obj.zone_direction,
+                count_mode="entry_exit",
             )
 
         # Initialize report session when agent starts
@@ -154,6 +156,9 @@ class ClassCountScenario(BaseScenario):
         report["line_counts"] = counts
         report["active_tracks"] = len(active_tracks)
         report["all_active_tracks"] = len(all_active_tracks)
+        report["track_info"] = track_info
+        report["entry_count"] = counts["entry_count"]
+        report["exit_count"] = counts["exit_count"]
 
         matched_indices = self._match_tracks_to_detections(
             active_tracks,
