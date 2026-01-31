@@ -3,6 +3,8 @@ Pose Extractor
 --------------
 
 Extracts pose keypoints and person bounding boxes from detection packets.
+Same logic as old weapon_detection: filter by "person" class, align keypoints
+with boxes by index. Keypoints may be [x, y] or [x, y, conf] per point.
 """
 
 from typing import Optional

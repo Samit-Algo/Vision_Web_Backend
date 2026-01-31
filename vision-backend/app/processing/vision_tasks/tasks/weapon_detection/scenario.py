@@ -84,69 +84,79 @@ class WeaponDetectionScenario(BaseScenario):
         # Step 2: Buffer pose frames
         self.state.add_pose_frame(pose_frame)
         
-        # Step 3: Analyze arm posture (if buffer is full)
+        # Step 3: Process deferred VLM calls (now we have current frame = N+1, so we have [N-1, N, N+1])
+        vlm_service = self._get_vlm_service()
+        to_remove_deferred = []
+        for analysis, suspicious_frame_index in list(self.state.deferred_vlm):
+            if frame_context.frame_index != suspicious_frame_index + 1:
+                continue
+            # We have N+1 = current frame; buffer has ... N-1, N, N+1 (current was just added in Step 2)
+            if len(self.state.pose_buffer) < 3:
+                continue
+            before_frame = self.state.pose_buffer[-3].frame
+            suspicious_frame = self.state.pose_buffer[-2].frame
+            after_frame = self.state.pose_buffer[-1].frame
+            three_frames = [before_frame, suspicious_frame, after_frame]
+            print(f"[WeaponDetectionScenario] 🔍 Calling VLM for person {analysis.person_index} with 3 frames (before={suspicious_frame_index - 1}, suspicious={suspicious_frame_index}, after={suspicious_frame_index + 1})")
+            vlm_result = call_vlm(
+                analysis,
+                three_frames,
+                self.state,
+                vlm_service,
+                self.config_obj.vlm_confidence_threshold,
+                self.config_obj.vlm_frames_dir,
+                weapon_types=self.config_obj.weapon_types,
+            )
+            to_remove_deferred.append((analysis, suspicious_frame_index))
+            if vlm_result and vlm_result.weapon_detected:
+                person_key = get_person_key(analysis.person_index, analysis.box)
+                last_emitted = self.state.emitted_events.get(person_key)
+                if not last_emitted or (frame_context.timestamp - last_emitted).total_seconds() > 5.0:
+                    event = ScenarioEvent(
+                        event_type="weapon_detected",
+                        label=f"Weapon detected: {vlm_result.weapon_type} (confidence: {vlm_result.confidence:.2f})",
+                        confidence=vlm_result.confidence,
+                        metadata={
+                            "weapon_type": vlm_result.weapon_type,
+                            "person_index": vlm_result.person_index,
+                            "box": vlm_result.box,
+                            "arm_angle": analysis.arm_angle,
+                            "vlm_description": vlm_result.description,
+                            "vlm_response": vlm_result.vlm_response
+                        },
+                        detection_indices=[vlm_result.person_index],
+                        timestamp=vlm_result.timestamp,
+                        frame_index=vlm_result.frame_index
+                    )
+                    events.append(event)
+                    self.state.emitted_events[person_key] = frame_context.timestamp
+        for item in to_remove_deferred:
+            self.state.deferred_vlm.remove(item)
+        
+        # Step 4: Analyze arm posture (if buffer is full) and defer VLM for next frame
         if len(self.state.pose_buffer) >= self.config_obj.temporal_consistency_frames:
             analyses = analyze_arm_posture(
                 self.state.pose_buffer,
                 self.config_obj.temporal_consistency_frames,
-                self.config_obj.arm_angle_threshold
+                self.config_obj.arm_angle_threshold,
+                self.config_obj.kp_confidence_threshold,
+                require_shoulder_height=self.config_obj.require_shoulder_height,
             )
             self.state.pending_analyses.extend(analyses)
         
-        # Step 4: Call VLM for suspicious postures (non-blocking, throttled)
-        vlm_service = self._get_vlm_service()
+        # Step 5: For new suspicious postures, defer VLM (call on next frame with [N-1, N, N+1])
+        deferred_person_keys = {get_person_key(a.person_index, a.box) for a, _ in self.state.deferred_vlm}
         for analysis in list(self.state.pending_analyses):
-            if should_call_vlm(analysis, self.state, self.config_obj.vlm_throttle_seconds):
-                # Extract all buffered frames that showed suspicious posture for this person
-                suspicious_frames = []
-                for pose_frame in self.state.pose_buffer[-self.config_obj.temporal_consistency_frames:]:
-                    # Check if this person had suspicious posture in this frame
-                    if analysis.person_index < len(pose_frame.keypoints):
-                        person_kp = pose_frame.keypoints[analysis.person_index]
-                        arm_angle, arm_raised = check_arm_raised(person_kp, self.config_obj.arm_angle_threshold)
-                        if arm_raised:
-                            suspicious_frames.append(pose_frame.frame)
-                
-                # If no suspicious frames found, use the latest frame as fallback
-                if not suspicious_frames:
-                    suspicious_frames = [self.state.pose_buffer[-1].frame] if self.state.pose_buffer else [frame_context.frame]
-                
-                print(f"[WeaponDetectionScenario] 🔍 Calling VLM for person {analysis.person_index} with {len(suspicious_frames)} buffered frames (frame {frame_context.frame_index}, arm_angle: {analysis.arm_angle:.1f}°)")
-                
-                vlm_result = call_vlm(
-                    analysis,
-                    suspicious_frames,
-                    self.state,
-                    vlm_service,
-                    self.config_obj.vlm_confidence_threshold,
-                    self.config_obj.vlm_frames_dir
-                )
-                
-                if vlm_result and vlm_result.weapon_detected:
-                    # Check if we've already emitted for this person recently
-                    person_key = get_person_key(analysis.person_index, analysis.box)
-                    last_emitted = self.state.emitted_events.get(person_key)
-                    
-                    # Emit event only if not recently emitted (avoid spam)
-                    if not last_emitted or (frame_context.timestamp - last_emitted).total_seconds() > 5.0:
-                        event = ScenarioEvent(
-                            event_type="weapon_detected",
-                            label=f"Weapon detected: {vlm_result.weapon_type} (confidence: {vlm_result.confidence:.2f})",
-                            confidence=vlm_result.confidence,
-                            metadata={
-                                "weapon_type": vlm_result.weapon_type,
-                                "person_index": vlm_result.person_index,
-                                "box": vlm_result.box,
-                                "arm_angle": analysis.arm_angle,
-                                "vlm_description": vlm_result.description,  # VLM description
-                                "vlm_response": vlm_result.vlm_response
-                            },
-                            detection_indices=[vlm_result.person_index],
-                            timestamp=vlm_result.timestamp,
-                            frame_index=vlm_result.frame_index
-                        )
-                        events.append(event)
-                        self.state.emitted_events[person_key] = frame_context.timestamp
+            if not analysis.arm_raised:
+                continue
+            person_key = get_person_key(analysis.person_index, analysis.box)
+            if person_key in deferred_person_keys:
+                continue
+            if not should_call_vlm(analysis, self.state, self.config_obj.vlm_throttle_seconds):
+                continue
+            self.state.deferred_vlm.append((analysis, analysis.frame_index))
+            deferred_person_keys.add(person_key)
+            print(f"[WeaponDetectionScenario] ⏳ Deferred VLM for person {analysis.person_index} (suspicious at frame {analysis.frame_index}); will send 3 frames on next frame.")
         
         # Cleanup: Remove old data
         self.state.cleanup_old_data(frame_context.timestamp)

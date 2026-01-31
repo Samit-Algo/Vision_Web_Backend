@@ -564,6 +564,7 @@ class PipelineRunner:
             is_fire_detection = False
             fire_detected = False  # Whether fire is currently detected
             fire_classes = []  # Target classes for fire detection
+            is_weapon_detection = False  # Show person + keypoints for pose/skeleton overlay
             
             if hasattr(self.context, '_scenario_instances'):
                 for rule_idx, scenario_instance in self.context._scenario_instances.items():
@@ -592,6 +593,10 @@ class PipelineRunner:
                             # Fire is detected if we have consecutive frames with fire above threshold
                             if state.get('fire_detected', False) or state.get('consecutive_fire_frames', 0) >= 1:
                                 fire_detected = True
+                    
+                    # Check if this is weapon_detection (show person + keypoints for pose overlay)
+                    elif scenario_type == 'weapon_detection':
+                        is_weapon_detection = True
                     
                     # Check if this is a line-based counting scenario (class_count or box_count)
                     elif scenario_type in ['class_count', 'box_count']:
@@ -750,6 +755,12 @@ class PipelineRunner:
                 # Show ALL fire-related detections (fire, flame, smoke)
                 f_boxes, f_classes, f_scores, f_keypoints = self._filter_detections_by_fire_classes(
                     fire_classes, merged_packet.boxes, merged_packet.classes, merged_packet.scores,
+                    keypoints_src,
+                )
+            elif is_weapon_detection:
+                # Show ALL person detections with keypoints so UI can draw pose/skeleton
+                f_boxes, f_classes, f_scores, f_keypoints = self._filter_detections_by_class(
+                    "person", merged_packet.boxes, merged_packet.classes, merged_packet.scores,
                     keypoints_src,
                 )
             elif is_line_counting and target_class:

@@ -6,7 +6,7 @@ Handles VLM calls for weapon confirmation.
 Manages caching, throttling, and frame saving.
 """
 
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import os
 import cv2
 import numpy as np
@@ -19,17 +19,27 @@ from app.processing.vision_tasks.tasks.weapon_detection.state import WeaponDetec
 from app.infrastructure.external.groq_vlm_service import GroqVLMService
 
 
-WEAPON_DETECTION_PROMPT = """Analyze these images (multiple frames from a video sequence) and determine if there is a weapon visible (gun, knife, sword, or any other weapon) in ANY of the frames.
+DEFAULT_WEAPON_TYPES = ["gun", "knife", "sword", "other"]
 
-The images are sequential frames showing the same person. Look across all frames to detect weapons - a weapon may be visible in some frames but not others.
+
+def build_weapon_detection_prompt(weapon_types: Optional[List[str]] = None) -> str:
+    """
+    Build VLM prompt for 3-frame weapon detection (before, suspicious moment, after).
+    weapon_types: list of weapon categories to detect (e.g. ["gun", "knife"]); default DEFAULT_WEAPON_TYPES.
+    """
+    types = weapon_types if weapon_types else DEFAULT_WEAPON_TYPES
+    types_str = ", ".join(types)
+    return f"""These 3 images are sequential video frames: (1) before a suspicious arm raise, (2) the frame where the arm is raised to shoulder level or above, (3) the frame after.
+
+Determine if ANY of the following is visible in ANY of the 3 frames: {types_str}.
 
 Respond ONLY with a valid JSON object in this exact format:
-{
+{{
     "weapon_detected": true or false,
-    "weapon_type": "gun" or "knife" or "sword" or "other" or null,
+    "weapon_type": one of {types_str} or null,
     "confidence": 0.0 to 1.0,
-    "description": "Brief description of what you see across the frames"
-}
+    "description": "Brief description of what you see across the 3 frames"
+}}
 
 Be very strict - only return true if you are confident a weapon is actually visible in at least one frame. False positives are worse than false negatives."""
 
@@ -129,20 +139,22 @@ def call_vlm(
     state: WeaponDetectionState,
     vlm_service: GroqVLMService,
     vlm_confidence_threshold: float,
-    frames_dir: str
+    frames_dir: str,
+    weapon_types: Optional[List[str]] = None,
 ) -> Optional[VLMConfirmation]:
     """
-    Call VLM model to confirm weapon presence using multiple buffered frames.
+    Call VLM model to confirm weapon presence using exactly 3 frames (before, suspicious, after).
     
     Non-blocking: Returns cached result if available, otherwise calls VLM.
     
     Args:
         analysis: Arm posture analysis
-        frames: List of frame images (buffered frames that showed suspicious posture)
+        frames: Exactly 3 frame images [before, suspicious_moment, after]
         state: Weapon detection state
         vlm_service: VLM service instance
         vlm_confidence_threshold: Minimum confidence threshold
         frames_dir: Directory to save frames
+        weapon_types: Optional list of weapon types to detect (e.g. ["gun", "knife"]); uses default if None
     
     Returns:
         VLMConfirmation if weapon detected, None otherwise
@@ -157,6 +169,8 @@ def call_vlm(
     
     # Update throttle
     state.last_vlm_call_time[person_key] = analysis.timestamp.timestamp()
+    
+    prompt = build_weapon_detection_prompt(weapon_types)
     
     try:
         # Save all frames before sending to VLM
@@ -173,10 +187,10 @@ def call_vlm(
             )
             save_vlm_frame(frame, temp_analysis, frames_dir)
         
-        # Call VLM with multiple frames
+        # Call VLM with 3 frames
         vlm_result = vlm_service.analyze_images(
             frames,
-            prompt=WEAPON_DETECTION_PROMPT,
+            prompt=prompt,
             crop_box=analysis.box,
             temperature=0.1,
             max_tokens=500
