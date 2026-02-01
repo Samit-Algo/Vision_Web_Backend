@@ -5,10 +5,14 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+from bson import ObjectId
+from bson.errors import InvalidId
 
 from ...domain.models.agent import Agent
+from ...domain.constants import AgentFields
 from ...infrastructure.external.agent_client import AgentClient
 from ...utils.datetime_utils import utc_now
+from ...utils.db import get_collection
 from ..session_state.agent_state import get_agent_state
 from .flow_diagram_utils import generate_agent_flow_diagram
 
@@ -40,6 +44,95 @@ def set_camera_repository(repository):
 def get_camera_repository():
     """Get the camera repository (for use by other tools)."""
     return _camera_repository
+
+
+# ============================================================================
+# SYNC AGENT SAVE (no asyncio – works in Docker and from running event loop)
+# ============================================================================
+
+def _agent_to_dict_sync(agent: Agent) -> dict:
+    """Convert Agent to MongoDB document (sync, same shape as MongoAgentRepository)._agent_to_dict)."""
+    d = {
+        AgentFields.NAME: agent.name,
+        AgentFields.CAMERA_ID: agent.camera_id,
+        AgentFields.MODEL: agent.model,
+        AgentFields.FPS: agent.fps,
+        AgentFields.RULES: agent.rules,
+        AgentFields.RUN_MODE: agent.run_mode,
+        AgentFields.INTERVAL_MINUTES: agent.interval_minutes,
+        AgentFields.CHECK_DURATION_SECONDS: agent.check_duration_seconds,
+        AgentFields.START_TIME: agent.start_time,
+        AgentFields.END_TIME: agent.end_time,
+        AgentFields.ZONE: agent.zone,
+        AgentFields.REQUIRES_ZONE: agent.requires_zone,
+        AgentFields.STATUS: agent.status,
+        AgentFields.CREATED_AT: agent.created_at,
+        AgentFields.OWNER_USER_ID: agent.owner_user_id,
+        AgentFields.STREAM_CONFIG: agent.stream_config,
+    }
+    if agent.id:
+        try:
+            d[AgentFields.MONGO_ID] = ObjectId(agent.id)
+        except (InvalidId, ValueError, TypeError):
+            pass
+    return d
+
+
+def _document_to_agent_sync(document: dict) -> Agent:
+    """Convert MongoDB document to Agent (sync, same shape as MongoAgentRepository._document_to_agent)."""
+    if not document or AgentFields.MONGO_ID not in document:
+        raise ValueError("Invalid document: missing _id field")
+    start_time = document.get(AgentFields.START_TIME)
+    end_time = document.get(AgentFields.END_TIME)
+    if start_time and isinstance(start_time, str):
+        start_time = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+    if end_time and isinstance(end_time, str):
+        end_time = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
+    return Agent(
+        id=str(document[AgentFields.MONGO_ID]),
+        name=document.get(AgentFields.NAME, ""),
+        camera_id=document.get(AgentFields.CAMERA_ID, ""),
+        model=document.get(AgentFields.MODEL, ""),
+        fps=document.get(AgentFields.FPS),
+        rules=document.get(AgentFields.RULES, []),
+        run_mode=document.get(AgentFields.RUN_MODE),
+        interval_minutes=document.get(AgentFields.INTERVAL_MINUTES),
+        check_duration_seconds=document.get(AgentFields.CHECK_DURATION_SECONDS),
+        start_time=start_time,
+        end_time=end_time,
+        zone=document.get(AgentFields.ZONE),
+        requires_zone=document.get(AgentFields.REQUIRES_ZONE, False),
+        status=document.get(AgentFields.STATUS, "ACTIVE"),
+        created_at=document.get(AgentFields.CREATED_AT),
+        owner_user_id=document.get(AgentFields.OWNER_USER_ID),
+        stream_config=document.get(AgentFields.STREAM_CONFIG),
+    )
+
+
+def _save_agent_sync(agent: Agent) -> Agent:
+    """Save agent using sync PyMongo. No asyncio, no event loop issues."""
+    coll = get_collection("agents")
+    agent_dict = _agent_to_dict_sync(agent)
+    if agent.id:
+        try:
+            oid = ObjectId(agent.id)
+            coll.update_one(
+                {AgentFields.MONGO_ID: oid},
+                {"$set": {k: v for k, v in agent_dict.items() if k != AgentFields.MONGO_ID}},
+            )
+            doc = coll.find_one({AgentFields.MONGO_ID: oid})
+            if doc is None:
+                raise RuntimeError(f"Agent {agent.id} was updated but could not be retrieved")
+            return _document_to_agent_sync(doc)
+        except (InvalidId, ValueError, TypeError):
+            pass
+    if AgentFields.MONGO_ID in agent_dict:
+        del agent_dict[AgentFields.MONGO_ID]
+    result = coll.insert_one(agent_dict)
+    doc = coll.find_one({AgentFields.MONGO_ID: result.inserted_id})
+    if doc is None:
+        raise RuntimeError("Agent was created but could not be retrieved")
+    return _document_to_agent_sync(doc)
 
 
 def set_device_repository(repository):
@@ -222,7 +315,7 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
 
         try:
             print(f"[save_to_db] Attempting to save agent to database...")
-            saved_agent = asyncio.run(_agent_repository.save(agent))
+            saved_agent = _save_agent_sync(agent)
             print(f"[save_to_db] Repository save() returned: {saved_agent}")
             print(f"[save_to_db] Saved agent ID: {saved_agent.id if saved_agent else 'None'}")
             print(f"[save_to_db] Saved agent name: {saved_agent.name if saved_agent else 'None'}")
@@ -258,14 +351,8 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
             }
 
         if saved_agent and saved_agent.id and saved_agent.camera_id:
-            try:
-                print(f"[save_to_db] Registering agent {saved_agent.id} with Jetson backend...")
-                asyncio.run(_register_agent_with_jetson(saved_agent))
-                print(f"[save_to_db] Successfully registered agent with Jetson backend")
-            except Exception as e:
-                print(f"[save_to_db] WARNING: Failed to register agent {saved_agent.id} with Jetson backend: {e}")
-                import traceback
-                print(f"[save_to_db] Traceback: {traceback.format_exc()}")
+            # Jetson registration is async (Motor/camera/device repos); skip when saving from sync chat tool.
+            print(f"[save_to_db] Jetson registration skipped (sync save from chat). Register via API if needed.")
 
         agent_state.status = "SAVED"
         agent_state.saved_agent_id = saved_agent.id if saved_agent else None

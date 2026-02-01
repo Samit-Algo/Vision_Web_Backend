@@ -446,8 +446,8 @@ def create_agent_for_session(session_id: str = "default", user_id: Optional[str]
     # Limit thinking for faster responses (unlimited budget was causing 10-30s delays)
     planner = BuiltInPlanner(
         thinking_config=types.ThinkingConfig(
-            include_thoughts=False,  # Disable for snappy chat; set True + budget for complex flows
-            thinking_budget=0,
+            include_thoughts=True,  # Disable for snappy chat; set True + budget for complex flows
+            thinking_budget=1,
         )
     )
 

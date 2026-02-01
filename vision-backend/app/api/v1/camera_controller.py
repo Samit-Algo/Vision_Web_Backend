@@ -20,10 +20,7 @@ from ...application.use_cases.agent.list_agents_by_camera import ListAgentsByCam
 from ...infrastructure.external.camera_client import CameraClient
 from ...di.container import get_container
 from ...processing.helpers import get_shared_store
-<<<<<<< HEAD
-=======
 from ...processing.data_input.hub_source import reconstruct_frame
->>>>>>> 00ff0767b9ab495af597be3941b3bbcb8c46cc96
 from ...utils.event_notifier import encode_frame_to_base64
 from .dependencies import get_current_user
 
