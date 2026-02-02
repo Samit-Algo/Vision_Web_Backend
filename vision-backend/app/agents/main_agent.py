@@ -229,6 +229,7 @@ def build_instruction_dynamic_with_session(context: ReadonlyContext, session_id:
         "- Accept natural phrases like 'now', 'after 10 min', 'tomorrow 9am' (convert internally).\n"
         "\n"
         "ZONE/LINE DRAWING RULES:\n"
+        "- Do NOT ask about zone or drawing an area if RULES_CONTEXT_JSON has zone_required: false (e.g. sleep_detection). Only ask for zone when zone_required is true or for counting rules (class_count, box_count).\n"
         "- For counting rules (class_count, box_count): Zone is optional but HIGHLY RECOMMENDED for crossing detection.\n"
         "- When zone is in missing_fields for counting rules, explain: 'Would you like to draw a line (2 points) for crossing detection? This will count objects when they cross the line. Reply \"yes\" to draw, or \"no\" to skip.'\n"
         "- For restricted zone rules: Zone (polygon, minimum 3 points) is REQUIRED.\n"

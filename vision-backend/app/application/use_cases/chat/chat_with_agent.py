@@ -411,6 +411,18 @@ class ChatWithAgentUseCase:
             agent_state,  # Pass agent_state for crossing detection logic
         )
 
+        # Do not show zone UI for rules that do not support zones (e.g. sleep_detection).
+        if agent_state.rule_id:
+            from ....agents.tools.kb_utils import get_rule
+            try:
+                rule = get_rule(agent_state.rule_id)
+                zone_support = rule.get("zone_support", {})
+                if zone_support.get("supported", True) is False:
+                    zone_required = False
+                    awaiting_zone_input = False
+            except (ValueError, KeyError):
+                pass
+
         # Generate snapshot URL and zone type if zone drawing is needed.
         # Use camera_id from either session state (tools may key by session_id or adk_session.id).
         camera_id = (

@@ -353,6 +353,7 @@ async def websocket_agent_overlay(websocket: WebSocket, agent_id: str) -> None:
             line_crossed_indices = entry.get("line_crossed_indices", [])
             track_info = entry.get("track_info", [])  # Track information with center points and touch status
             in_zone_indices = entry.get("in_zone_indices", [])  # Restricted zone: only these detection indices get red box
+            sleep_confirmed_indices = entry.get("sleep_confirmed_indices", [])  # Sleep: same person box, red when VLM confirmed
             
             # Build detection colors based on touch status
             # Yellow for boxes touching the line, default color for others
@@ -387,6 +388,7 @@ async def websocket_agent_overlay(websocket: WebSocket, agent_id: str) -> None:
                 "line_crossed_indices": line_crossed_indices,
                 "track_info": track_info,
                 "in_zone_indices": in_zone_indices,
+                "sleep_confirmed_indices": sleep_confirmed_indices,
             }
             await websocket.send_json(payload)
     except WebSocketDisconnect:

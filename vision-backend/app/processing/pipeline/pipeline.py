@@ -103,14 +103,24 @@ def merge_detections_stage(detection_packets: List[DetectionPacket]) -> Detectio
 
 
 def _overlay_data_to_dict_list(overlay_data: Any) -> List[Dict[str, Any]]:
-    """Normalize scenario overlay output to a list of JSON-serializable dicts."""
+    """Normalize scenario overlay output for UI: each item has boxes, labels, colors arrays."""
     if isinstance(overlay_data, list):
         out = []
         for item in overlay_data:
             if dataclasses.is_dataclass(item) and not isinstance(item, type):
-                out.append(dataclasses.asdict(item))
-            elif isinstance(item, dict):
-                out.append(item)
+                item = dataclasses.asdict(item)
+            if isinstance(item, dict):
+                # UI expects overlay.boxes, overlay.labels, overlay.colors (arrays)
+                if "boxes" in item:
+                    out.append(item)
+                elif "box" in item:
+                    out.append({
+                        "boxes": [item["box"]],
+                        "labels": [item.get("label") or ""],
+                        "colors": [item.get("color") or [0, 255, 102]],
+                    })
+                else:
+                    out.append(item)
             else:
                 out.append(item)
         return out
@@ -565,6 +575,8 @@ class PipelineRunner:
             fire_detected = False  # Whether fire is currently detected
             fire_classes = []  # Target classes for fire detection
             is_weapon_detection = False  # Show person + keypoints for pose/skeleton overlay
+            is_sleep_detection = False  # Show person + keypoints for pose/skeleton overlay (sleep detection)
+            sleep_detection_scenario = None  # For per-box red when sleep confirmed (same box, change color)
             
             if hasattr(self.context, '_scenario_instances'):
                 for rule_idx, scenario_instance in self.context._scenario_instances.items():
@@ -597,6 +609,10 @@ class PipelineRunner:
                     # Check if this is weapon_detection (show person + keypoints for pose overlay)
                     elif scenario_type == 'weapon_detection':
                         is_weapon_detection = True
+                    # Check if this is sleep_detection (show person + keypoints; red box when VLM confirms sleep)
+                    elif scenario_type == 'sleep_detection':
+                        is_sleep_detection = True
+                        sleep_detection_scenario = scenario_instance
                     
                     # Check if this is a line-based counting scenario (class_count or box_count)
                     elif scenario_type in ['class_count', 'box_count']:
@@ -757,7 +773,7 @@ class PipelineRunner:
                     fire_classes, merged_packet.boxes, merged_packet.classes, merged_packet.scores,
                     keypoints_src,
                 )
-            elif is_weapon_detection:
+            elif is_weapon_detection or is_sleep_detection:
                 # Show ALL person detections with keypoints so UI can draw pose/skeleton
                 f_boxes, f_classes, f_scores, f_keypoints = self._filter_detections_by_class(
                     "person", merged_packet.boxes, merged_packet.classes, merged_packet.scores,
@@ -794,6 +810,18 @@ class PipelineRunner:
                 )
             else:
                 f_boxes, f_classes, f_scores, f_keypoints = [], [], [], []
+            
+            # Sleep detection: which person boxes are VLM-confirmed sleeping (same box, UI draws red)
+            sleep_confirmed_indices: List[int] = []
+            if is_sleep_detection and sleep_detection_scenario and hasattr(sleep_detection_scenario, 'state'):
+                emitted = getattr(sleep_detection_scenario.state, 'emitted_event_boxes', {})
+                for i, box in enumerate(f_boxes):
+                    if not box or len(box) < 4:
+                        continue
+                    for eb in emitted.values():
+                        if self._calculate_iou(box, eb) >= 0.3:
+                            sleep_confirmed_indices.append(i)
+                            break
             
             # Collect scenario overlays (e.g., loom ROI boxes with state labels)
             # Normalize to list of JSON-serializable dicts for WebSocket payload
@@ -842,6 +870,7 @@ class PipelineRunner:
                 "track_info": track_info,  # Track information (center points, track IDs) for visualization
                 "fire_detected": fire_detected,  # Fire detection status (for red bounding boxes)
                 "in_zone_indices": in_zone_indices,  # Restricted zone: indices of filtered detections inside zone (red box only these)
+                "sleep_confirmed_indices": sleep_confirmed_indices,  # Sleep: same person box, red when VLM confirmed
             }
             
             return processed_frame

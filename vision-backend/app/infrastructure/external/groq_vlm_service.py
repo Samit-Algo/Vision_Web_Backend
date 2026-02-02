@@ -225,7 +225,8 @@ class GroqVLMService:
             }
             
             logger.debug(f"Calling Groq VLM API with model: {self.model}")
-            
+            print(f"[GroqVLM] 📤 Calling VLM API: model={self.model} num_images={len(processed_images)} crop_box={crop_box is not None}")
+
             with httpx.Client(timeout=self.API_TIMEOUT) as client:
                 response = client.post(
                     self.GROQ_CHAT_URL,
@@ -266,7 +267,8 @@ class GroqVLMService:
                 except json.JSONDecodeError:
                     # Not JSON, that's okay - return raw content
                     parsed_json = None
-                
+
+                print(f"[GroqVLM] 📥 VLM response: content_len={len(content)} parsed_json={parsed_json is not None} content_preview={content[:150]!r}...")
                 return {
                     "content": content,
                     "parsed_json": parsed_json,

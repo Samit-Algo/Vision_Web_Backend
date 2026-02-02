@@ -14,6 +14,7 @@ Registered scenario types (imported in vision_tasks/__init__.py):
 - restricted_zone  : Alert when object of class is inside polygon zone
 - loom_machine_state : Loom run/idle state from motion
 - weapon_detection  : Weapon detection with pose + optional VLM
+- sleep_detection   : Person sleeping (lying or standing) with pose + VLM confirmation
 """
 
 from typing import Dict, Type
