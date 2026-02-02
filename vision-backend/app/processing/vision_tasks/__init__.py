@@ -34,6 +34,7 @@ from app.processing.vision_tasks.tasks.box_count import scenario as box_count_sc
 from app.processing.vision_tasks.tasks.fall_detection import scenario as fall_detection_scenario  # noqa: F401
 from app.processing.vision_tasks.tasks.fire_detection import scenario as fire_detection_scenario  # noqa: F401
 from app.processing.vision_tasks.tasks.restricted_zone import scenario as restricted_zone_scenario  # noqa: F401
+from app.processing.vision_tasks.tasks.wall_climb_detection import scenario as wall_climb_detection_scenario  # noqa: F401
 
 try:
     from app.processing.vision_tasks.tasks.class_presence import scenario as class_presence_scenario  # noqa: F401

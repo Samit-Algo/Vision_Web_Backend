@@ -577,6 +577,8 @@ class PipelineRunner:
             is_weapon_detection = False  # Show person + keypoints for pose/skeleton overlay
             is_sleep_detection = False  # Show person + keypoints for pose/skeleton overlay (sleep detection)
             sleep_detection_scenario = None  # For per-box red when sleep confirmed (same box, change color)
+            is_wall_climb_detection = False  # Orange = climbing, red = fully above (stays red)
+            wall_climb_scenario = None
             
             if hasattr(self.context, '_scenario_instances'):
                 for rule_idx, scenario_instance in self.context._scenario_instances.items():
@@ -613,6 +615,16 @@ class PipelineRunner:
                     elif scenario_type == 'sleep_detection':
                         is_sleep_detection = True
                         sleep_detection_scenario = scenario_instance
+                    # Wall climb: orange = climbing, red = fully above (stays red)
+                    elif scenario_type == 'wall_climb_detection':
+                        is_wall_climb_detection = True
+                        wall_climb_scenario = scenario_instance
+                        if hasattr(scenario_instance, 'config_obj') and hasattr(scenario_instance.config_obj, 'target_class'):
+                            target_class = scenario_instance.config_obj.target_class
+                        if hasattr(scenario_instance, '_state'):
+                            state = scenario_instance._state
+                            if state.get('red_indices') or state.get('climbing_indices'):
+                                zone_violated = True
                     
                     # Check if this is a line-based counting scenario (class_count or box_count)
                     elif scenario_type in ['class_count', 'box_count']:
@@ -744,6 +756,9 @@ class PipelineRunner:
             
             # For restricted zone: indices into filtered detections that are inside the zone (for per-box red coloring)
             in_zone_indices: List[int] = []
+            # Wall climb: red = fully above (stays red), orange = climbing
+            wall_climb_red_indices: List[int] = []
+            wall_climb_orange_indices: List[int] = []
 
             # Filter detections based on scenario type (include keypoints for fall_detection/pose)
             keypoints_src = getattr(merged_packet, "keypoints", None) or []
@@ -766,6 +781,29 @@ class PipelineRunner:
                         if isinstance(det_class, str) and det_class.lower() == target_class:
                             if orig_idx in orig_in_zone:
                                 in_zone_indices.append(filtered_idx)
+                            filtered_idx += 1
+            elif is_wall_climb_detection and target_class:
+                # Show ALL detections of target class (e.g., person); color by climbing / fully above
+                f_boxes, f_classes, f_scores, f_keypoints = self._filter_detections_by_class(
+                    target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores,
+                    keypoints_src,
+                )
+                state_red = []
+                state_climbing = []
+                if wall_climb_scenario and hasattr(wall_climb_scenario, '_state'):
+                    state_red = wall_climb_scenario._state.get("red_indices") or []
+                    state_climbing = wall_climb_scenario._state.get("climbing_indices") or []
+                orig_red = set(state_red)
+                orig_climbing = set(state_climbing)
+                filtered_idx = 0
+                for orig_idx in range(len(merged_packet.boxes)):
+                    if orig_idx < len(merged_packet.classes):
+                        det_class = merged_packet.classes[orig_idx]
+                        if isinstance(det_class, str) and det_class.lower() == target_class:
+                            if orig_idx in orig_red:
+                                wall_climb_red_indices.append(filtered_idx)
+                            elif orig_idx in orig_climbing:
+                                wall_climb_orange_indices.append(filtered_idx)
                             filtered_idx += 1
             elif is_fire_detection and fire_classes:
                 # Show ALL fire-related detections (fire, flame, smoke)
@@ -871,6 +909,8 @@ class PipelineRunner:
                 "fire_detected": fire_detected,  # Fire detection status (for red bounding boxes)
                 "in_zone_indices": in_zone_indices,  # Restricted zone: indices of filtered detections inside zone (red box only these)
                 "sleep_confirmed_indices": sleep_confirmed_indices,  # Sleep: same person box, red when VLM confirmed
+                "wall_climb_red_indices": wall_climb_red_indices,  # Wall climb: fully above (stays red)
+                "wall_climb_orange_indices": wall_climb_orange_indices,  # Wall climb: climbing (orange)
             }
             
             return processed_frame

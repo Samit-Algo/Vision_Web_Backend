@@ -211,6 +211,8 @@ def build_instruction_dynamic_with_session(context: ReadonlyContext, session_id:
         "  3. If resolve_camera_wrapper returns 'multiple_matches': ask user which camera they want from the list (NEVER auto-select)\n"
         "  4. If resolve_camera_wrapper returns 'not_found' OR user doesn't specify: call list_cameras_wrapper() and suggest available cameras\n"
         "  5. After user clarifies, call resolve_camera_wrapper again with their choice\n"
+        "- When YOU have just suggested a single camera by name (e.g. 'There is one camera named X available. Would you like to use it?') and the user confirms with 'yes', 'use it', 'that one', etc.: IMMEDIATELY call resolve_camera_wrapper with that camera name, then set_field_value_wrapper with the returned camera_id. Do NOT ask for the camera ID again.\n"
+        "- As soon as you know which camera to use (from user choice or from a single match), call set_field_value_wrapper with camera_id so it is stored for zone drawing and snapshot.\n"
         "- Users can provide camera name (partial match supported), camera ID, or just describe it - handle all cases.\n"
         "- Example user inputs: 'Front Gate', 'loading area', 'CAM-001', 'the camera at the warehouse'\n"
         "\n"
