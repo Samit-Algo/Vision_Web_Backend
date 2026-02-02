@@ -38,6 +38,8 @@ class SleepDetectionState:
         self.emitted_events: Dict[str, datetime] = {}
         # Box for each person we emitted (so UI can draw red "SLEEPING CONFIRMED" even when not in pending_analyses)
         self.emitted_event_boxes: Dict[str, List[float]] = {}
+        # person_key -> (first_seen_timestamp, box) when person is "possibly sleeping" AND "still" (for 5s-before-VLM)
+        self.person_stable_since: Dict[str, Tuple[datetime, List[float]]] = {}
 
     def add_pose_frame(self, pose_frame: PoseFrame) -> None:
         """Add one frame to the buffer. Drop the oldest if buffer is full."""
@@ -66,6 +68,11 @@ class SleepDetectionState:
             k: v for k, v in self.emitted_event_boxes.items()
             if k in self.emitted_events
         }
+        # Forget stable_since older than 30 seconds (person left or moved)
+        self.person_stable_since = {
+            k: v for k, v in self.person_stable_since.items()
+            if (current_time - v[0]).total_seconds() < 30.0
+        }
 
     def reset(self) -> None:
         """Clear everything (e.g. when rule is disabled)."""
@@ -76,3 +83,4 @@ class SleepDetectionState:
         self.last_vlm_call_time.clear()
         self.emitted_events.clear()
         self.emitted_event_boxes.clear()
+        self.person_stable_since.clear()

@@ -140,6 +140,7 @@ def call_vlm(
                 possibly_sleeping=analysis.possibly_sleeping,
                 reason=analysis.reason,
                 confidence=analysis.confidence,
+                is_still=getattr(analysis, "is_still", True),
                 timestamp=analysis.timestamp,
                 frame_index=analysis.frame_index + idx - len(frames) + 1,
             )

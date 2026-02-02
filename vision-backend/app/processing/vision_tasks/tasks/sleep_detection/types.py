@@ -35,8 +35,9 @@ class SleepAnalysis:
     - person_index: which person in the frame
     - box: their bounding box
     - possibly_sleeping: True if pose looks like sleeping (lying or head-down + still)
-    - reason: short text like "lying_down" or "head_down_still"
+    - reason: short text like "lying_down" or "head_down_still" or "head_slightly_tilted_still"
     - confidence: how sure we are (0.0–1.0)
+    - is_still: True if motion is below threshold (used for 5s trigger before VLM)
     - timestamp, frame_index: when we analyzed
     """
     person_index: int
@@ -44,6 +45,7 @@ class SleepAnalysis:
     possibly_sleeping: bool
     reason: str
     confidence: float
+    is_still: bool
     timestamp: datetime
     frame_index: int
 

@@ -32,4 +32,6 @@ vision-backend/env
 vision-backend/*.pyc
 vision-backend/*.pt
 vision-backend/event_videos/*.mp4
-*.yaml
+*.yml
+*.pt
+back_up_models

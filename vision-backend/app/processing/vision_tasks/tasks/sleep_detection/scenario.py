@@ -184,20 +184,54 @@ class SleepDetectionScenario(BaseScenario):
                         self.state.emitted_event_boxes.pop(person_key, None)
                     break
 
-        # Step 5: For each "possibly sleeping" person, defer VLM (call on next frame with 3 frames)
+        # Update "stable since" (5s still before VLM): only keep persons who are possibly_sleeping AND is_still
+        still_and_possibly = [(get_person_key(a.person_index, a.box), a.box, a.timestamp) for a in current_analyses if a.possibly_sleeping and getattr(a, "is_still", True)]
+        for person_key, box, ts in still_and_possibly:
+            # Same person (by box IoU)? Keep earliest timestamp
+            found = False
+            for key, (stable_ts, stable_box) in list(self.state.person_stable_since.items()):
+                if _box_iou(box, stable_box) >= 0.3:
+                    found = True
+                    if key != person_key:
+                        self.state.person_stable_since.pop(key, None)
+                        self.state.person_stable_since[person_key] = (stable_ts, box)
+                    break
+            if not found:
+                self.state.person_stable_since[person_key] = (ts, list(box))
+        # Remove entries for persons no longer still+possibly_sleeping
+        for key in list(self.state.person_stable_since.keys()):
+            _, stable_box = self.state.person_stable_since[key]
+            if not any(_box_iou(stable_box, b) >= 0.3 for _, b, _ in still_and_possibly):
+                self.state.person_stable_since.pop(key, None)
+
+        # Step 5: Defer VLM only after 5 seconds of no movement (possibly_sleeping + is_still)
+        trigger_seconds = getattr(self.config_obj, "vlm_trigger_still_seconds", 5.0)
         deferred_keys = {get_person_key(a.person_index, a.box) for a, _ in self.state.deferred_vlm}
+        now_ts = frame_context.timestamp
         for analysis in list(self.state.pending_analyses):
             if not analysis.possibly_sleeping:
                 continue
             person_key = get_person_key(analysis.person_index, analysis.box)
             if person_key in deferred_keys:
                 continue
+            # Find this person's stable_since (by box overlap)
+            stable_ts = None
+            for key, (ts, box) in self.state.person_stable_since.items():
+                if _box_iou(analysis.box, box) >= 0.3:
+                    stable_ts = ts
+                    break
+            if stable_ts is None:
+                continue
+            elapsed = (now_ts - stable_ts).total_seconds()
+            if elapsed < trigger_seconds:
+                print(f"[SleepDetection Scenario] ⏳ Waiting {trigger_seconds - elapsed:.1f}s still before VLM (person_key={person_key[:30]}...)")
+                continue
             if not should_call_vlm(analysis, self.state, self.config_obj.vlm_throttle_seconds):
                 print(f"[SleepDetection Scenario] ⏳ VLM throttled/skip for person_key={person_key}")
                 continue
             self.state.deferred_vlm.append((analysis, analysis.frame_index))
             deferred_keys.add(person_key)
-            print(f"[SleepDetection Scenario] 📋 Deferred VLM for person_index={analysis.person_index} reason={analysis.reason} (will call on next frame)")
+            print(f"[SleepDetection Scenario] 📋 Deferred VLM for person_index={analysis.person_index} reason={analysis.reason} (still {elapsed:.1f}s, will call on next frame)")
 
         # Step 6: Clean up old data
         self.state.cleanup_old_data(frame_context.timestamp)

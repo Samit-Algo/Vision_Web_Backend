@@ -202,6 +202,7 @@ def analyze_sleep_posture(
 
         lying_count = 0
         head_down_still_count = 0
+        slight_tilt_count = 0  # Head slightly tilted (sitting/standing sleep, not necessarily below shoulders)
         head_angles_seen = []
         nose_below_px_seen = []
 
@@ -229,6 +230,10 @@ def analyze_sleep_posture(
                 head_down_this_frame = True
             if head_down_this_frame:
                 head_down_still_count += 1
+            # Slight tilt: head bent slightly down (5° or 5 px) for sitting/standing sleep (face not necessarily to shoulders)
+            slight_tilt_this = (head_angle is not None and head_angle >= 5) or (nose_below_px is not None and nose_below_px >= 5)
+            if slight_tilt_this:
+                slight_tilt_count += 1
 
         motion = _average_motion_px(
             pose_buffer,
@@ -258,6 +263,11 @@ def analyze_sleep_posture(
             possibly_sleeping = True
             reason = "still_person"
             confidence = 0.5
+        elif slight_tilt_count >= 1 and is_still:
+            # Sitting/standing: head slightly tilted down (not necessarily below shoulders), unchanged for frames
+            possibly_sleeping = True
+            reason = "head_slightly_tilted_still"
+            confidence = 0.5
 
         # Debug: log actual values so we can tune thresholds
         avg_head_angle = (sum(head_angles_seen) / len(head_angles_seen)) if head_angles_seen else None
@@ -277,6 +287,7 @@ def analyze_sleep_posture(
                 possibly_sleeping=True,
                 reason=reason,
                 confidence=confidence,
+                is_still=is_still,
                 timestamp=latest.timestamp,
                 frame_index=latest.frame_index,
             )

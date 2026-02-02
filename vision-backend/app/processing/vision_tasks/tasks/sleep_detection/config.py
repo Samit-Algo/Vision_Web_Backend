@@ -29,6 +29,9 @@ class SleepDetectionConfig:
         # Don't call VLM for the same person more than once per this many seconds
         self.vlm_throttle_seconds = float(config.get("vlm_throttle_seconds", 2.0))
 
+        # Wait this many seconds of "possibly sleeping + no movement" before sending frames to VLM (cost-efficient)
+        self.vlm_trigger_still_seconds = float(config.get("vlm_trigger_still_seconds", 5.0))
+
         # Folder where we save the 3 frames before sending to VLM (optional, for debugging)
         self.vlm_frames_dir = config.get("vlm_frames_dir", "sleep_vlm_frames")
 
