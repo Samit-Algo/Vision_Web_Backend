@@ -205,7 +205,9 @@ class ChatWithAgentUseCase:
 
         runner = Runner(app_name=app_name, agent=agent, session_service=self.session_service)
 
-        user_message = self._build_user_message(request=request, session_id=session_id)
+        user_message = self._build_user_message(
+            request=request, session_id=session_id, user_id=user_id
+        )
         user_content = types.Content(role="user", parts=[types.Part(text=user_message)])
 
         try:
@@ -274,7 +276,9 @@ class ChatWithAgentUseCase:
 
         runner = Runner(app_name=app_name, agent=agent, session_service=self.session_service)
 
-        user_message = self._build_user_message(request=request, session_id=session_id)
+        user_message = self._build_user_message(
+            request=request, session_id=session_id, user_id=user_id
+        )
         user_content = types.Content(role="user", parts=[types.Part(text=user_message)])
 
         # Let the client know the session_id immediately so UI can persist it mid-stream
@@ -410,6 +414,18 @@ class ChatWithAgentUseCase:
             agent_state.missing_fields,
             agent_state,  # Pass agent_state for crossing detection logic
         )
+
+        # Do not show zone UI for rules that do not support zones (e.g. sleep_detection).
+        if agent_state.rule_id:
+            from ....agents.tools.kb_utils import get_rule
+            try:
+                rule = get_rule(agent_state.rule_id)
+                zone_support = rule.get("zone_support", {})
+                if zone_support.get("supported", True) is False:
+                    zone_required = False
+                    awaiting_zone_input = False
+            except (ValueError, KeyError):
+                pass
 
         # Generate snapshot URL and zone type if zone drawing is needed.
         # Use camera_id from either session state (tools may key by session_id or adk_session.id).
@@ -596,7 +612,13 @@ class ChatWithAgentUseCase:
                 ChatWithAgentUseCase._shared_agent_cache[cache_key] = agent
             return agent
 
-    def _build_user_message(self, *, request: ChatMessageRequest, session_id: str) -> str:
+    def _build_user_message(
+        self,
+        *,
+        request: ChatMessageRequest,
+        session_id: str,
+        user_id: Optional[str] = None,
+    ) -> str:
         """Build the final user message, merging optional UI-provided fields."""
         user_message = request.message
 
@@ -632,15 +654,16 @@ class ChatWithAgentUseCase:
             else:
                 user_message = user_message + f"\n\nCamera ID: {request.camera_id}"
 
-        # If user typed a camera ID in the message (e.g. CAM-45E4728CD081) but the LLM didn't
+        # If user typed a camera ID or camera name in the message but the LLM didn't
         # call set_field_value_wrapper, persist it here so frame_snapshot_url can be set.
         try:
             from ....agents.session_state.agent_state import get_agent_state
+            from ....agents.tools.camera_selection_tool import resolve_camera as resolve_camera_impl
 
             agent_state = get_agent_state(session_id)
             if agent_state.rule_id and not agent_state.fields.get("camera_id"):
                 raw = (user_message or "").strip()
-                # Match explicit camera ID: whole message or anywhere in message (CAM- + alphanumeric)
+                # 1) Match explicit camera ID: CAM- + alphanumeric
                 cam_match = re.match(r"^CAM-[A-Za-z0-9]+$", raw)
                 if not cam_match:
                     cam_match = re.search(r"CAM-[A-Za-z0-9]+", raw)
@@ -648,6 +671,35 @@ class ChatWithAgentUseCase:
                     agent_state.fields["camera_id"] = cam_match.group(0)
                     if "camera_id" in agent_state.missing_fields:
                         agent_state.missing_fields.remove("camera_id")
+                else:
+                    # 2) Try resolving as camera name (e.g. "Test", "Camera Id : Test", "Front Gate")
+                    candidate = None
+                    for pattern in (
+                        r"(?i)camera\s*id\s*[:\s]+\s*(\S+(?:\s+\S+)*)",
+                        r"(?i)camera\s*name\s*[:\s]+\s*(\S+(?:\s+\S+)*)",
+                        r"(?i)camera\s*[:\s]+\s*(\S+(?:\s+\S+)*)",
+                    ):
+                        m = re.search(pattern, raw)
+                        if m:
+                            candidate = m.group(1).strip()
+                            break
+                    if not candidate and raw and len(raw) <= 80 and not re.search(r"^\d+$", raw):
+                        candidate = raw.strip()
+                    if candidate and user_id:
+                        result = resolve_camera_impl(
+                            name_or_id=candidate,
+                            user_id=user_id,
+                            session_id=session_id,
+                        )
+                        if result.get("status") == "exact_match" and result.get("camera_id"):
+                            agent_state.fields["camera_id"] = result["camera_id"]
+                            if "camera_id" in agent_state.missing_fields:
+                                agent_state.missing_fields.remove("camera_id")
+                            logger.info(
+                                "[chat] Resolved camera name %r to camera_id=%s",
+                                candidate,
+                                result["camera_id"],
+                            )
         except Exception:
             pass
 

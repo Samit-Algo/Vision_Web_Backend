@@ -342,6 +342,94 @@
       },
 
       {
+        "rule_id": "sleep_detection",
+        "rule_name": "Sleep Detection",
+        "description": "Triggers when a person near a machine or in the camera view is detected sleeping (lying down or standing/nodding off). Uses pose keypoints (torso angle, head position, motion) to flag possible sleep, then sends 3 frames to a Vision Language Model (VLM) to confirm before alerting. Works when eyes are not clearly visible (e.g. blurry or distant).",
+
+        "intent_examples": [
+          "Alert me if someone is sleeping near the machine",
+          "Notify when a person is sleeping on the floor",
+          "Detect if a worker is sleeping or nodding off",
+          "Alert if someone is lying down asleep",
+          "Tell me when a person is sleeping standing",
+          "Monitor for sleeping persons",
+          "Sleep detection near equipment",
+          "Alert on sleeping worker"
+        ],
+
+        "model": "yolov8n-pose.pt",
+
+        "detectable_classes": [
+          "person"
+        ],
+
+        "required_fields_from_user": [],
+
+        "time_window": {
+          "supported": true,
+          "required": true
+        },
+
+        "zone_support": {
+          "supported": false,
+          "required": false
+        },
+
+        "execution_modes": {
+          "continuous": {
+            "description": "Continuously monitors for sleeping persons",
+            "required_fields": [],
+            "forbidden_fields": [
+              "interval_minutes",
+              "check_duration_seconds"
+            ],
+            "zone_required": false
+          },
+
+          "patrol": {
+            "description": "Checks periodically for sleeping persons",
+            "required_fields": [
+              "interval_minutes",
+              "check_duration_seconds"
+            ],
+            "zone_required": false
+          }
+        },
+
+        "rules_config_fields": [
+          "buffer_size",
+          "temporal_consistency_frames",
+          "vlm_confidence_threshold",
+          "vlm_throttle_seconds",
+          "vlm_trigger_still_seconds",
+          "vlm_frames_dir",
+          "kp_confidence_threshold",
+          "torso_angle_lying_deg",
+          "head_down_angle_deg",
+          "min_nose_below_shoulder_px",
+          "head_down_majority_ratio",
+          "motion_threshold_px"
+        ],
+
+        "defaults": {
+          "fps": 1,
+          "run_mode": "continuous",
+          "buffer_size": 5,
+          "temporal_consistency_frames": 4,
+          "vlm_confidence_threshold": 0.7,
+          "vlm_throttle_seconds": 2,
+          "vlm_trigger_still_seconds": 5,
+          "vlm_frames_dir": "sleep_vlm_frames",
+          "kp_confidence_threshold": 0.0,
+          "torso_angle_lying_deg": 35,
+          "head_down_angle_deg": 25,
+          "min_nose_below_shoulder_px": 10,
+          "head_down_majority_ratio": 0.5,
+          "motion_threshold_px": 25
+        }
+      },
+
+      {
         "rule_id": "class_count",
         "rule_name": "Class Count",
         "description": "Counts objects of a specific class. For crossing detection, user must draw exactly 2 points to create a counting line. The system tracks objects and increments count when the center point of an object crosses the line. Without a line, performs simple per-frame counting.",
@@ -560,6 +648,89 @@
       
           "patrol": {
             "description": "Periodically checks the restricted zone for object presence",
+            "required_fields": [
+              "interval_minutes",
+              "check_duration_seconds"
+            ],
+            "zone_required": true
+          }
+        },
+      
+        "rules_config_fields": [
+          "class",
+          "label",
+          "alert_cooldown_seconds"
+        ],
+      
+        "defaults": {
+          "fps": 2,
+          "confidence": 0.7,
+          "run_mode": "continuous",
+          "alert_cooldown_seconds": 10
+        }
+      },
+
+      {
+        "rule_id": "wall_climb_detection",
+        "rule_name": "Wall Climb Detection",
+        "description": "Detects when a person climbs or goes fully above a wall or fence. User draws a POLYGON (minimum 3 points) around the wall boundary. Orange box = person is climbing (part above wall). Red box = person is fully above the wall; once red, the color stays red. Alerts when someone is fully above the wall, with cooldown.",
+      
+        "intent_examples": [
+          "Alert if someone climbs the wall",
+          "Detect when a person climbs over the fence",
+          "Notify me when someone goes above the wall",
+          "Wall climb detection",
+          "Alert me if any person climbs the wall",
+          "Alert me if any person goes above the wall",
+          "Alert me if any person climbs the fence",
+          "Alert me if any person goes above the fence",
+          "Alert me if any person climbs the boundary",
+          "Alert me if any person goes above the boundary",
+          "Alert me if any person climbs the wall or fence",
+          "Alert me if any person goes above the wall or fence",
+          "Alert if person jumps above the wall",
+          "Monitor for people climbing the boundary"
+        ],
+      
+        "model": "yolov8l.pt",
+      
+        "detectable_classes": [
+          "person"
+        ],
+      
+        "required_fields_from_user": [
+          "class"
+        ],
+      
+        "time_window": {
+          "supported": true,
+          "required": true
+        },
+
+        "zone_support": {
+          "supported": true,
+          "required": true,
+          "zone_type": "polygon",
+          "min_points": 3,
+          "max_points": null,
+          "supports_polygon": true,
+          "supports_line": false,
+          "description": "User must draw a POLYGON with MINIMUM 3 POINTS around the WALL or FENCE (top, sides, bottom). The system detects when a person's bounding box is partly or fully above the wall. Orange = climbing; red = fully above (stays red)."
+        },
+
+        "execution_modes": {
+          "continuous": {
+            "description": "Continuously monitors for wall climbing",
+            "required_fields": [],
+            "forbidden_fields": [
+              "interval_minutes",
+              "check_duration_seconds"
+            ],
+            "zone_required": true
+          },
+      
+          "patrol": {
+            "description": "Periodically checks for wall climbing",
             "required_fields": [
               "interval_minutes",
               "check_duration_seconds"
