@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Dict
 
 from ..session_state.agent_state import AgentState, get_agent_state
+from ..exceptions import ValidationError, StateNotInitializedError, RuleNotFoundError
 from .kb_utils import compute_missing_fields, get_rule
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -21,50 +25,61 @@ def set_field_value(field_values_json: str, session_id: str = "default") -> Dict
 
     Returns:
         Dict with updated_fields, status, and message
+        
+    Raises:
+        ValidationError: If JSON is invalid or field values are invalid
+        StateNotInitializedError: If state is not initialized
+        RuleNotFoundError: If rule is not found
     """
+    logger.debug(f"set_field_value: session={session_id}, json_length={len(field_values_json) if field_values_json else 0}")
+    
+    # Parse JSON
     try:
         field_values = json.loads(field_values_json) if field_values_json else {}
     except json.JSONDecodeError as e:
-        return {
-            "error": f"Invalid JSON in field_values_json: {str(e)}",
-            "updated_fields": [],
-            "status": "COLLECTING",
-            "message": "Failed to parse field values. Please check the format."
-        }
+        logger.error(f"Invalid JSON in field_values_json: {e}")
+        raise ValidationError(
+            f"Invalid JSON in field_values_json: {str(e)}",
+            user_message="Failed to parse field values. Please check the format."
+        )
 
     if not isinstance(field_values, dict):
-        return {
-            "error": "field_values_json must decode to an object/dict",
-            "updated_fields": [],
-            "status": "COLLECTING",
-            "message": "Invalid field values format."
-        }
+        logger.error(f"field_values_json is not a dict: {type(field_values)}")
+        raise ValidationError(
+            "field_values_json must decode to an object/dict",
+            user_message="Invalid field values format."
+        )
 
-    print(f"[set_field_value] Called with session_id={session_id}, field_values_json={field_values_json}")
+    # Get state and validate
     try:
         agent = get_agent_state(session_id)
-        print(f"[set_field_value] Current agent state - status: {agent.status}, rule_id: {agent.rule_id}, missing_fields: {agent.missing_fields}")
 
         if not agent.rule_id:
-            return {
-                "error": "Cannot set fields before rule selection. Call initialize_state first.",
-                "updated_fields": [],
-                "status": "COLLECTING",
-                "message": "Agent state not initialized."
-            }
+            logger.error(f"State not initialized for session {session_id}")
+            raise StateNotInitializedError(
+                "Cannot set fields before rule selection. Call initialize_state first.",
+                user_message="Agent state not initialized."
+            )
 
         rule = get_rule(agent.rule_id)
+        logger.debug(f"Retrieved rule {agent.rule_id} for field update")
 
+        # Set default run_mode if not provided
         if agent.fields.get("run_mode") is None:
             agent.fields["run_mode"] = "continuous"
+            logger.debug("Set default run_mode=continuous")
 
+        # Update fields
         updated_fields = []
         for key, value in field_values.items():
             agent.fields[key] = value
             updated_fields.append(key)
+            logger.debug(f"Updated field: {key}={value}")
 
+        # Update rules field
         _update_rules_field(agent, rule)
 
+        # Auto-generate name if not provided and all fields collected
         if not agent.fields.get("name"):
             compute_missing_fields(agent, rule)
             if not agent.missing_fields:
@@ -75,42 +90,44 @@ def set_field_value(field_values_json: str, session_id: str = "default") -> Dict
                     agent.fields["name"] = f"{class_display} {rule_name} Agent"
                 else:
                     agent.fields["name"] = f"{rule_name} Agent"
+                logger.info(f"Auto-generated agent name: {agent.fields['name']}")
 
+        # Recompute missing fields
         compute_missing_fields(agent, rule)
 
-        print(f"[set_field_value] After updating fields - updated_fields: {updated_fields}, missing_fields: {agent.missing_fields}, current_status: {agent.status}")
-
+        # Update status based on missing fields
         if updated_fields and not agent.missing_fields:
             agent.status = "CONFIRMATION"
-            print(f"[set_field_value] Status changed to CONFIRMATION - all fields collected")
-        elif not updated_fields:
-            print(f"[set_field_value] No fields updated - keeping status: {agent.status}")
-            pass
-        else:
+            logger.info(f"Session {session_id} transitioned to CONFIRMATION")
+        elif updated_fields:
             agent.status = "COLLECTING"
-            print(f"[set_field_value] Status set to COLLECTING - still missing fields: {agent.missing_fields}")
 
-        result = {
+        logger.info(
+            f"Updated {len(updated_fields)} field(s) for session {session_id}: "
+            f"{updated_fields}, status={agent.status}, missing={agent.missing_fields}"
+        )
+
+        return {
             "updated_fields": updated_fields,
             "status": agent.status,
             "message": f"Updated {len(updated_fields)} field(s). Check CURRENT AGENT STATE in instruction for current missing_fields.",
         }
-        print(f"[set_field_value] Returning result: {result}")
-        return result
+        
+    except (ValidationError, StateNotInitializedError, RuleNotFoundError):
+        # Re-raise known errors
+        raise
     except ValueError as e:
-        return {
-            "error": str(e),
-            "updated_fields": [],
-            "status": agent.status if 'agent' in locals() else "COLLECTING",
-            "message": f"Error: {str(e)}"
-        }
+        logger.error(f"ValueError in set_field_value: {e}")
+        raise ValidationError(
+            str(e),
+            user_message=f"Error: {str(e)}"
+        )
     except Exception as e:
-        return {
-            "error": f"Unexpected error: {str(e)}",
-            "updated_fields": [],
-            "status": agent.status if 'agent' in locals() else "COLLECTING",
-            "message": f"An error occurred while updating fields: {str(e)}"
-        }
+        logger.exception(f"Unexpected error in set_field_value for session {session_id}: {e}")
+        raise ValidationError(
+            f"Unexpected error: {str(e)}",
+            user_message=f"An error occurred while updating fields: {str(e)}"
+        )
 
 
 # ============================================================================

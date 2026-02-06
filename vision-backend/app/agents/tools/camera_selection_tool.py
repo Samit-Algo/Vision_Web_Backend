@@ -1,14 +1,27 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 from typing import Any, Dict
 
+from bson.errors import InvalidId as BsonInvalidId
+
 from ...domain.constants.camera_fields import CameraFields
 from ...utils.db import get_collection
+from ..exceptions import (
+    DatabaseError,
+    DatabaseConnectionError,
+    CameraServiceError,
+    ValidationError,
+)
+from ..utils.retry_utils import retry_on_exception, async_retry_on_exception
 from .save_to_db_tool import (
     get_camera_repository as _get_camera_repository_shared,
     set_camera_repository as _set_camera_repository_shared,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -18,7 +31,6 @@ from .save_to_db_tool import (
 def set_camera_repository(repository):
     """Set the camera repository for camera operations."""
     _set_camera_repository_shared(repository)
-    print(f"[camera_selection_tool.set_camera_repository] Camera repository set: {type(repository)}")
 
 
 def _get_camera_repository():
@@ -41,6 +53,7 @@ def _doc_to_camera_item(doc: Dict[str, Any]) -> Dict[str, str]:
 # CAMERA OPERATIONS (sync only – no asyncio, no nest_asyncio)
 # ============================================================================
 
+@retry_on_exception(max_retries=3, initial_delay=0.5)
 def list_cameras(user_id: str, session_id: str = "default") -> Dict[str, Any]:
     """
     List all cameras owned by a user.
@@ -57,26 +70,38 @@ def list_cameras(user_id: str, session_id: str = "default") -> Dict[str, Any]:
                 {"id": "CAM-002", "name": "Warehouse Cam 2"}
             ]
         }
+        
+    Raises:
+        ValidationError: If user_id is invalid
+        DatabaseConnectionError: If database connection fails
+        CameraServiceError: If camera retrieval fails
     """
     if not user_id:
-        return {
-            "error": "user_id is required",
-            "cameras": []
-        }
+        logger.error("list_cameras called without user_id")
+        raise ValidationError(
+            "user_id is required",
+            user_message="User authentication required to list cameras."
+        )
 
     try:
+        logger.debug(f"Listing cameras for user_id={user_id}, session={session_id}")
         coll = _cameras_collection()
         cursor = coll.find({CameraFields.OWNER_USER_ID: user_id})
         cameras = [_doc_to_camera_item(doc) for doc in cursor]
-        print(f"[list_cameras] Found {len(cameras)} cameras for user {user_id}")
+        logger.info(f"Found {len(cameras)} cameras for user_id={user_id}")
         return {"cameras": cameras}
+    except DatabaseConnectionError:
+        # Re-raise to trigger retry
+        raise
     except Exception as e:
-        import traceback
-        print(f"[list_cameras] ERROR: Failed to list cameras for user {user_id}: {str(e)}")
-        print(traceback.format_exc())
-        return {"error": f"Failed to list cameras: {str(e)}", "cameras": []}
+        logger.exception(f"Failed to list cameras for user_id={user_id}: {e}")
+        raise CameraServiceError(
+            f"Failed to retrieve camera list: {str(e)}",
+            user_message="Unable to load cameras. Please try again."
+        )
 
 
+@retry_on_exception(max_retries=3, initial_delay=0.5)
 def resolve_camera(name_or_id: str, user_id: str, session_id: str = "default") -> Dict[str, Any]:
     """
     Resolve a camera by name (partial match) or ID.
@@ -88,11 +113,21 @@ def resolve_camera(name_or_id: str, user_id: str, session_id: str = "default") -
 
     Returns:
         Dict with status: exact_match, multiple_matches, or not_found
+        
+    Raises:
+        ValidationError: If input parameters are invalid
+        DatabaseConnectionError: If database connection fails
+        CameraServiceError: If camera resolution fails
     """
     if not name_or_id or not user_id:
-        return {"status": "not_found", "error": "name_or_id and user_id are required"}
+        logger.error(f"resolve_camera called with invalid params: name_or_id={name_or_id}, user_id={user_id}")
+        raise ValidationError(
+            "name_or_id and user_id are required",
+            user_message="Camera name/ID and user authentication are required."
+        )
 
     try:
+        logger.debug(f"Resolving camera: name_or_id={name_or_id}, user_id={user_id}")
         coll = _cameras_collection()
 
         # Try by ID first only if it looks like ObjectId (24 hex chars)
@@ -102,19 +137,34 @@ def resolve_camera(name_or_id: str, user_id: str, session_id: str = "default") -
                 doc = coll.find_one({CameraFields.MONGO_ID: ObjectId(name_or_id)})
                 if doc and doc.get(CameraFields.OWNER_USER_ID) == user_id:
                     item = _doc_to_camera_item(doc)
-                    print(f"[resolve_camera] Found exact match by ID: {item['id']} ({item['name']})")
+                    logger.info(f"Camera resolved by ObjectId: {item['id']}")
                     return {"status": "exact_match", "camera_id": item["id"], "camera_name": item["name"]}
-            except Exception:
-                pass
+            except BsonInvalidId as e:
+                logger.warning(f"Invalid ObjectId format: {name_or_id}: {e}")
+                # Continue to try other methods
+            except DatabaseConnectionError:
+                # Re-raise to trigger retry
+                raise
+            except Exception as e:
+                logger.warning(f"Error looking up camera by ObjectId: {e}")
+                # Continue to try other methods
 
         # Try by string id field (e.g. CAM-xxx)
         doc = coll.find_one({CameraFields.ID: name_or_id})
         if doc and doc.get(CameraFields.OWNER_USER_ID) == user_id:
             item = _doc_to_camera_item(doc)
-            print(f"[resolve_camera] Found exact match by ID: {item['id']} ({item['name']})")
+            logger.info(f"Camera resolved by ID: {item['id']}")
             return {"status": "exact_match", "camera_id": item["id"], "camera_name": item["name"]}
 
         # Search by name (partial, case-insensitive)
+        # Validate input length to prevent ReDoS
+        if len(name_or_id) > 100:
+            logger.warning(f"Camera name too long: {len(name_or_id)} chars")
+            raise ValidationError(
+                f"Camera name too long: {len(name_or_id)} characters",
+                user_message="Camera name is too long. Please use a shorter search term."
+            )
+        
         escaped = re.escape(name_or_id)
         pattern = re.compile(f".*{escaped}.*", re.I)
         cursor = coll.find({
@@ -124,15 +174,96 @@ def resolve_camera(name_or_id: str, user_id: str, session_id: str = "default") -
         cameras_by_name = [_doc_to_camera_item(doc) for doc in cursor]
 
         if not cameras_by_name:
+            logger.info(f"No cameras found matching: {name_or_id}")
             return {"status": "not_found"}
         if len(cameras_by_name) == 1:
             c = cameras_by_name[0]
-            print(f"[resolve_camera] Found exact match by name: {c['id']} ({c['name']})")
+            logger.info(f"Camera resolved by name: {c['id']}")
             return {"status": "exact_match", "camera_id": c["id"], "camera_name": c["name"]}
-        print(f"[resolve_camera] Found {len(cameras_by_name)} multiple matches")
+        
+        logger.info(f"Multiple cameras found matching: {name_or_id} ({len(cameras_by_name)} matches)")
         return {"status": "multiple_matches", "cameras": cameras_by_name}
+        
+    except (ValidationError, DatabaseConnectionError):
+        # Re-raise validation and connection errors
+        raise
     except Exception as e:
-        import traceback
-        print(f"[resolve_camera] ERROR: Failed to resolve camera '{name_or_id}' for user {user_id}: {str(e)}")
-        print(traceback.format_exc())
-        return {"status": "not_found", "error": str(e)}
+        logger.exception(f"Failed to resolve camera '{name_or_id}': {e}")
+        raise CameraServiceError(
+            f"Failed to resolve camera: {str(e)}",
+            user_message="Unable to find camera. Please try again."
+        )
+
+
+# ============================================================================
+# ASYNC WRAPPERS (non-blocking – run sync DB calls in thread pool)
+# Used by Agent Creation chat to avoid blocking the event loop.
+# ============================================================================
+
+
+async def list_cameras_async(
+    user_id: str, session_id: str = "default"
+) -> Dict[str, Any]:
+    """
+    Non-blocking list of cameras. Runs sync MongoDB in thread pool.
+    
+    Args:
+        user_id: The user ID to list cameras for
+        session_id: Session identifier
+        
+    Returns:
+        Dict with cameras list or error information
+    """
+    try:
+        logger.debug(f"list_cameras_async: user_id={user_id}, session={session_id}")
+        return await asyncio.to_thread(
+            list_cameras, user_id=user_id, session_id=session_id
+        )
+    except ValidationError as e:
+        logger.error(f"Validation error in list_cameras_async: {e}")
+        return {"error": e.user_message, "cameras": []}
+    except (DatabaseConnectionError, CameraServiceError) as e:
+        logger.error(f"Service error in list_cameras_async: {e}")
+        return {"error": e.user_message, "cameras": []}
+    except Exception as e:
+        logger.exception(f"Unexpected error in list_cameras_async: {e}")
+        return {
+            "error": "An unexpected error occurred while listing cameras.",
+            "cameras": []
+        }
+
+
+async def resolve_camera_async(
+    name_or_id: str, user_id: str, session_id: str = "default"
+) -> Dict[str, Any]:
+    """
+    Non-blocking camera resolve. Runs sync MongoDB in thread pool.
+    
+    Args:
+        name_or_id: Camera name or ID to resolve
+        user_id: The user ID to filter cameras by
+        session_id: Session identifier
+        
+    Returns:
+        Dict with resolution status or error information
+    """
+    try:
+        logger.debug(f"resolve_camera_async: name_or_id={name_or_id}, user_id={user_id}")
+        return await asyncio.to_thread(
+            resolve_camera,
+            name_or_id=name_or_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
+    except ValidationError as e:
+        logger.error(f"Validation error in resolve_camera_async: {e}")
+        return {"status": "not_found", "error": e.user_message}
+    except (DatabaseConnectionError, CameraServiceError) as e:
+        logger.error(f"Service error in resolve_camera_async: {e}")
+        return {"status": "not_found", "error": e.user_message}
+    except Exception as e:
+        logger.exception(f"Unexpected error in resolve_camera_async: {e}")
+        return {
+            "status": "not_found",
+            "error": "An unexpected error occurred while resolving camera."
+        }

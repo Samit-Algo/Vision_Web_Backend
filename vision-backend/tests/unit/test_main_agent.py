@@ -2,23 +2,21 @@
 Unit tests for main_agent.py
 """
 import os
-import time
-from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
 
 from app.agents.main_agent import (
-    get_current_time_context,
-    build_instruction_dynamic_with_session,
+    build_dynamic_instruction,
     create_agent_for_session,
-    static_instruction,
+    STATIC_INSTRUCTION,
 )
 from app.agents.session_state.agent_state import get_agent_state, reset_agent_state
+from app.agents.utils.time_context import get_current_time_context, get_short_time_context
 
 
 class TestGetCurrentTimeContext:
-    """Tests for get_current_time_context"""
+    """Tests for get_current_time_context (full format)"""
 
     def test_returns_string(self):
         result = get_current_time_context()
@@ -39,51 +37,52 @@ class TestGetCurrentTimeContext:
         assert "TIME_CONTEXT" in result or "NOW_" in result
 
 
-class TestBuildInstructionDynamicWithSession:
-    """Tests for build_instruction_dynamic_with_session"""
+class TestGetShortTimeContext:
+    """Tests for get_short_time_context (minimal per-turn format)"""
 
-    @pytest.fixture
-    def mock_context(self):
-        ctx = Mock()
-        ctx.state = {}
-        return ctx
+    def test_returns_string(self):
+        result = get_short_time_context()
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+    def test_contains_ist(self):
+        result = get_short_time_context()
+        assert "IST" in result or len(result) > 0
+
+
+class TestBuildDynamicInstruction:
+    """Tests for build_dynamic_instruction (per-turn minimal instruction)"""
 
     def setup_method(self):
         reset_agent_state("test_session_main")
 
-    def test_instruction_for_uninitialized_state(self, mock_context):
-        instruction = build_instruction_dynamic_with_session(
-            mock_context, "test_session_main"
-        )
+    def test_instruction_for_uninitialized_state(self):
+        instruction = build_dynamic_instruction("test_session_main")
         assert isinstance(instruction, str)
         assert len(instruction) > 0
         assert "UNINITIALIZED" in instruction
-        assert "CURRENT_STATE" in instruction or "RULES_CONTEXT" in instruction
+        assert "CURRENT_STATE" in instruction
 
-    def test_instruction_with_collecting_state(self, mock_context):
+    def test_instruction_with_collecting_state(self):
         state = get_agent_state("test_session_main")
         state.rule_id = "class_presence"
         state.status = "COLLECTING"
         state.fields = {"camera_id": "CAM-001", "class": "Van"}
         state.missing_fields = ["zone"]
 
-        instruction = build_instruction_dynamic_with_session(
-            mock_context, "test_session_main"
-        )
+        instruction = build_dynamic_instruction("test_session_main")
         assert "class_presence" in instruction
         assert "COLLECTING" in instruction
         assert "CAM-001" in instruction or "zone" in instruction
 
-    def test_instruction_for_confirmation_state(self, mock_context):
+    def test_instruction_for_confirmation_state(self):
         state = get_agent_state("test_session_main")
         state.rule_id = "class_presence"
         state.status = "CONFIRMATION"
         state.fields = {"camera_id": "CAM-001", "class": "Van", "zone": {"type": "polygon"}}
         state.missing_fields = []
 
-        instruction = build_instruction_dynamic_with_session(
-            mock_context, "test_session_main"
-        )
+        instruction = build_dynamic_instruction("test_session_main")
         assert "CONFIRMATION" in instruction
 
 
@@ -124,17 +123,20 @@ class TestCreateAgentForSession:
         call_kwargs = mock_llm_class.call_args[1]
         assert "static_instruction" in call_kwargs
         assert "instruction" in call_kwargs
-        assert call_kwargs["static_instruction"] == static_instruction
+        assert call_kwargs["static_instruction"] == STATIC_INSTRUCTION
         assert callable(call_kwargs["instruction"])
 
 
 class TestStaticInstruction:
-    """Tests for static_instruction constant"""
+    """Tests for STATIC_INSTRUCTION (cached at startup, includes rules catalog)"""
 
     def test_is_non_empty_string(self):
-        assert isinstance(static_instruction, str)
-        assert len(static_instruction) > 0
+        assert isinstance(STATIC_INSTRUCTION, str)
+        assert len(STATIC_INSTRUCTION) > 0
 
     def test_contains_critical_rules(self):
-        assert "NON-NEGOTIABLE" in static_instruction or "Never" in static_instruction
-        assert "missing_fields" in static_instruction
+        assert "NON-NEGOTIABLE" in STATIC_INSTRUCTION or "Never" in STATIC_INSTRUCTION
+        assert "missing_fields" in STATIC_INSTRUCTION
+
+    def test_contains_rules_catalog(self):
+        assert "RULES_CATALOG_JSON" in STATIC_INSTRUCTION or "rule_id" in STATIC_INSTRUCTION

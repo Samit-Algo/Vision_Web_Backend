@@ -376,13 +376,17 @@ class ChatWithAgentUseCase:
         agent_state_primary = get_agent_state(session_id)
         agent_state_adk = get_agent_state(getattr(adk_session, "id", session_id))
 
+        # Prefer the state that has the most complete data (saved agent or camera_id)
         agent_state = agent_state_primary
         if (not agent_state.saved_agent_id) and agent_state_adk.saved_agent_id:
             agent_state = agent_state_adk
+        elif (not agent_state_primary.fields.get("camera_id")) and agent_state_adk.fields.get("camera_id"):
+            # If primary doesn't have camera_id but ADK does, use ADK state for camera
+            agent_state = agent_state_adk
 
-        # Check if agent was just saved and attach flow diagram data
+        # Check if agent was just saved and attach flow diagram data (only show once)
         flow_diagram_data = None
-        if agent_state.saved_agent_id:
+        if agent_state.saved_agent_id and not agent_state.flow_diagram_shown:
             try:
                 from ....di.container import get_container
 
@@ -404,6 +408,10 @@ class ChatWithAgentUseCase:
 
                     # Add a simple text indicator for user context
                     response_text += "\n\n---\n\n## Processing Flow Diagram\n\n*Your agent's processing flow is shown below.*"
+                    
+                    # Mark diagram as shown to prevent repeated display
+                    agent_state.flow_diagram_shown = True
+                    logger.info(f"[chat] flow diagram shown for agent {agent_state.saved_agent_id}, marked as displayed")
             except Exception:
                 logger.exception("[chat] failed to generate flow diagram")
 
@@ -414,6 +422,24 @@ class ChatWithAgentUseCase:
             agent_state.missing_fields,
             agent_state,  # Pass agent_state for crossing detection logic
         )
+
+        # PRODUCTION ENFORCEMENT: Never show zone UI if camera_id is not set.
+        # This overrides any LLM output and prevents zone editor from appearing prematurely.
+        # Check camera_id in the active agent_state first.
+        camera_id_for_check = agent_state.fields.get("camera_id")
+        if not camera_id_for_check:
+            # Fallback: check the other state
+            other_state = agent_state_adk if agent_state == agent_state_primary else agent_state_primary
+            camera_id_for_check = other_state.fields.get("camera_id")
+        
+        if (awaiting_zone_input or zone_required) and not camera_id_for_check:
+            # Camera not selected yet - force zone UI off regardless of LLM output
+            awaiting_zone_input = False
+            zone_required = False
+            logger.debug(
+                "[chat] Zone UI suppressed: camera_id not in state. missing_fields=%s",
+                agent_state.missing_fields,
+            )
 
         # Do not show zone UI for rules that do not support zones (e.g. sleep_detection).
         if agent_state.rule_id:
@@ -427,39 +453,50 @@ class ChatWithAgentUseCase:
             except (ValueError, KeyError):
                 pass
 
-        # Generate snapshot URL and zone type if zone drawing is needed.
-        # Use camera_id from either session state (tools may key by session_id or adk_session.id).
-        camera_id = (
-            agent_state_primary.fields.get("camera_id")
-            or agent_state_adk.fields.get("camera_id")
-        )
+        # PRODUCTION FIX: Deterministic camera_id resolution for zone editor.
+        # Use the active agent_state (already selected above based on completeness).
+        # This ensures we read camera_id from the same state used for zone logic.
+        camera_id = agent_state.fields.get("camera_id")
+        
+        # Fallback: if active state doesn't have camera_id, check the other state
+        if not camera_id:
+            other_state = agent_state_adk if agent_state == agent_state_primary else agent_state_primary
+            camera_id = other_state.fields.get("camera_id")
+        
         frame_snapshot_url = None
         zone_type = None
         
-        if awaiting_zone_input or zone_required:
-            print(f"[CHAT_RESPONSE] 🎯 Zone UI needed: awaiting_zone_input={awaiting_zone_input}, zone_required={zone_required}")
-            print(f"[CHAT_RESPONSE] 📷 Camera ID from agent_state.fields: {camera_id}")
+        # PRODUCTION RULE: Only show zone UI if camera_id is confirmed in state.
+        # This prevents "zone editor needs camera" errors.
+        if (awaiting_zone_input or zone_required) and camera_id:
+            logger.debug(
+                "[chat] Zone UI triggered: awaiting=%s, required=%s, camera=%s",
+                awaiting_zone_input,
+                zone_required,
+                camera_id,
+            )
             
-            if camera_id:
-                # Generate snapshot URL for the camera
-                frame_snapshot_url = f"/api/v1/cameras/{camera_id}/snapshot"
-                print(f"[CHAT_RESPONSE] ✅ Frame snapshot URL set: {frame_snapshot_url}")
-                
-                # Determine zone type from rule
-                if agent_state.rule_id:
-                    from ....agents.tools.kb_utils import get_rule
-                    try:
-                        rule = get_rule(agent_state.rule_id)
-                        zone_support = rule.get("zone_support", {})
-                        zone_type = zone_support.get("zone_type", "polygon")  # Default to polygon
-                        print(f"[CHAT_RESPONSE] 📐 Zone type from rule: {zone_type}")
-                    except (ValueError, KeyError):
-                        zone_type = "polygon"  # Default
-                        print(f"[CHAT_RESPONSE] ⚠️  Could not get zone_type from rule, defaulting to polygon")
-            else:
-                print(f"[CHAT_RESPONSE] ⚠️  Camera ID is None - cannot set frame_snapshot_url for zone editor")
-                print(f"[CHAT_RESPONSE] 📋 Agent state fields: {list(agent_state.fields.keys())}")
-                print(f"[CHAT_RESPONSE] 📋 Missing fields: {agent_state.missing_fields}")
+            # Generate snapshot URL for the camera
+            frame_snapshot_url = f"/api/v1/cameras/{camera_id}/snapshot"
+            
+            # Determine zone type from rule
+            if agent_state.rule_id:
+                from ....agents.tools.kb_utils import get_rule
+                try:
+                    rule = get_rule(agent_state.rule_id)
+                    zone_support = rule.get("zone_support", {})
+                    zone_type = zone_support.get("zone_type", "polygon")  # Default to polygon
+                except (ValueError, KeyError):
+                    zone_type = "polygon"  # Default
+        elif (awaiting_zone_input or zone_required) and not camera_id:
+            # Zone needed but camera not yet set - log for debugging
+            logger.warning(
+                "[chat] Zone UI requested but camera_id not in state. "
+                "awaiting=%s, required=%s, missing_fields=%s",
+                awaiting_zone_input,
+                zone_required,
+                agent_state.missing_fields,
+            )
 
         return ChatMessageResponse(
             response=response_text,
