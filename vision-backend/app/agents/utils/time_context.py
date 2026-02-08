@@ -38,3 +38,11 @@ def get_short_time_context() -> str:
     now_utc = datetime.now(UTC)
     now_ist = now_utc.astimezone(IST)
     return now_ist.strftime("%A, %B %d, %Y at %H:%M:%S IST")
+
+
+def get_utc_iso_z() -> str:
+    """
+    Minimal UTC ISO 8601 string for time window formatting.
+    Format: YYYY-MM-DDTHH:MM:SSZ
+    """
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

@@ -3,7 +3,7 @@ import logging
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 
 from dotenv import load_dotenv
 
@@ -212,8 +212,13 @@ _BASE_INSTRUCTION = """
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     TIME WINDOW HANDLING
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    - Interpret all times as IST
-    - Convert internally to UTC ISO-8601 with Z
+    - Interpret all times as IST (India Standard Time, UTC+5:30)
+    - start_time and end_time MUST be full ISO 8601 UTC format: YYYY-MM-DDTHH:MM:SSZ
+    - FORBIDDEN: time-only strings like "05:00", "05:00+05:30" - these will cause save failure
+    - Build full ISO from NOW_UTC_ISO_Z and user intent:
+      - today 04:00 IST → date from NOW_UTC_ISO_Z, time 22:30 UTC (previous day) → YYYY-MM-DDTHH:MM:SSZ
+      - tomorrow 04:00 IST → add 1 day to date, time 22:30 UTC → YYYY-MM-DDTHH:MM:SSZ
+      - IST to UTC: subtract 5h30m (e.g., 04:00 IST = 22:30 UTC previous day)
     - If time window is required:
     - BOTH start time AND end time are mandatory
     - NEVER assume missing values
@@ -303,7 +308,7 @@ def _ensure_groq_api_key() -> str:
     return groq_api_key
 
 
-from .utils.time_context import get_short_time_context
+from .utils.time_context import get_short_time_context, get_utc_iso_z
 
 
 def _compact_rule(rule: dict) -> dict:
@@ -398,10 +403,12 @@ def build_dynamic_instruction(session_id: str) -> str:
             rule_json = json.dumps(_compact_rule(active_rule), separators=(",", ":"), ensure_ascii=False)
             active_rule_block = f"\nACTIVE_RULE_JSON (for current rule {agent_state.rule_id}):\n{rule_json}\n"
 
+    now_utc_iso = get_utc_iso_z()
     return (
         f"CURRENT_STATE_JSON:\n{state_json}\n"
         f"{active_rule_block}"
         f"NOW_IST: {now_line}\n"
+        f"NOW_UTC_ISO_Z: {now_utc_iso}\n"
     )
 
 
@@ -437,9 +444,12 @@ def _create_tool_wrappers(current_session_id: str, current_user_id: Optional[str
                 "message": "Failed to initialize agent state. Please try again."
             }
 
-    def set_field_value_wrapper(field_values_json: str) -> Dict:
-        """Update one or more fields in the agent state."""
+    def set_field_value_wrapper(field_values_json: Union[str, dict]) -> Dict:
+        """Update one or more fields in the agent state. Pass field name -> value as JSON string or object."""
         try:
+            # Groq and other LLMs often pass object instead of string; normalize to string
+            if isinstance(field_values_json, dict):
+                field_values_json = json.dumps(field_values_json)
             return set_field_value_impl(field_values_json=field_values_json, session_id=current_session_id)
         except VisionAgentError as e:
             logger.error(f"set_field_value_wrapper error: {e}")
