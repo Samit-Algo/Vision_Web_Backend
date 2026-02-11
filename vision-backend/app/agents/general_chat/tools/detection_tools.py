@@ -6,17 +6,6 @@ import asyncio
 from datetime import timedelta
 from typing import List, Dict, Any, Optional
 
-
-def _run_sync(coro):
-    """Run coroutine from sync code. Works inside or outside a running event loop."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-    future = asyncio.run_coroutine_threadsafe(coro, loop)
-    return future.result(timeout=30)
-
-
 def get_recent_detections(
     user_id: str, 
     camera_id: str = "", 
@@ -71,7 +60,7 @@ def get_recent_detections(
             
             return events, camera_map
         
-        events, camera_map = _run_sync(_fetch())
+        events, camera_map = asyncio.run(_fetch())
         
         print(f"[Backend Tool Debug] Found {len(events)} total events in repository.")
 
@@ -141,7 +130,7 @@ def get_event_details(user_id: str, event_id: str) -> Dict[str, Any]:
             
             return event, camera
 
-        event, camera = _run_sync(_fetch())
+        event, camera = asyncio.run(_fetch())
 
         if not event:
             print(f"[Backend Tool Debug] Event {event_id} not found.")

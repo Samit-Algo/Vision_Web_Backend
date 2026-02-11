@@ -13,7 +13,17 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # Local application imports
-from .api.v1 import auth_router, camera_router, chat_router, general_chat_router, device_router, notifications_router, streaming_router, events_router
+from .api.v1 import (
+    auth_router,
+    camera_router,
+    chat_router,
+    general_chat_router,
+    device_router,
+    notifications_router,
+    streaming_router,
+    events_router,
+    person_gallery_router,
+)
 from .api.v1.notifications_controller import set_websocket_manager
 from .infrastructure.notifications import WebSocketManager, NotificationService
 from .infrastructure.streaming import WsFmp4Service
@@ -216,7 +226,8 @@ def create_application() -> FastAPI:
     application.include_router(notifications_router, prefix="/api/v1/notifications")
     application.include_router(events_router, prefix="/api/v1/events")
     application.include_router(streaming_router, prefix="/api/v1/streams")
-    
+    application.include_router(person_gallery_router, prefix="/api/v1/person-gallery")
+
     return application
 
 

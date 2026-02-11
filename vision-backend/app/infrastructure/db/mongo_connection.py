@@ -86,3 +86,13 @@ def get_event_collection() -> AsyncIOMotorCollection:
         MongoDB collection for events
     """
     return get_database()["events"]
+
+
+def get_person_gallery_collection() -> AsyncIOMotorCollection:
+    """
+    Get person_gallery collection from MongoDB (reference photos + face embeddings).
+
+    Returns:
+        MongoDB collection for person_gallery
+    """
+    return get_database()["person_gallery"]

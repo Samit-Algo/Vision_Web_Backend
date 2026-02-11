@@ -342,6 +342,9 @@ async def websocket_agent_overlay(websocket: WebSocket, agent_id: str) -> None:
             if line_zone and line_zone not in zones:
                 zones.append(line_zone)
             
+            # Face detection: raw list of {box, name} for UI to draw face boxes/labels
+            face_recognitions = entry.get("face_recognitions") or []
+
             # Get zone violation status from entry
             zone_violated = entry.get("zone_violated", False)
             
@@ -382,6 +385,7 @@ async def websocket_agent_overlay(websocket: WebSocket, agent_id: str) -> None:
                     "keypoints": keypoints,  # For fall_detection/pose UI (skeleton overlay)
                 },
                 "scenario_overlays": scenario_overlays,
+                "face_recognitions": face_recognitions,
                 "zones": zones,
                 "zone": zones[0] if zones else None,
                 "zone_violated": zone_violated,
