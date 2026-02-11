@@ -62,10 +62,10 @@ class FaceDetectionScenario(BaseScenario):
         super().__init__(config, pipeline_context)
         self.config_obj = FaceDetectionConfig(config, pipeline_context.task)
         self._state["last_alert_time"] = None
-        self._state["recognized_faces"] = []  # [{ "box": [x1,y1,x2,y2], "name": "..." }, ...]
-        self._state["last_recognized_faces"] = []  # keep overlay until person leaves frame
+        self._state["recognized_faces"] = []  # [{ "box": [x1,y1,x2,y2], "name": "..." }, ...] - current frame detections only
+        self._state["last_recognized_faces"] = []  # kept for state tracking (not used for overlay)
         self._state["last_recognized_time"] = None  # datetime of last non-empty recognition
-        self._state["consecutive_frames_without_face"] = 0  # clear box only after N frames with no face (person left)
+        self._state["consecutive_frames_without_face"] = 0  # track consecutive frames without face (for state management)
         self._known_encodings: List[List[float]] = []
         self._known_names: List[str] = []
         self._load_gallery()
@@ -134,7 +134,7 @@ class FaceDetectionScenario(BaseScenario):
             self._state["consecutive_frames_without_face"] = 0
         else:
             self._state["consecutive_frames_without_face"] = self._state.get("consecutive_frames_without_face", 0) + 1
-            # After many consecutive frames with no face, person has left — clear overlay
+            # After many consecutive frames with no face, clear saved state (for debugging/logging)
             if self._state["consecutive_frames_without_face"] >= 15:
                 self._state["last_recognized_faces"] = []
                 self._state["last_recognized_time"] = None
@@ -181,19 +181,13 @@ class FaceDetectionScenario(BaseScenario):
             )
         ]
 
-    # Frames to wait with no face before clearing box (person left). At 2 fps, 15 ≈ 7.5 s.
-    CONSECUTIVE_FRAMES_TO_CLEAR = 15
-
     def get_overlay_data(self, frame_context: Optional[ScenarioFrameContext] = None) -> List[Any]:
         """Return boxes and names for recognized faces (for UI overlay).
-        Bounding box stays visible until person leaves: we show last_recognized_faces until
-        CONSECUTIVE_FRAMES_TO_CLEAR frames pass with no face detected (then clear).
+        Box shows ONLY when person is detected in current frame.
+        If no face detected in current frame, no box is shown.
         """
+        # Only use current frame detections - no smoothing or last saved faces
         faces = self._state.get("recognized_faces") or []
-        if not faces and frame_context is not None:
-            consecutive = self._state.get("consecutive_frames_without_face", 0)
-            if consecutive < self.CONSECUTIVE_FRAMES_TO_CLEAR:
-                faces = self._state.get("last_recognized_faces") or []
         out: List[OverlayData] = []
         for f in faces:
             box = f.get("box")
