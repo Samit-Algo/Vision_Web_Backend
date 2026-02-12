@@ -27,22 +27,3 @@ def get_current_time_context() -> str:
         "GUIDELINE: Use these values to interpret 'today', 'yesterday', or specific times. "
         "When calling tools, use the corresponding machine-readable values if required."
     )
-
-
-def get_short_time_context() -> str:
-    """
-    Minimal one-line time context for dynamic (per-turn) instructions.
-    Use for low-token dynamic instruction updates.
-    """
-    IST = timezone("Asia/Kolkata")
-    now_utc = datetime.now(UTC)
-    now_ist = now_utc.astimezone(IST)
-    return now_ist.strftime("%A, %B %d, %Y at %H:%M:%S IST")
-
-
-def get_utc_iso_z() -> str:
-    """
-    Minimal UTC ISO 8601 string for time window formatting.
-    Format: YYYY-MM-DDTHH:MM:SSZ
-    """
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

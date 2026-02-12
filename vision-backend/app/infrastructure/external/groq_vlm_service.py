@@ -27,8 +27,8 @@ class GroqVLMService:
     
     GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
     
-    # Default VLM model
-    DEFAULT_VLM_MODEL = "meta-llama/llama-4-maverick-17b-128e-instruct"
+    # Default model for weapon detection
+    DEFAULT_VLM_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
     
     # Timeout for API calls (seconds)
     API_TIMEOUT = 30.0

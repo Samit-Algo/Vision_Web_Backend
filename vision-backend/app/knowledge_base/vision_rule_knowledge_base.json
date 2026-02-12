@@ -927,6 +927,42 @@
           "confidence_threshold": 0.5,
           "confirm_frames": 2
         }
+      },
+      {
+        "rule_id": "face_detection",
+        "rule_name": "Face / Person Identification",
+        "description": "Alerts when a specific person appears in the camera view. Uses DeepFace (ArcFace) with face embeddings from the Person Gallery (MongoDB). Add people via the Person Gallery first; then create this rule with watch_names (e.g. [\"sachin\"]). Gallery persons must have status \"active\" and embedding_model \"ArcFace\". If you previously used Facenet, re-upload photos so embeddings are ArcFace. Matching uses cosine similarity: tolerance (default 0.55) is the minimum similarity to consider a face a match; it is used as min_similarity when min_similarity/similarity_threshold are not set. Lower tolerance = more lenient matching; typical range 0.5–0.7. Bounding box stays visible until the person leaves the frame (cleared after 15 consecutive frames with no face). No zone required. No YOLO for faces—recognition is embedding-based.",
+        "intent_examples": [
+          "Alert me if sachin appears on camera 1",
+          "Notify when John is detected",
+          "Alert if this person appears",
+          "Tell me when sachin is seen",
+          "Alert me if sachin appears"
+        ],
+        "model": "yolov8l.pt",
+        "required_fields_from_user": ["watch_names"],
+        "time_window": { "supported": true, "required": true },
+        "zone_support": { "supported": false, "required": false },
+        "execution_modes": {
+          "continuous": {
+            "description": "Continuously monitors for the specified person(s)",
+            "required_fields": [],
+            "forbidden_fields": ["interval_minutes", "check_duration_seconds"],
+            "zone_required": false
+          },
+          "patrol": {
+            "description": "Checks periodically for the person",
+            "required_fields": ["interval_minutes", "check_duration_seconds"],
+            "zone_required": false
+          }
+        },
+        "rules_config_fields": ["watch_names", "label", "alert_cooldown_seconds", "tolerance", "min_similarity", "similarity_threshold"],
+        "defaults": {
+          "fps": 2,
+          "run_mode": "continuous",
+          "alert_cooldown_seconds": 10,
+          "tolerance": 0.55
+        }
       }
       
       
