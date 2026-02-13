@@ -10,14 +10,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 
 # Local application imports
-from ...application.dto.camera_dto import CameraCreateRequest, CameraResponse, WebRTCConfig
+from ...application.dto.camera_dto import CameraCreateRequest, CameraResponse
 from ...application.dto.agent_dto import AgentResponse
 from ...application.dto.user_dto import UserResponse
 from ...application.use_cases.camera.create_camera import CreateCameraUseCase
 from ...application.use_cases.camera.list_cameras import ListCamerasUseCase
 from ...application.use_cases.camera.get_camera import GetCameraUseCase
 from ...application.use_cases.agent.list_agents_by_camera import ListAgentsByCameraUseCase
-from ...infrastructure.external.camera_client import CameraClient
 from ...di.container import get_container
 from ...processing.helpers import get_shared_store
 from ...processing.data_input.hub_source import reconstruct_frame
@@ -163,46 +162,6 @@ async def list_agents_by_camera(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error listing agents for camera: {str(e)}"
         )
-
-
-@router.get("/webrtc-config", response_model=WebRTCConfig)
-async def get_webrtc_config(
-    current_user: UserResponse = Depends(get_current_user),
-) -> WebRTCConfig:
-    """
-    Get WebRTC configuration for streaming cameras.
-    
-    This endpoint retrieves the signaling server URL and ICE servers
-    needed for the frontend to establish WebRTC connections with the
-    Jetson backend for live camera streaming.
-    
-    Args:
-        current_user: Current authenticated user (from dependency)
-        
-    Returns:
-        WebRTCConfig with signaling URL, viewer ID, and ICE servers
-        
-    Raises:
-        HTTPException: If Jetson backend is unavailable or user has no cameras
-    """
-    container = get_container()
-    camera_client = container.get(CameraClient)
-    
-    # Get WebRTC configuration from Jetson backend
-    config = await camera_client.get_webrtc_config(current_user.id)
-    
-    if not config:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Jetson backend unavailable or no cameras registered for this user"
-        )
-    
-    # Transform Jetson backend response to our DTO format
-    return WebRTCConfig(
-        signaling_url=config.get("signaling_url", ""),
-        viewer_id=f"viewer:{current_user.id}",
-        ice_servers=config.get("ice_servers", [])
-    )
 
 
 async def get_camera_for_user(

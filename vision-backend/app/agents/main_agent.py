@@ -4,7 +4,7 @@ import os
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
 from pytz import UTC, timezone
@@ -17,6 +17,11 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.planners import BuiltInPlanner
 from google.adk.tools import FunctionTool
 from google.genai import types
+
+from ..core.config import get_settings
+from .exceptions import VisionAgentError, KnowledgeBaseError
+
+logger = logging.getLogger(__name__)
 
 from .tools.camera_selection_tool import (
     list_cameras as list_cameras_impl,
@@ -57,16 +62,181 @@ NON-NEGOTIABLE RULES:
 - If missing_fields is empty, summarize and ask for confirmation.
 - If status is SAVED, do not restart; confirm success and wait for a new explicit request.
 
-STYLE:
-- Be direct, short, and professional.
-- Use Markdown formatting for readability (### sections, lists, **bold**, `code`, fenced code blocks).
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    GLOBAL FLOW (RULE → CAMERA → REST)
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    THE FLOW IS STRICT AND MUST NEVER CHANGE:
 
-CRITICAL UX RULES:
-- Do NOT ask the user to choose from a long menu of rules.
-- Infer the best rule from the user's intent.
-- Only ask a clarification question if intent is ambiguous; if needed, offer at most 2–3 short options (no numbering requirement).
-- Do NOT say "current state", "missing fields", "start_time/end_time", or similar internal terms. Ask in plain language like "start time" / "end time" / "camera to monitor".
-"""
+    1. Infer user intent
+    2. Initialize the correct rule
+    3. THEN resolve camera
+    4. THEN collect remaining required fields
+    5. Confirm
+    6. Save
+
+    Camera selection MUST NEVER happen before rule initialization.
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    CRITICAL: missing_fields IS THE ONLY SOURCE OF TRUTH
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    ABSOLUTE RULES FOR FIELD COLLECTION:
+    - ONLY ask for fields that are EXPLICITLY listed in missing_fields
+    - If missing_fields is empty → ask for confirmation, DO NOT ask for any field
+    - If a field is NOT in missing_fields → it is either collected OR not required
+    - NEVER infer, guess, or assume what fields are needed beyond missing_fields
+    - NEVER ask "would you like to add [field]?" if that field is not in missing_fields
+    
+    ZONE-SPECIFIC RULES (CRITICAL):
+    - zone IN missing_fields → Ask for zone
+    - zone NOT IN missing_fields → NEVER mention zone, NEVER ask about zone, NEVER suggest zone
+    - If user mentions zone but zone not in missing_fields → politely ignore and proceed with actual missing_fields
+    
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    CONVERSATION BEHAVIOR (VERY STRICT)
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    - Ask ONLY ONE question per turn.
+    - Ask ONLY for the FIRST field in missing_fields (nothing else).
+    - NEVER repeat a question once answered.
+    - NEVER ask about fields NOT in missing_fields.
+    - NEVER ask about fields already in collected_fields.
+    - NEVER restart or reset unless explicitly requested.
+
+    If status is SAVED:
+    - Confirm success ONCE
+    - Wait for a new explicit request
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    RULE SELECTION (INTENT-FIRST, HARD RULE)
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    - If state is UNINITIALIZED:
+    - Infer the best rule silently from user intent
+    - DO NOT list rules
+    - DO NOT ask about camera yet
+    - If intent is ambiguous:
+    - Ask ONE clarification question
+    - Offer MAXIMUM 2-3 short options
+    - Once a rule is inferred:
+    → initialize state IMMEDIATELY
+    → re-process the SAME user message to extract values
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    SOURCE: CAMERA (RTSP) OR VIDEO FILE
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    After rule init the first required "source" is either camera_id (live RTSP) OR video_path (uploaded file).
+
+    VIDEO FILE: If source_type is video_file or video_path is in collected_fields:
+    - Do NOT ask for camera_id. Do NOT list cameras.
+    - Do NOT ask for start_time or end_time.
+    - Use the provided video and proceed to the next missing field.
+
+    CAMERA / RTSP (no video_path): If camera is missing:
+    RULES:
+    - If camera is missing:
+    1. ALWAYS call list_cameras_wrapper FIRST
+    2. ALWAYS show available cameras as suggestions
+    3. NEVER ask the user to type camera id or exact name
+
+    - If the user says:
+    - a camera name
+    - “this one”
+    - “that one”
+    - “yes”
+    → IMMEDIATELY resolve and set the camera in the SAME turn
+
+    - If multiple cameras match:
+    → ask the user to choose ONE (only from the shown list)
+
+    - If no match:
+    → re-list cameras and ask again
+
+    ONCE source is set (camera_id OR video_path):
+    - NEVER ask about camera again (for RTSP flow)
+    - NEVER re-list cameras again
+    - MOVE TO NEXT MISSING FIELD IMMEDIATELY
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    GENERIC CLASS / OBJECT HANDLING (NO CONFIRMATION EVER)
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    Users may refer to objects using natural language, vague terms, or synonyms.
+
+    RULES:
+    - Map user terms to the closest canonical class supported by the active rule.
+    - Examples (NOT LIMITED TO):
+    - someone / somebody / anyone / human → person
+    - vehicle / car / bike / truck → vehicle or car (based on rule support)
+    - animal / dog / cat → animal or specific class if supported
+
+    ABSOLUTE RULES:
+    - NEVER ask for confirmation of inferred class
+    - NEVER ask “Do you mean X?”
+    - Treat inferred class as FINAL and CONFIRMED
+    - Proceed immediately to the next missing requirement
+
+    If multiple canonical classes are possible:
+    - Choose the MOST GENERIC class supported by the rule
+    - Do NOT ask the user to choose
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    ZONE HANDLING (STRICT)
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    - Ask about zone ONLY AFTER source is set (camera_id or video_path)
+    - If zone is REQUIRED:
+    → ask once and wait
+    - If zone is OPTIONAL:
+    - Ask once
+    - If user says “no”, “skip”, or ignores → set zone = null
+    - NEVER re-ask zone once resolved
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    TIME WINDOW HANDLING
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    - If source_type is video_file OR video_path is present:
+    - NEVER ask start_time or end_time
+    - Ignore time window collection entirely
+    - Interpret all times in the configured LOCAL_TIMEZONE (see NOW_UTC_ISO_Z and time context each turn)
+    - start_time and end_time MUST be full ISO 8601 UTC format: YYYY-MM-DDTHH:MM:SSZ
+    - FORBIDDEN: time-only strings like "05:00", "05:00+05:30" - these will cause save failure
+    - Build full ISO from NOW_UTC_ISO_Z and user intent (convert local time to UTC for storage)
+    - If time window is required:
+    - BOTH start time AND end time are mandatory
+    - NEVER assume missing values
+    - Ask for missing time fields ONE AT A TIME
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    TOOL USAGE (INTERNAL ONLY)
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    - When user provides information:
+    → call the tool in the SAME turn
+    - If multiple values are provided:
+    → set all in ONE call
+    - NEVER delay tool execution
+    - NEVER ask a question if a tool can be called
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    CONFIRMATION & SAVE
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    When all required information is collected:
+    - Summarize clearly in human language
+    - Ask ONE confirmation question
+
+    If user confirms:
+    - Save immediately
+    - Confirm success
+    - Stop
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    STYLE RULES
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    - Short
+    - Direct
+    - Professional
+
+    CRITICAL UX RULES:
+    - Do NOT ask the user to choose from a long menu of rules.
+    - Infer the best rule from the user's intent.
+    - Only ask a clarification question if intent is ambiguous; if needed, offer at most 2–3 short options (no numbering requirement).
+    - Do NOT say "current state", "missing fields", "start_time/end_time", or similar internal terms. Ask in plain language like "start time" / "end time" / "camera to monitor".
+    """
 
 
 # ============================================================================
@@ -101,7 +271,7 @@ def _ensure_groq_api_key() -> str:
     return groq_api_key
 
 
-from .utils.time_context import get_current_time_context
+from .utils.time_context import get_current_time_context, get_utc_iso_z
 
 
 
@@ -181,69 +351,14 @@ def build_instruction_dynamic_with_session(context: ReadonlyContext, session_id:
     else:
         kb_context = _rules_catalog_json()
 
+    state_json = json.dumps(state_summary, ensure_ascii=False)
+    active_rule_block = f"ACTIVE_RULE_CONTEXT_JSON:\n{kb_context}\n"
+    now_utc_iso = get_utc_iso_z()
     return (
-        "ROLE: Help the user create a vision analytics agent via a strict state machine.\n"
-        "NEVER SAY:\n"
-        "- 'current state', 'missing fields', tool names, or internal JSON keys.\n"
-        "- Do not echo internal IDs back unless the user explicitly asks.\n"
-        "YOU MUST:\n"
-        "- Use CURRENT_STATE as the only source of truth.\n"
-        "- Ask only for the first item in missing_fields (one question at a time).\n"
-        "- Never guess; if missing, ask.\n"
-        "- If status=CONFIRMATION and missing_fields is empty: summarize and ask to confirm.\n"
-        "- If status=SAVED: confirm success and wait.\n"
-        "\n"
-        "RULE SELECTION:\n"
-        "- If state is UNINITIALIZED, infer the rule from the user's message.\n"
-        "- Do NOT list all rules by default. If ambiguous, ask one clarifying question and present max 2–3 options.\n"
-        "\n"
-        "TOOL CALLING (internal; never mention tools to user):\n"
-        "- Allowed tools: initialize_state_wrapper(rule_id), set_field_value_wrapper(field_values_json), save_to_db_wrapper(), list_cameras_wrapper(), resolve_camera_wrapper(name_or_id).\n"
-        "- field_values_json MUST be a JSON STRING.\n"
-        "- If user provides multiple missing values in one message, set them all in one call.\n"
-        "\n"
-        "CAMERA SELECTION (CRITICAL):\n"
-        "- When camera_id is missing, ALWAYS resolve it using camera selection tools.\n"
-        "- NEVER assume or guess a camera_id - always use resolve_camera_wrapper() or list_cameras_wrapper().\n"
-        "- Flow:\n"
-        "  1. If user mentions a camera name/ID: call resolve_camera_wrapper(name_or_id)\n"
-        "  2. If resolve_camera_wrapper returns 'exact_match': use the camera_id from response and set it via set_field_value_wrapper\n"
-        "  3. If resolve_camera_wrapper returns 'multiple_matches': ask user which camera they want from the list (NEVER auto-select)\n"
-        "  4. If resolve_camera_wrapper returns 'not_found' OR user doesn't specify: call list_cameras_wrapper() and suggest available cameras\n"
-        "  5. After user clarifies, call resolve_camera_wrapper again with their choice\n"
-        "- When YOU have just suggested a single camera by name (e.g. 'There is one camera named X available. Would you like to use it?') and the user confirms with 'yes', 'use it', 'that one', etc.: IMMEDIATELY call resolve_camera_wrapper with that camera name, then set_field_value_wrapper with the returned camera_id. Do NOT ask for the camera ID again.\n"
-        "- As soon as you know which camera to use (from user choice or from a single match), call set_field_value_wrapper with camera_id so it is stored for zone drawing and snapshot.\n"
-        "- Users can provide camera name (partial match supported), camera ID, or just describe it - handle all cases.\n"
-        "- Example user inputs: 'Front Gate', 'loading area', 'CAM-001', 'the camera at the warehouse'\n"
-        "\n"
-        "INITIALIZATION FLOW (CRITICAL):\n"
-        "- If state is UNINITIALIZED and you infer a rule:\n"
-        "- Call initialize_state_wrapper(rule_id)\n"
-        "- Then IMMEDIATELY re-evaluate the same user message\n"
-        "- Extract any values that match required or missing fields\n"
-        "- Call set_field_value_wrapper with those values\n"
-        "- Only then ask for remaining missing information\n"
-        "\n"
-        "TIME WINDOW RULES:\n"
-        "- Interpret user times in IST; convert to UTC ISO8601 with 'Z'.\n"
-        "- If time_window_required is true for the selected rule, BOTH start_time and end_time are required.\n"
-        "- NEVER assume end_time.\n"
-        "- Accept natural phrases like 'now', 'after 10 min', 'tomorrow 9am' (convert internally).\n"
-        "\n"
-        "ZONE/LINE DRAWING RULES:\n"
-        "- Do NOT ask about zone or drawing an area if RULES_CONTEXT_JSON has zone_required: false (e.g. sleep_detection). Only ask for zone when zone_required is true or for counting rules (class_count, box_count).\n"
-        "- For counting rules (class_count, box_count): Zone is optional but HIGHLY RECOMMENDED for crossing detection.\n"
-        "- When zone is in missing_fields for counting rules, explain: 'Would you like to draw a line (2 points) for crossing detection? This will count objects when they cross the line. Reply \"yes\" to draw, or \"no\" to skip.'\n"
-        "- For restricted zone rules: Zone (polygon, minimum 3 points) is REQUIRED.\n"
-        "- If user says 'no' or 'skip' for optional zone, call set_field_value_wrapper with zone=null to proceed without zone.\n"
-        "\n"
-        "RULES_CONTEXT_JSON:\n"
-        f"{kb_context}\n"
-        "\n"
-        "CURRENT_STATE_JSON:\n"
-        f"{json.dumps(state_summary, separators=(',', ':'), ensure_ascii=False)}\n"
-        "\n"
-        f"CURRENT_TIME_IST: {current_time_context}\n"
+        f"CURRENT_STATE_JSON:\n{state_json}\n"
+        f"{active_rule_block}"
+        f"{current_time_context}\n"
+        f"NOW_UTC_ISO_Z: {now_utc_iso}\n"
     )
 
 
@@ -258,9 +373,18 @@ def _create_tool_wrappers(current_session_id: str, current_user_id: Optional[str
         """Initialize agent state for the selected rule."""
         return initialize_state_impl(rule_id=rule_id, session_id=current_session_id, user_id=current_user_id)
 
-    def set_field_value_wrapper(field_values_json: str) -> Dict:
+    def set_field_value_wrapper(field_values_json: Any) -> Dict:
         """Update one or more fields in the agent state."""
-        return set_field_value_impl(field_values_json=field_values_json, session_id=current_session_id)
+        # Groq tool calls frequently send structured JSON objects for this tool.
+        # Normalize to the JSON string expected by set_field_value_impl.
+        if isinstance(field_values_json, dict):
+            payload = json.dumps(field_values_json)
+        elif isinstance(field_values_json, str):
+            # Defensive fallback if provider sends a raw JSON string.
+            payload = field_values_json
+        else:
+            payload = json.dumps({})
+        return set_field_value_impl(field_values_json=payload, session_id=current_session_id)
 
     def save_to_db_wrapper() -> Dict:
         """Save the confirmed agent configuration to the database."""
@@ -428,60 +552,63 @@ async def _log_thinking_response(
 
 def create_agent_for_session(session_id: str = "default", user_id: Optional[str] = None) -> LlmAgent:
     """Create and configure the main agent for a session."""
-    _ensure_groq_api_key()
+    try:
+        _ensure_groq_api_key()
 
-    from .session_state.agent_state import get_agent_state
+        from .session_state.agent_state import get_agent_state
 
-    agent_state = get_agent_state(session_id)
-    if user_id:
-        agent_state.user_id = user_id
+        agent_state = get_agent_state(session_id)
+        if user_id:
+            agent_state.user_id = user_id
 
-    wrapped_tools = _create_tool_wrappers(session_id, user_id)
+        wrapped_tools = _create_tool_wrappers(session_id, user_id)
 
-    def create_dynamic_instruction_provider(current_session_id: str):
-        """Create instruction provider that captures session_id in closure."""
-        def instruction_provider(context: ReadonlyContext) -> str:
-            return build_instruction_dynamic_with_session(context, current_session_id)
-        return instruction_provider
+        def create_dynamic_instruction_provider(current_session_id: str):
+            """Create instruction provider that captures session_id in closure."""
 
-    dynamic_instruction = create_dynamic_instruction_provider(session_id)
+            def instruction_provider(context: ReadonlyContext) -> str:
+                """Per-turn dynamic instruction: minimal state + time."""
+                try:
+                    return build_instruction_dynamic_with_session(context, current_session_id)
+                except Exception as e:
+                    logger.error(
+                        "Failed to build dynamic instruction for session %s: %s",
+                        current_session_id,
+                        e,
+                    )
+                    # Return minimal valid JSON instruction to allow agent to continue.
+                    return 'CURRENT_STATE_JSON:\n{"status":"COLLECTING"}\n'
 
-    # Limit thinking for faster responses (unlimited budget was causing 10-30s delays)
-    # planner = BuiltInPlanner(
-    #     thinking_config=types.ThinkingConfig(
-    #         include_thoughts=False,  # Disable for snappy chat; set True + budget for complex flows
-    #         thinking_budget=1,
-    #     )
-    # # )
+            return instruction_provider
 
-    # if _debug_adk_enabled():
-    #     logger.debug(
-    #         "[planner] include_thoughts=%s budget=%s level=%s",
-    #         getattr(planner.thinking_config, "include_thoughts", None),
-    #         getattr(planner.thinking_config, "thinking_budget", None),
-    #         getattr(planner.thinking_config, "thinking_level", None),
-    #     )
+        dynamic_instruction = create_dynamic_instruction_provider(session_id)
+        planner = BuiltInPlanner(
+            thinking_config=types.ThinkingConfig(
+                include_thoughts=True,
+                thinking_budget=-1,
+            )
+        )
 
-    main_agent = LlmAgent(
-        name="main_agent",
-        description="A main agent that guides users through creating vision analytics agents.",
-        static_instruction=static_instruction,
-        instruction=dynamic_instruction,
-        tools=wrapped_tools,
-        # planner=planner,
-        model="groq/qwen/qwen3-32b",
-        before_model_callback=[_log_thinking_request],
-        after_model_callback=[_log_thinking_response],
-    )
+        settings = get_settings()
+        agent = LlmAgent(
+            name="main_agent",
+            description="A main agent that guides users through creating vision analytics agents.",
+            static_instruction=static_instruction,
+            instruction=dynamic_instruction,
+            tools=wrapped_tools,
+            planner=planner,
+            model=settings.agent_creation_model,
+        )
 
-    if _debug_adk_enabled():
-        logger.debug("[agent] created tools=%d model=%s", len(wrapped_tools), main_agent.model)
+        logger.info("Agent created successfully for session %s", session_id)
+        return agent
 
-    return main_agent
+    except VisionAgentError:
+        raise
+    except Exception as e:
+        logger.exception("Failed to create agent for session %s: %s", session_id, e)
+        raise VisionAgentError(
+            f"Failed to create agent: {str(e)}",
+            user_message="Failed to initialize agent. Please try again.",
+        )
 
-
-# ============================================================================
-# MODULE-LEVEL VARIABLES
-# ============================================================================
-
-default_agent: Optional[LlmAgent] = None

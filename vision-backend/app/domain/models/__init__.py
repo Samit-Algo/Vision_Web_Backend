@@ -1,6 +1,6 @@
 from .user import User
 from .camera import Camera
 from .agent import Agent
-from .device import Device
+from .event import Event
 
-__all__ = ["User", "Camera", "Agent", "Device"]
+__all__ = ["User", "Camera", "Agent", "Event"]

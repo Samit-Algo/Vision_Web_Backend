@@ -32,6 +32,12 @@ def initialize_state(rule_id: str, session_id: str = "default", user_id: Optiona
             "message": f"Invalid rule_id: {rule_id}. Please check the knowledge base for available rules."
         }
 
+    # Preserve source_type and video_path if set by request (e.g. "create agent for this video") before reset
+    prev_state = get_agent_state(session_id)
+    preserved_source_type = (prev_state.fields.get("source_type") or "").strip().lower()
+    preserved_video_path = (prev_state.fields.get("video_path") or "").strip()
+
+    # Initialize state
     try:
         agent = reset_agent_state(session_id)
         agent.rule_id = rule_id
@@ -40,6 +46,11 @@ def initialize_state(rule_id: str, session_id: str = "default", user_id: Optiona
         if user_id:
             agent.user_id = user_id
 
+        if preserved_source_type == "video_file" and preserved_video_path:
+            agent.fields["source_type"] = "video_file"
+            agent.fields["video_path"] = preserved_video_path
+
+        # Apply defaults and compute missing fields
         apply_rule_defaults(agent, rule)
         agent.status = "COLLECTING"
 

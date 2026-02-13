@@ -15,12 +15,7 @@ class CameraRepository(ABC):
     async def find_by_owner(self, owner_user_id: str) -> List[Camera]:
         """Find all cameras owned by a user"""
         pass
-    
-    @abstractmethod
-    async def find_by_device(self, device_id: str) -> List[Camera]:
-        """Find all cameras for a device"""
-        pass
-    
+
     @abstractmethod
     async def search_by_name(self, query: str, owner_user_id: str, limit: int = 5) -> List[Camera]:
         """

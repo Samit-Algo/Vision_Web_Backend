@@ -20,7 +20,6 @@ class CameraCreateRequest(BaseModel):
     """DTO for camera creation request"""
     name: str
     stream_url: str
-    device_id: Optional[str] = None
 
 
 class CameraResponse(BaseModel):

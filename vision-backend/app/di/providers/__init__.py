@@ -3,7 +3,6 @@ from .repository_provider import RepositoryProvider
 from .auth_provider import AuthProvider
 from .camera_provider import CameraProvider
 from .chat_provider import ChatProvider
-from .device_provider import DeviceProvider
 from .streaming_provider import StreamingProvider
 from .events_provider import EventsProvider
 from .audio_provider import AudioProvider
@@ -15,7 +14,6 @@ __all__ = [
     "AuthProvider",
     "CameraProvider",
     "ChatProvider",
-    "DeviceProvider",
     "StreamingProvider",
     "EventsProvider",
     "AudioProvider",

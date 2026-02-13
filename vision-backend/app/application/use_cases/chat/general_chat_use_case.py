@@ -1,5 +1,6 @@
 """Use case for general chat with a simple Google ADK agent."""
 import json
+import re
 import uuid
 from typing import Optional, AsyncGenerator, Dict, Any
 from google.adk.runners import Runner
@@ -9,6 +10,36 @@ from google.genai import types
 
 from ...dto.chat_dto import ChatMessageRequest, ChatMessageResponse
 from ....agents.general_chat import create_general_chat_agent
+
+
+_EVENT_IMAGE_URL_RE = re.compile(r"https?://[^\s)]+/api/v1/events/[^\s)]+/image")
+
+
+def _ensure_event_images_markdown(text: str) -> str:
+    """Append deterministic markdown image tags for raw event image URLs."""
+    if not text:
+        return text
+
+    urls = []
+    for url in _EVENT_IMAGE_URL_RE.findall(text):
+        if url not in urls:
+            urls.append(url)
+
+    if not urls:
+        return text
+
+    missing_urls = []
+    for url in urls:
+        if f"![Evidence]({url})" in text:
+            continue
+        if f"]({url})" in text:
+            continue
+        missing_urls.append(url)
+
+    if not missing_urls:
+        return text
+
+    return text + "\n\n" + "\n".join(f"![Evidence]({url})" for url in missing_urls)
 
 
 class GeneralChatUseCase:
@@ -201,8 +232,11 @@ class GeneralChatUseCase:
             # Use final response if available, otherwise use last model response
             response_to_return = final_response_text.strip() if final_response_text.strip() else last_model_response.strip()
             
+            response_to_return = response_to_return if response_to_return else "I apologize, but I didn't receive a proper response."
+            response_to_return = _ensure_event_images_markdown(response_to_return)
+
             return ChatMessageResponse(
-                response=response_to_return if response_to_return else "I apologize, but I didn't receive a proper response.",
+                response=response_to_return,
                 session_id=session_id,
                 status="success"
             )
@@ -381,6 +415,7 @@ class GeneralChatUseCase:
             response_to_return = final_response_text.strip() if final_response_text.strip() else last_model_response.strip()
             if not response_to_return:
                 response_to_return = "I apologize, but I didn't receive a proper response."
+            response_to_return = _ensure_event_images_markdown(response_to_return)
 
             final_response = ChatMessageResponse(
                 response=response_to_return,

@@ -18,7 +18,11 @@ from .api.v1 import (
     camera_router,
     chat_router,
     general_chat_router,
-    device_router,
+    notifications_router,
+    streaming_router,
+    events_router,
+    static_video_analysis_router,
+    video_upload_router,
     notifications_router,
     streaming_router,
     events_router,
@@ -222,10 +226,11 @@ def create_application() -> FastAPI:
     application.include_router(camera_router, prefix="/api/v1/cameras")
     application.include_router(chat_router, prefix="/api/v1/chat")
     application.include_router(general_chat_router, prefix="/api/v1/general-chat")
-    application.include_router(device_router, prefix="/api/v1/devices")
     application.include_router(notifications_router, prefix="/api/v1/notifications")
     application.include_router(events_router, prefix="/api/v1/events")
     application.include_router(streaming_router, prefix="/api/v1/streams")
+    application.include_router(video_upload_router, prefix="/api/v1")
+    application.include_router(static_video_analysis_router, prefix="/api/v1")
     application.include_router(person_gallery_router, prefix="/api/v1/person-gallery")
 
     return application

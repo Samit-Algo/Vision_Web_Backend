@@ -83,12 +83,9 @@ def run_task_worker(task_id: str, shared_store: Optional["Dict[str, Any]"] = Non
         print(f"[worker {task_id}] ❌ No models loaded. Exiting.")
         return
 
-    # Create hub source (RTSP only)
-    camera_id = (task.get("camera_id") or "").strip()
-    
     source = create_source(task, shared_store)
     if source is None:
-        print(f"[worker {task_id}] ⚠️ Could not create RTSP source. Exiting.")
+        print(f"[worker {task_id}] ⚠️ Could not create source (need camera_id for RTSP or video_path for file). Exiting.")
         return
 
     # Create pipeline context

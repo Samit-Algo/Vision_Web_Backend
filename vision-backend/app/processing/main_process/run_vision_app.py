@@ -80,12 +80,14 @@ def main(shared_store=None) -> None:
             }).sort("created_at", 1)
             tasks_list = list(active_task_cursor)
             
-            # Collect camera_ids that have at least one agent runnable NOW.
-            #
-            # Important: ignore tasks that are only "scheduled" for the future, otherwise
-            # we will start the camera stream even when no agent can actually run yet.
+            # Collect camera_ids that have at least one RTSP agent runnable NOW.
+            # Video-file tasks (video_path / source_type video_file) do not need a camera or publisher.
             camera_ids_with_agents = set()
             for task in tasks_list:
+                video_path = (task.get("video_path") or "").strip()
+                source_type = (task.get("source_type") or "").strip().lower()
+                if video_path or source_type == "video_file":
+                    continue
                 camera_id = task.get("camera_id")
                 if not camera_id:
                     continue
@@ -207,22 +209,23 @@ def main(shared_store=None) -> None:
                 if task_id in task_processes and task_processes[task_id].is_alive():
                     continue
 
-                # Support both old (start_at, end_at) and new (start_time, end_time) field names
-                # Handle MongoDB datetime objects (UTC, naive) vs strings
-                start_at_value = task.get("start_time") or task.get("start_at")
-                end_at_value = task.get("end_time") or task.get("end_at")
-                
-                if isinstance(start_at_value, datetime):
-                    # MongoDB datetime objects are UTC (naive), convert to app timezone
-                    start_at = mongo_datetime_to_app_timezone(start_at_value)
-                else:
-                    start_at = parse_iso(start_at_value) if start_at_value else None
-                
-                if isinstance(end_at_value, datetime):
-                    # MongoDB datetime objects are UTC (naive), convert to app timezone
-                    end_at = mongo_datetime_to_app_timezone(end_at_value)
-                else:
-                    end_at = parse_iso(end_at_value) if end_at_value else None
+                # Video file tasks: no start/end time — run until video EOF
+                video_path = (task.get("video_path") or "").strip()
+                source_type = (task.get("source_type") or "").strip().lower()
+                is_video_file = bool(video_path) or source_type == "video_file"
+                start_at = None
+                end_at = None
+                if not is_video_file:
+                    start_at_value = task.get("start_time") or task.get("start_at")
+                    end_at_value = task.get("end_time") or task.get("end_at")
+                    if isinstance(start_at_value, datetime):
+                        start_at = mongo_datetime_to_app_timezone(start_at_value)
+                    else:
+                        start_at = parse_iso(start_at_value) if start_at_value else None
+                    if isinstance(end_at_value, datetime):
+                        end_at = mongo_datetime_to_app_timezone(end_at_value)
+                    else:
+                        end_at = parse_iso(end_at_value) if end_at_value else None
 
                 # Handle "scheduled" tasks (future start time)
                 if start_at and current_time < start_at:

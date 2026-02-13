@@ -13,10 +13,13 @@ All tools should import from here to ensure consistency.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Dict, List
 
 from ..session_state.agent_state import AgentState
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -25,8 +28,31 @@ from ..session_state.agent_state import AgentState
 
 KB_PATH = Path(__file__).resolve().parent.parent.parent / "knowledge_base" / "vision_rule_knowledge_base.json"
 
-with open(KB_PATH, "r", encoding="utf-8") as f:
-    _KB_RULES: List[Dict] = json.load(f)["rules"]
+_KB_RULES: List[Dict] = []
+
+
+def _load_knowledge_base() -> None:
+    """Load knowledge base with proper error handling. Called at module init."""
+    global _KB_RULES
+    try:
+        if not KB_PATH.exists():
+            raise FileNotFoundError(f"Knowledge base file not found: {KB_PATH}")
+        with open(KB_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        rules = data.get("rules", [])
+        if not rules:
+            raise ValueError("Knowledge base contains no rules")
+        _KB_RULES = rules
+        logger.info(f"Loaded {len(_KB_RULES)} rules from knowledge base")
+    except json.JSONDecodeError as e:
+        logger.critical(f"Failed to parse knowledge base JSON: {e}")
+        raise
+    except Exception as e:
+        logger.critical(f"Failed to load knowledge base: {e}")
+        raise
+
+
+_load_knowledge_base()
 
 
 # ============================================================================
@@ -75,7 +101,12 @@ def compute_missing_fields(agent: AgentState, rule: Dict) -> None:
     for f in rule.get("required_fields_from_user", []) or []:
         add_unique(f)
 
-    add_unique("camera_id")
+    # Source: either camera (RTSP) or video file — not both
+    source_type = (agent.fields.get("source_type") or "").strip().lower()
+    if source_type == "video_file":
+        add_unique("video_path")
+    else:
+        add_unique("camera_id")
 
     zone_support = rule.get("zone_support", {})
     requires_zone = bool(zone_support.get("required", False))
@@ -114,17 +145,21 @@ def compute_missing_fields(agent: AgentState, rule: Dict) -> None:
     for f in execution_required:
         add_unique(f)
 
+    # For video file agents: no start/end time — agent finishes when video ends
     time_window = rule.get("time_window", {})
-    if time_window.get("required", False):
+    if time_window.get("required", False) and source_type != "video_file":
         add_unique("start_time")
         add_unique("end_time")
 
-    # Zone: treat None or empty dict/list as missing; other fields: None only
+    # Zone: treat None or empty dict/list as missing; video_path: None or empty string; others: None only
     missing = []
     for f in ordered_required:
         value = agent.fields.get(f)
         if f == "zone":
             if not value or (isinstance(value, (dict, list)) and not value):
+                missing.append(f)
+        elif f == "video_path":
+            if value is None or (isinstance(value, str) and not value.strip()):
                 missing.append(f)
         else:
             if value is None:

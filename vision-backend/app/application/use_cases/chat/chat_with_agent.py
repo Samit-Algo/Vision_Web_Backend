@@ -3,8 +3,9 @@ import json
 import logging
 import re
 import threading
+import asyncio
 import uuid
-from typing import Optional, List, Tuple, AsyncGenerator, Dict, Any
+from typing import Optional, Tuple, AsyncGenerator, Dict, Any
 
 # External package imports
 from google.adk.agents import LlmAgent
@@ -18,85 +19,30 @@ from ...dto.chat_dto import ChatMessageRequest, ChatMessageResponse
 from ....agents.main_agent import create_agent_for_session
 from ....domain.repositories.agent_repository import AgentRepository
 from ....domain.repositories.camera_repository import CameraRepository
-from ....domain.repositories.device_repository import DeviceRepository
 from ....agents.tools.save_to_db_tool import (
     set_agent_repository,
     set_camera_repository,
-    set_device_repository,
-    set_jetson_client
 )
-from ....infrastructure.external.agent_client import AgentClient
 
 
 logger = logging.getLogger(__name__)
 
 
-def _detect_zone_request(response_text: str, missing_fields: List[str], agent_state=None) -> bool:
-    """
-    Detect if LLM response is asking for zone input.
-    
-    Uses both state (missing_fields) and response text for reliability.
-    
-    Args:
-        response_text: The LLM's response text
-        missing_fields: List of missing fields from agent state
-        agent_state: Optional agent state to check rule context
-        
-    Returns:
-        True if LLM is asking for zone input, False otherwise
-    """
-    # Primary check: zone must be in missing_fields
-    if "zone" not in missing_fields:
-        # Special case: For counting rules with crossing intent, offer zone drawing
-        # even though zone is optional
-        if agent_state and agent_state.rule_id in ["class_count", "box_count"]:
-            # Check if this is a confirmation stage (all required fields collected)
-            from ....agents.tools.kb_utils import get_rule, compute_requires_zone
-            try:
-                rule = get_rule(agent_state.rule_id)
-                run_mode = agent_state.fields.get("run_mode", "continuous")
-                requires_zone = compute_requires_zone(rule, run_mode)
-                zone = agent_state.fields.get("zone")
-                # Check if zone is empty
-                zone_is_empty = not zone or (isinstance(zone, (dict, list)) and not zone)
-                
-                # If zone is optional (not required), check if zone is empty
-                if not requires_zone and zone_is_empty and not missing_fields:
-                    # Check if user intent or response mentions crossing/line drawing
-                    response_lower = response_text.lower()
-                    crossing_keywords = [
-                        "cross", "crossing", "line", "draw", "gate", "door", 
-                        "entrance", "exit", "entry", "boundary"
-                    ]
-                    if any(keyword in response_lower for keyword in crossing_keywords):
-                        # This is crossing detection - should offer zone drawing
-                        return True
-            except (ValueError, KeyError):
-                pass
-        
-        return False
-    
-    # Secondary check: response contains zone-related language
-    zone_keywords = [
-        "zone", "area", "region", "draw", "define", "select",
-        "polygon", "boundary", "outline", "mark", "highlight",
-        "detection zone", "monitoring area", "restricted area",
-        "line", "cross", "crossing"  # Add crossing-related keywords
-    ]
-    
-    response_lower = response_text.lower()
-    return any(keyword in response_lower for keyword in zone_keywords)
+def _sanitize_assistant_text(text: str) -> str:
+    """Remove lightweight wrapper tags that should not be displayed to users."""
+    if not text:
+        return text
+    return re.sub(r"</?question>", "", text, flags=re.IGNORECASE).strip()
 
 
-def _compute_zone_required(agent_state, response_text: str = "") -> bool:
+def _compute_zone_required(agent_state) -> bool:
     """
     Compute if zone is required based on state and knowledge base.
     Deterministic - never manually set.
     
     Args:
         agent_state: The current agent state
-        response_text: Optional response text to infer rule if state not initialized
-        
+
     Returns:
         True if zone is required (requires_zone is True from KB and zone is None/empty)
     """
@@ -151,23 +97,17 @@ class ChatWithAgentUseCase:
         self,
         agent_repository: Optional[AgentRepository] = None,
         camera_repository: Optional[CameraRepository] = None,
-        device_repository: Optional[DeviceRepository] = None,
-        jetson_client: Optional[AgentClient] = None,
     ) -> None:
         # Use shared session service to persist sessions across requests
         if ChatWithAgentUseCase._shared_session_service is None:
             ChatWithAgentUseCase._shared_session_service = InMemorySessionService()
         self.session_service = ChatWithAgentUseCase._shared_session_service
-        
-        # Set up repositories and client for tools if provided
+
+        # Set up repositories for tools if provided
         if agent_repository:
             set_agent_repository(agent_repository)
         if camera_repository:
             set_camera_repository(camera_repository)
-        if device_repository:
-            set_device_repository(device_repository)
-        if jetson_client:
-            set_jetson_client(jetson_client)
     
     async def execute(
         self, 
@@ -184,10 +124,14 @@ class ChatWithAgentUseCase:
         Returns:
             ChatMessageResponse with agent's response
         """
-        # Ensure we have a user_id (required by ADK session service)
+        # user_id is required for agent creation (save_to_db) and camera listing
         if not user_id:
-            user_id = "anonymous"  # Default user ID if not provided
-        
+            from ....agents.exceptions import ValidationError
+            raise ValidationError(
+                "user_id is required for agent creation chat",
+                user_message="Authentication required. Please sign in to create agents."
+            )
+
         # App name for ADK session service
         app_name = "vision-agent-chat"
         
@@ -214,7 +158,7 @@ class ChatWithAgentUseCase:
             final_response_text, last_model_response = await self._run_agent_and_collect_text(
                 runner=runner,
                 user_id=user_id,
-                adk_session_id=adk_session.id,
+                adk_session_id=session_id,
                 user_content=user_content,
             )
 
@@ -226,7 +170,6 @@ class ChatWithAgentUseCase:
                 response_to_return=response_to_return,
                 last_model_response=last_model_response,
                 session_id=session_id,
-                adk_session=adk_session,
                 status="success",
             )
         except Exception as e:
@@ -235,7 +178,6 @@ class ChatWithAgentUseCase:
                 response_to_return="",
                 last_model_response="",
                 session_id=session_id,
-                adk_session=adk_session,
                 status="error",
                 error=e,
             )
@@ -256,7 +198,11 @@ class ChatWithAgentUseCase:
         - {"event": "error", "data": {...}}
         """
         if not user_id:
-            user_id = "anonymous"
+            from ....agents.exceptions import ValidationError
+            raise ValidationError(
+                "user_id is required for agent creation chat",
+                user_message="Authentication required. Please sign in to create agents."
+            )
 
         app_name = "vision-agent-chat"
 
@@ -290,7 +236,7 @@ class ChatWithAgentUseCase:
             async for chunk in self._run_agent_stream(
                 runner=runner,
                 user_id=user_id,
-                adk_session_id=adk_session.id,
+                adk_session_id=session_id,
                 user_content=user_content,
             ):
                 if chunk.get("type") == "token":
@@ -309,7 +255,6 @@ class ChatWithAgentUseCase:
                 response_to_return=response_to_return,
                 last_model_response=last_model_response,
                 session_id=session_id,
-                adk_session=adk_session,
                 status="success",
             )
             yield {"event": "done", "data": final_response.model_dump()}
@@ -319,7 +264,6 @@ class ChatWithAgentUseCase:
                 response_to_return="",
                 last_model_response="",
                 session_id=session_id,
-                adk_session=adk_session,
                 status="error",
                 error=e,
             )
@@ -332,7 +276,6 @@ class ChatWithAgentUseCase:
         response_to_return: str,
         last_model_response: str,
         session_id: str,
-        adk_session: object,
         status: str,
         error: Optional[Exception] = None,
     ) -> ChatMessageResponse:
@@ -343,9 +286,9 @@ class ChatWithAgentUseCase:
                 from ....agents.session_state.agent_state import get_agent_state
 
                 agent_state = get_agent_state(session_id)
-                zone_required = _compute_zone_required(agent_state, "")
-                awaiting_zone_input = False
                 camera_id = agent_state.fields.get("camera_id")
+                zone_required = bool("zone" in agent_state.missing_fields)
+                awaiting_zone_input = bool(zone_required and camera_id)
             except Exception:
                 zone_required = False
                 awaiting_zone_input = False
@@ -365,20 +308,14 @@ class ChatWithAgentUseCase:
 
         # Prefer response_to_return; fall back to last_model_response
         response_text = response_to_return.strip() if response_to_return else last_model_response.strip()
+        response_text = _sanitize_assistant_text(response_text)
         if not response_text:
             response_text = "I apologize, but I didn't receive a proper response."
 
-        # Get current agent state for zone signals / flow diagram.
-        # IMPORTANT: tools store state keyed by our internal session_id, but ADK can also key by adk_session.id.
-        # We defensively check both so flow diagram always attaches after a real save.
+        # Get current internal state only (single source of truth).
         from ....agents.session_state.agent_state import get_agent_state
 
-        agent_state_primary = get_agent_state(session_id)
-        agent_state_adk = get_agent_state(getattr(adk_session, "id", session_id))
-
-        agent_state = agent_state_primary
-        if (not agent_state.saved_agent_id) and agent_state_adk.saved_agent_id:
-            agent_state = agent_state_adk
+        agent_state = get_agent_state(session_id)
 
         # Check if agent was just saved and attach flow diagram data
         flow_diagram_data = None
@@ -407,13 +344,19 @@ class ChatWithAgentUseCase:
             except Exception:
                 logger.exception("[chat] failed to generate flow diagram")
 
-        response_text_for_zone = response_text if response_text else last_model_response
-        zone_required = _compute_zone_required(agent_state, response_text_for_zone)
-        awaiting_zone_input = _detect_zone_request(
-            response_text_for_zone,
-            agent_state.missing_fields,
-            agent_state,  # Pass agent_state for crossing detection logic
-        )
+        # Deterministic camera gating: if camera is still missing in RTSP flow, force a stable prompt.
+        source_type = str(agent_state.fields.get("source_type") or "").strip().lower()
+        video_path = str(agent_state.fields.get("video_path") or "").strip()
+        camera_is_required_now = "camera_id" in (agent_state.missing_fields or [])
+        camera_id = agent_state.fields.get("camera_id")
+        if camera_is_required_now and not camera_id and source_type != "video_file" and not video_path:
+            response_text = await self._build_camera_selection_prompt(
+                session_id=session_id,
+                user_id=agent_state.user_id,
+            )
+
+        zone_required = _compute_zone_required(agent_state)
+        awaiting_zone_input = bool("zone" in (agent_state.missing_fields or []))
 
         # Do not show zone UI for rules that do not support zones (e.g. sleep_detection).
         if agent_state.rule_id:
@@ -427,39 +370,34 @@ class ChatWithAgentUseCase:
             except (ValueError, KeyError):
                 pass
 
-        # Generate snapshot URL and zone type if zone drawing is needed.
-        # Use camera_id from either session state (tools may key by session_id or adk_session.id).
-        camera_id = (
-            agent_state_primary.fields.get("camera_id")
-            or agent_state_adk.fields.get("camera_id")
-        )
+        # Zone UI is only valid after camera selection is confirmed in state.
+        if not camera_id:
+            awaiting_zone_input = False
+            zone_required = False
+
         frame_snapshot_url = None
         zone_type = None
-        
-        if awaiting_zone_input or zone_required:
-            print(f"[CHAT_RESPONSE] 🎯 Zone UI needed: awaiting_zone_input={awaiting_zone_input}, zone_required={zone_required}")
-            print(f"[CHAT_RESPONSE] 📷 Camera ID from agent_state.fields: {camera_id}")
+
+        if (awaiting_zone_input or zone_required) and camera_id:
+            logger.debug(
+                "[chat] Zone UI triggered: awaiting=%s, required=%s, camera=%s",
+                awaiting_zone_input,
+                zone_required,
+                camera_id,
+            )
             
-            if camera_id:
-                # Generate snapshot URL for the camera
-                frame_snapshot_url = f"/api/v1/cameras/{camera_id}/snapshot"
-                print(f"[CHAT_RESPONSE] ✅ Frame snapshot URL set: {frame_snapshot_url}")
-                
-                # Determine zone type from rule
-                if agent_state.rule_id:
-                    from ....agents.tools.kb_utils import get_rule
-                    try:
-                        rule = get_rule(agent_state.rule_id)
-                        zone_support = rule.get("zone_support", {})
-                        zone_type = zone_support.get("zone_type", "polygon")  # Default to polygon
-                        print(f"[CHAT_RESPONSE] 📐 Zone type from rule: {zone_type}")
-                    except (ValueError, KeyError):
-                        zone_type = "polygon"  # Default
-                        print(f"[CHAT_RESPONSE] ⚠️  Could not get zone_type from rule, defaulting to polygon")
-            else:
-                print(f"[CHAT_RESPONSE] ⚠️  Camera ID is None - cannot set frame_snapshot_url for zone editor")
-                print(f"[CHAT_RESPONSE] 📋 Agent state fields: {list(agent_state.fields.keys())}")
-                print(f"[CHAT_RESPONSE] 📋 Missing fields: {agent_state.missing_fields}")
+            # Generate snapshot URL for the camera
+            frame_snapshot_url = f"/api/v1/cameras/{camera_id}/snapshot"
+            
+            # Determine zone type from rule
+            if agent_state.rule_id:
+                from ....agents.tools.kb_utils import get_rule
+                try:
+                    rule = get_rule(agent_state.rule_id)
+                    zone_support = rule.get("zone_support", {})
+                    zone_type = zone_support.get("zone_type", "polygon")  # Default to polygon
+                except (ValueError, KeyError):
+                    zone_type = "polygon"  # Default
 
         return ChatMessageResponse(
             response=response_text,
@@ -472,6 +410,37 @@ class ChatWithAgentUseCase:
             zone_type=zone_type,
             flow_diagram_data=flow_diagram_data,
         )
+
+    async def _build_camera_selection_prompt(self, *, session_id: str, user_id: Optional[str]) -> str:
+        """Build a deterministic camera selection prompt when camera_id is still missing."""
+        if not user_id:
+            return (
+                "Please select a camera before continuing. "
+                "I cannot access your camera list without authentication."
+            )
+
+        try:
+            from ....agents.tools.camera_selection_tool import list_cameras
+
+            # camera_selection_tool currently exposes sync list_cameras().
+            # Run in thread to keep this async path non-blocking.
+            result = await asyncio.to_thread(
+                list_cameras, user_id=user_id, session_id=session_id
+            )
+            cameras = result.get("cameras") or []
+            if not cameras:
+                return "No cameras were found in your account. Please add a camera first, then continue."
+
+            lines = ["Please choose one camera from your account to continue:"]
+            for camera in cameras[:10]:
+                cam_id = camera.get("id", "")
+                cam_name = camera.get("name", "")
+                lines.append(f"- {cam_name} ({cam_id})".strip())
+            lines.append("Reply with one camera name or camera ID from this list.")
+            return "\n".join(lines)
+        except Exception:
+            logger.exception("[chat] failed to build camera selection prompt")
+            return "Please provide a camera name or camera ID from your account to continue."
 
     async def _run_agent_stream(
         self,
@@ -653,6 +622,22 @@ class ChatWithAgentUseCase:
                     agent_state.missing_fields.remove("camera_id")
             else:
                 user_message = user_message + f"\n\nCamera ID: {request.camera_id}"
+
+        if request.video_path:
+            from ....agents.session_state.agent_state import get_agent_state
+            from ....agents.tools.kb_utils import compute_missing_fields, get_rule
+
+            agent_state = get_agent_state(session_id)
+            agent_state.fields["source_type"] = "video_file"
+            agent_state.fields["video_path"] = (request.video_path or "").strip()
+            if agent_state.rule_id:
+                try:
+                    rule = get_rule(agent_state.rule_id)
+                    compute_missing_fields(agent_state, rule)
+                except Exception:
+                    pass
+            if not user_message.strip().endswith("(video)"):
+                user_message = (user_message or "").strip() + "\n\n(Using uploaded video file for this agent.)"
 
         # If user typed a camera ID or camera name in the message but the LLM didn't
         # call set_field_value_wrapper, persist it here so frame_snapshot_url can be set.

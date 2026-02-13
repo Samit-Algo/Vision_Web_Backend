@@ -1,6 +1,6 @@
 from .user_repository import UserRepository
 from .camera_repository import CameraRepository
 from .agent_repository import AgentRepository
-from .device_repository import DeviceRepository
+from .event_repository import EventRepository
 
-__all__ = ["UserRepository", "CameraRepository", "AgentRepository", "DeviceRepository"]
+__all__ = ["UserRepository", "CameraRepository", "AgentRepository", "EventRepository"]
