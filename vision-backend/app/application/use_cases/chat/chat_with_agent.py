@@ -316,9 +316,9 @@ class ChatWithAgentUseCase:
 
         agent_state = get_agent_state(session_id)
 
-        # Check if agent was just saved and attach flow diagram data (only show once)
+        # Check if agent was just saved and attach flow diagram data
         flow_diagram_data = None
-        if agent_state.saved_agent_id and not agent_state.flow_diagram_shown:
+        if agent_state.saved_agent_id:
             try:
                 from ....di.container import get_container
 
@@ -340,10 +340,6 @@ class ChatWithAgentUseCase:
 
                     # Add a simple text indicator for user context
                     response_text += "\n\n---\n\n## Processing Flow Diagram\n\n*Your agent's processing flow is shown below.*"
-                    
-                    # Mark diagram as shown to prevent repeated display
-                    agent_state.flow_diagram_shown = True
-                    logger.info(f"[chat] flow diagram shown for agent {agent_state.saved_agent_id}, marked as displayed")
             except Exception:
                 logger.exception("[chat] failed to generate flow diagram")
 

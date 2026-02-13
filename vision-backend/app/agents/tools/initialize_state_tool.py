@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-import logging
 from typing import Dict, Optional
 
 from ..session_state.agent_state import get_agent_state, reset_agent_state
-from ..exceptions import ValidationError, RuleNotFoundError, StateError
 from .kb_utils import apply_rule_defaults, compute_missing_fields, get_rule
-
-logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -25,28 +21,16 @@ def initialize_state(rule_id: str, session_id: str = "default", user_id: Optiona
 
     Returns:
         Dict with rule_id, status, and message
-        
-    Raises:
-        ValidationError: If rule_id is invalid
-        RuleNotFoundError: If rule is not found
-        StateError: If state initialization fails
     """
-    if not rule_id:
-        logger.error("initialize_state called without rule_id")
-        raise ValidationError(
-            "rule_id is required",
-            user_message="Rule ID is required to initialize agent."
-        )
-    
-    logger.info(f"Initializing state: rule_id={rule_id}, session={session_id}, user_id={user_id}")
-    
-    # Get rule from knowledge base
     try:
         rule = get_rule(rule_id)
-        logger.debug(f"Retrieved rule: {rule_id}")
     except ValueError as e:
-        logger.error(f"Rule not found: {rule_id}: {e}")
-        raise RuleNotFoundError(rule_id)
+        return {
+            "error": str(e),
+            "rule_id": None,
+            "status": "COLLECTING",
+            "message": f"Invalid rule_id: {rule_id}. Please check the knowledge base for available rules."
+        }
 
     # Preserve source_type and video_path if set by request (e.g. "create agent for this video") before reset
     prev_state = get_agent_state(session_id)
@@ -61,32 +45,26 @@ def initialize_state(rule_id: str, session_id: str = "default", user_id: Optiona
 
         if user_id:
             agent.user_id = user_id
-            logger.debug(f"Set user_id={user_id} for session {session_id}")
 
         if preserved_source_type == "video_file" and preserved_video_path:
             agent.fields["source_type"] = "video_file"
             agent.fields["video_path"] = preserved_video_path
-            logger.debug(f"Preserved video file source for session {session_id}: video_path={preserved_video_path[:50]}...")
 
         # Apply defaults and compute missing fields
         apply_rule_defaults(agent, rule)
         agent.status = "COLLECTING"
-        compute_missing_fields(agent, rule)
 
-        logger.info(
-            f"State initialized: session={session_id}, rule={rule_id}, "
-            f"missing_fields={agent.missing_fields}"
-        )
+        compute_missing_fields(agent, rule)
 
         return {
             "rule_id": agent.rule_id,
             "status": agent.status,
             "message": "Agent state initialized. Check CURRENT AGENT STATE in instruction for missing_fields.",
         }
-        
     except Exception as e:
-        logger.exception(f"Unexpected error initializing state for session {session_id}: {e}")
-        raise StateError(
-            f"Failed to initialize state: {str(e)}",
-            user_message="Failed to initialize agent state. Please try again."
-        )
+        return {
+            "error": f"Unexpected error initializing state: {str(e)}",
+            "rule_id": None,
+            "status": "COLLECTING",
+            "message": f"Failed to initialize agent state: {str(e)}"
+        }

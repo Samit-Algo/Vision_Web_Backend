@@ -141,6 +141,10 @@ class Settings:
         self.static_video_vector_db_dir: Final[str] = os.getenv(
             "STATIC_VIDEO_VECTOR_DB_DIR",
             os.path.join(os.getcwd(), "static_video_chroma_db"),
+        # Person gallery (reference photos for face recognition)
+        self.gallery_dir: Final[str] = os.getenv(
+            "GALLERY_DIR",
+            os.path.join(os.getcwd(), "Gallery")
         ).split("#")[0].strip()
 
 

@@ -1,14 +1,19 @@
 import json
 import logging
 import os
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Dict, Optional
 
 from dotenv import load_dotenv
+from pytz import UTC, timezone
 
 from google.adk.agents import LlmAgent
+from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.readonly_context import ReadonlyContext
+from google.adk.models.llm_request import LlmRequest
+from google.adk.models.llm_response import LlmResponse
 from google.adk.planners import BuiltInPlanner
 from google.adk.tools import FunctionTool
 from google.genai import types
@@ -19,12 +24,19 @@ from .exceptions import VisionAgentError, KnowledgeBaseError
 logger = logging.getLogger(__name__)
 
 from .tools.camera_selection_tool import (
-    list_cameras_async as list_cameras_async_impl,
-    resolve_camera_async as resolve_camera_async_impl,
+    list_cameras as list_cameras_impl,
+    resolve_camera as resolve_camera_impl,
 )
 from .tools.initialize_state_tool import initialize_state as initialize_state_impl
-from .tools.save_to_db_tool import save_to_db_async as save_to_db_async_impl
+from .tools.save_to_db_tool import save_to_db as save_to_db_impl
 from .tools.set_field_value_tool import set_field_value as set_field_value_impl
+
+
+# ============================================================================
+# LOGGING & CONFIGURATION
+# ============================================================================
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -33,63 +45,22 @@ from .tools.set_field_value_tool import set_field_value as set_field_value_impl
 
 KB_PATH = Path(__file__).resolve().parent.parent / "knowledge_base" / "vision_rule_knowledge_base.json"
 
-# Load knowledge base with proper error handling
-try:
-    if not KB_PATH.exists():
-        raise KnowledgeBaseError(
-            f"Knowledge base file not found: {KB_PATH}",
-            user_message="System configuration error: Knowledge base not found."
-        )
-    
-    with open(KB_PATH, "r", encoding="utf-8") as f:
-        _kb_data = json.load(f)
-    
-    rules = _kb_data.get("rules", [])
-    if not rules:
-        raise KnowledgeBaseError(
-            "Knowledge base contains no rules",
-            user_message="System configuration error: No rules available."
-        )
-    
-    _rules_by_id: Dict[str, dict] = {r.get("rule_id"): r for r in rules if r.get("rule_id")}
-    logger.info(f"Loaded {len(_rules_by_id)} rules from knowledge base")
-    
-except json.JSONDecodeError as e:
-    logger.critical(f"Failed to parse knowledge base JSON: {e}")
-    raise KnowledgeBaseError(
-        f"Invalid knowledge base format: {e}",
-        user_message="System configuration error: Knowledge base format is invalid."
-    )
-except KnowledgeBaseError:
-    # Re-raise KnowledgeBaseError
-    raise
-except Exception as e:
-    logger.critical(f"Failed to load knowledge base: {e}")
-    raise KnowledgeBaseError(
-        f"Failed to load knowledge base: {e}",
-        user_message="System configuration error: Unable to load knowledge base."
-    )
+with open(KB_PATH, "r") as f:
+    _kb_data = json.load(f)
 
-_BASE_INSTRUCTION = """
-    YOU ARE A STRICT, DETERMINISTIC VISION AGENT CONFIGURATION ASSISTANT.
+rules = _kb_data.get("rules", [])
+_rules_by_id: Dict[str, dict] = {r.get("rule_id"): r for r in rules if r.get("rule_id")}
 
-    YOUR ONLY JOB:
-    Infer the correct vision rule from user intent, initialize it, then guide the user to complete the configuration using a strict state machine.
+static_instruction = """
+You are the assistant for a Vision Agent Creation system.
 
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    ABSOLUTE SECURITY RULES (NON-NEGOTIABLE)
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    - NEVER reveal:
-    - tool names
-    - internal schemas
-    - rule IDs
-    - internal field names
-    - JSON structures
-    - state names
-    - NEVER describe tools, planners, or internal logic.
-    - NEVER expose CURRENT_STATE_JSON or ACTIVE_RULE_JSON.
-    - NEVER guess values.
-    - NEVER hallucinate cameras, zones, classes, or times.
+NON-NEGOTIABLE RULES:
+- Never reveal internal tooling, internal state, schemas, or implementation details.
+- Never expose rule IDs or internal field names to the user.
+- Never guess values. If something is missing, ask.
+- Ask only for items listed in missing_fields (one at a time).
+- If missing_fields is empty, summarize and ask for confirmation.
+- If status is SAVED, do not restart; confirm success and wait for a new explicit request.
 
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     GLOBAL FLOW (RULE → CAMERA → REST)
@@ -259,63 +230,49 @@ _BASE_INSTRUCTION = """
     - Short
     - Direct
     - Professional
-    """
 
+    CRITICAL UX RULES:
+    - Do NOT ask the user to choose from a long menu of rules.
+    - Infer the best rule from the user's intent.
+    - Only ask a clarification question if intent is ambiguous; if needed, offer at most 2–3 short options (no numbering requirement).
+    - Do NOT say "current state", "missing fields", "start_time/end_time", or similar internal terms. Ask in plain language like "start time" / "end time" / "camera to monitor".
+    """
 
 
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
 
+def _debug_adk_enabled() -> bool:
+    """Check if ADK debug mode is enabled."""
+    return os.getenv("DEBUG_ADK") == "true"
+
+
 @lru_cache(maxsize=1)
 def _load_env() -> None:
-    """
-    Load environment variables once from .env file.
-    
-    Raises:
-        VisionAgentError: If .env file cannot be loaded (non-critical, logs warning)
-    """
+    """Load environment variables once (no stdout prints)."""
     try:
         env_path = Path(__file__).resolve().parent.parent.parent / ".env"
-        if env_path.exists():
-            load_dotenv(env_path)
-            logger.info(f"Loaded environment variables from {env_path}")
-        else:
-            logger.warning(f".env file not found at {env_path}, using system environment variables")
-    except Exception as e:
-        # Non-critical error: log but don't raise
-        # System environment variables will still be used
-        logger.warning(f"Failed to load .env file: {e}. Using system environment variables.")
+        load_dotenv(env_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to load .env: %s", exc)
 
 
 def _ensure_groq_api_key() -> str:
-    """
-    Ensure GROQ_API_KEY is present in environment.
-    
-    Returns:
-        str: The GROQ API key
-        
-    Raises:
-        VisionAgentError: If GROQ_API_KEY is not set
-    """
+    """Ensure GROQ_API_KEY is present; return it."""
     _load_env()
     groq_api_key = os.getenv("GROQ_API_KEY", "")
     if not groq_api_key:
-        error_msg = (
+        raise ValueError(
             "GROQ_API_KEY is not set. Please set it in your .env file or environment variables. "
             "Provider-style models require the API key to be set."
         )
-        logger.error(error_msg)
-        raise VisionAgentError(
-            error_msg,
-            user_message="System configuration error: API key not found. Please contact support."
-        )
     os.environ["GROQ_API_KEY"] = groq_api_key
-    logger.info("GROQ_API_KEY loaded successfully")
     return groq_api_key
 
 
-from .utils.time_context import get_short_time_context, get_utc_iso_z
+from .utils.time_context import get_current_time_context
+
 
 
 def _compact_rule(rule: dict) -> dict:
@@ -348,67 +305,51 @@ def _compact_rule(rule: dict) -> dict:
 
 
 def _rules_catalog_json() -> str:
-    """Compact catalog of all rules for initial selection."""
+    """
+    Compact catalog of all rules for initial selection.
+    This replaces the full KB dump to reduce tokens drastically.
+    """
     catalog = [_compact_rule(r) for r in rules]
     return json.dumps(catalog, separators=(",", ":"), ensure_ascii=False)
 
 
-def _build_static_instruction() -> str:
+# ============================================================================
+# INSTRUCTION BUILDERS
+# ============================================================================
+
+def build_instruction_dynamic_with_session(context: ReadonlyContext, session_id: str) -> str:
     """
-    Build the full static instruction once at startup.
-    Includes: behavioral rules, tool flows, and rules catalog.
-    Cached for the lifetime of the process to avoid recomputing every turn.
-    """
-    rules_catalog = _rules_catalog_json()
-    return (
-        _BASE_INSTRUCTION
-        + "\n\n"
-        f"{rules_catalog}\n"
-    )
-
-
-# Static instruction: built once at startup, sent every turn but never recomputed.
-STATIC_INSTRUCTION = _build_static_instruction()
-
-
-def build_dynamic_instruction(session_id: str) -> str:
-    """
-    Build minimal per-turn dynamic instruction.
-    Called every turn; returns only: active rule (if initialized), state snapshot, one-line time.
-    Keeps token count low for faster LLM response.
+    Dynamic instruction provider that reads state each time it's called.
+    This ensures the instruction always has the latest state, even after tool executions.
+    Uses session_id from closure to read from our internal state store.
     """
     from .session_state.agent_state import get_agent_state
 
+    current_time_context = get_current_time_context()
     agent_state = get_agent_state(session_id)
-    now_line = get_short_time_context()
 
-    # Minimal state snapshot
     if agent_state.status == "SAVED":
-        state = {
+        state_summary = {
             "status": "SAVED",
             "saved_agent_id": agent_state.saved_agent_id,
             "saved_agent_name": agent_state.saved_agent_name,
         }
     elif agent_state.rule_id:
-        collected = {k: v for k, v in agent_state.fields.items() if v is not None}
-        state = {
+        collected_fields = {k: v for k, v in agent_state.fields.items() if v is not None}
+        state_summary = {
             "rule_id": agent_state.rule_id,
             "status": agent_state.status,
-            "collected_fields": collected,
+            "collected_fields": collected_fields,
             "missing_fields": agent_state.missing_fields,
         }
     else:
-        state = {"status": "UNINITIALIZED"}
+        state_summary = {"status": "UNINITIALIZED"}
 
-    state_json = json.dumps(state, separators=(",", ":"), ensure_ascii=False)
-
-    # When initialized: add active rule detail only (not full catalog)
-    active_rule_block = ""
     if agent_state.rule_id:
         active_rule = _rules_by_id.get(agent_state.rule_id)
-        if active_rule:
-            rule_json = json.dumps(_compact_rule(active_rule), separators=(",", ":"), ensure_ascii=False)
-            active_rule_block = f"\nACTIVE_RULE_JSON (for current rule {agent_state.rule_id}):\n{rule_json}\n"
+        kb_context = json.dumps(_compact_rule(active_rule), separators=(",", ":"), ensure_ascii=False)
+    else:
+        kb_context = _rules_catalog_json()
 
     now_utc_iso = get_utc_iso_z()
     tz_name = get_settings().local_timezone or "UTC"
@@ -425,129 +366,58 @@ def build_dynamic_instruction(session_id: str) -> str:
 # ============================================================================
 
 def _create_tool_wrappers(current_session_id: str, current_user_id: Optional[str]):
-    """
-    Create tool wrappers with session context injected and exception handling.
-    
-    All wrappers catch exceptions and return Dict responses that the LLM can understand.
-    """
+    """Create tool wrappers with session context injected."""
 
     def initialize_state_wrapper(rule_id: str) -> Dict:
         """Initialize agent state for the selected rule."""
-        try:
-            return initialize_state_impl(rule_id=rule_id, session_id=current_session_id, user_id=current_user_id)
-        except VisionAgentError as e:
-            logger.error(f"initialize_state_wrapper error: {e}")
-            return {
-                "error": e.message,
-                "rule_id": None,
-                "status": "COLLECTING",
-                "message": e.user_message
-            }
-        except Exception as e:
-            logger.exception(f"Unexpected error in initialize_state_wrapper: {e}")
-            return {
-                "error": f"Unexpected error: {str(e)}",
-                "rule_id": None,
-                "status": "COLLECTING",
-                "message": "Failed to initialize agent state. Please try again."
-            }
+        return initialize_state_impl(rule_id=rule_id, session_id=current_session_id, user_id=current_user_id)
 
-    def set_field_value_wrapper(field_values_json: Union[str, dict]) -> Dict:
-        """Update one or more fields in the agent state. Pass field name -> value as JSON string or object."""
-        try:
-            # Groq and other LLMs often pass object instead of string; normalize to string
-            if isinstance(field_values_json, dict):
-                field_values_json = json.dumps(field_values_json)
-            return set_field_value_impl(field_values_json=field_values_json, session_id=current_session_id)
-        except VisionAgentError as e:
-            logger.error(f"set_field_value_wrapper error: {e}")
-            return {
-                "error": e.message,
-                "updated_fields": [],
-                "status": "COLLECTING",
-                "message": e.user_message
-            }
-        except Exception as e:
-            logger.exception(f"Unexpected error in set_field_value_wrapper: {e}")
-            return {
-                "error": f"Unexpected error: {str(e)}",
-                "updated_fields": [],
-                "status": "COLLECTING",
-                "message": "Failed to update fields. Please try again."
-            }
+    def set_field_value_wrapper(field_values_json: str) -> Dict:
+        """Update one or more fields in the agent state."""
+        return set_field_value_impl(field_values_json=field_values_json, session_id=current_session_id)
 
-    async def save_to_db_wrapper() -> Dict:
-        """Save the confirmed agent configuration to the database (non-blocking)."""
-        try:
-            return await save_to_db_async_impl(
-                session_id=current_session_id, user_id=current_user_id
+    def save_to_db_wrapper() -> Dict:
+        """Save the confirmed agent configuration to the database."""
+        if _debug_adk_enabled():
+            logger.debug(
+                "[save_to_db_wrapper] Called (session_id=%s user_id=%s)",
+                current_session_id,
+                current_user_id,
             )
-        except Exception as e:
-            # save_to_db_async_impl already handles exceptions and returns Dict
-            # This is a safety net
-            logger.exception(f"Unexpected error in save_to_db_wrapper: {e}")
+        result = save_to_db_impl(session_id=current_session_id, user_id=current_user_id)
+        if _debug_adk_enabled():
+            logger.debug("[save_to_db_wrapper] Result: %s", result)
+        return result
+
+    def list_cameras_wrapper() -> Dict:
+        """List all cameras owned by the current user."""
+        from .session_state.agent_state import get_agent_state
+
+        agent_state = get_agent_state(current_session_id)
+        user_id_for_camera = agent_state.user_id or current_user_id
+
+        if not user_id_for_camera:
             return {
-                "error": f"Unexpected error: {str(e)}",
-                "status": "COLLECTING",
-                "saved": False,
-                "message": "Failed to save agent. Please try again."
-            }
-
-    async def list_cameras_wrapper() -> Dict:
-        """List all cameras owned by the current user (non-blocking)."""
-        try:
-            from .session_state.agent_state import get_agent_state
-
-            agent_state = get_agent_state(current_session_id)
-            user_id_for_camera = agent_state.user_id or current_user_id
-
-            if not user_id_for_camera:
-                logger.warning(f"list_cameras_wrapper called without user_id for session {current_session_id}")
-                return {
-                    "error": "user_id is required. Agent state must have user_id set.",
-                    "cameras": [],
-                }
-
-            return await list_cameras_async_impl(
-                user_id=user_id_for_camera, session_id=current_session_id
-            )
-        except Exception as e:
-            # list_cameras_async_impl already handles exceptions and returns Dict
-            # This is a safety net
-            logger.exception(f"Unexpected error in list_cameras_wrapper: {e}")
-            return {
-                "error": "Failed to list cameras. Please try again.",
+                "error": "user_id is required. Agent state must have user_id set.",
                 "cameras": []
             }
 
-    async def resolve_camera_wrapper(name_or_id: str) -> Dict:
-        """Resolve a camera by name (partial match) or ID (non-blocking)."""
-        try:
-            from .session_state.agent_state import get_agent_state
+        return list_cameras_impl(user_id=user_id_for_camera, session_id=current_session_id)
 
-            agent_state = get_agent_state(current_session_id)
-            user_id_for_camera = agent_state.user_id or current_user_id
+    def resolve_camera_wrapper(name_or_id: str) -> Dict:
+        """Resolve a camera by name (partial match) or ID."""
+        from .session_state.agent_state import get_agent_state
 
-            if not user_id_for_camera:
-                logger.warning(f"resolve_camera_wrapper called without user_id for session {current_session_id}")
-                return {
-                    "status": "not_found",
-                    "error": "user_id is required. Agent state must have user_id set.",
-                }
+        agent_state = get_agent_state(current_session_id)
+        user_id_for_camera = agent_state.user_id or current_user_id
 
-            return await resolve_camera_async_impl(
-                name_or_id=name_or_id,
-                user_id=user_id_for_camera,
-                session_id=current_session_id,
-            )
-        except Exception as e:
-            # resolve_camera_async_impl already handles exceptions and returns Dict
-            # This is a safety net
-            logger.exception(f"Unexpected error in resolve_camera_wrapper: {e}")
+        if not user_id_for_camera:
             return {
                 "status": "not_found",
-                "error": "Failed to resolve camera. Please try again."
+                "error": "user_id is required. Agent state must have user_id set."
             }
+
+        return resolve_camera_impl(name_or_id=name_or_id, user_id=user_id_for_camera, session_id=current_session_id)
 
     initialize_state_wrapper.__name__ = "initialize_state_wrapper"
     set_field_value_wrapper.__name__ = "set_field_value_wrapper"
@@ -562,7 +432,108 @@ def _create_tool_wrappers(current_session_id: str, current_user_id: Optional[str
         FunctionTool(list_cameras_wrapper),
         FunctionTool(resolve_camera_wrapper),
     ]
+
+    if _debug_adk_enabled():
+        logger.debug(
+            "[create_tool_wrappers] Created tools: %s",
+            [getattr(tool, "name", "<unknown>") for tool in tools],
+        )
+        for tool in tools:
+            try:
+                decl = tool._get_declaration()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[create_tool_wrappers] Error getting declaration: %s", exc)
+                continue
+            if decl and getattr(tool, "name", None) != getattr(decl, "name", None):
+                logger.warning(
+                    "[create_tool_wrappers] Tool name mismatch: tool.name=%s decl.name=%s",
+                    getattr(tool, "name", None),
+                    getattr(decl, "name", None),
+                )
+
+    if _debug_adk_enabled():
+        logger.debug("[tools] Created %d wrapped tools", len(tools))
+        for tool in tools:
+            try:
+                decl = tool._get_declaration()
+                desc = getattr(decl, "description", None) if decl else None
+                logger.debug(
+                    "[tools] %s (%s) decl.name=%s desc=%s",
+                    getattr(tool, "name", "<unknown>"),
+                    type(tool).__name__,
+                    getattr(decl, "name", None) if decl else None,
+                    (desc[:50] + "...") if isinstance(desc, str) and len(desc) > 50 else desc,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[tools] Error introspecting tool: %s", exc)
+
     return tools
+
+
+# ============================================================================
+# CALLBACKS
+# ============================================================================
+
+async def _log_thinking_request(
+    *, callback_context: CallbackContext, llm_request: LlmRequest
+) -> Optional[LlmResponse]:
+    """Log thinking config before model request (debug only)."""
+    if not _debug_adk_enabled():
+        return None
+
+    tc = None
+    try:
+        tc = llm_request.config.thinking_config if llm_request.config else None
+    except Exception:  # noqa: BLE001
+        tc = None
+
+    logger.debug(
+        "[adk] planning request agent=%s include_thoughts=%s budget=%s level=%s tools=%s",
+        getattr(callback_context, "agent_name", None),
+        getattr(tc, "include_thoughts", None) if tc else None,
+        getattr(tc, "thinking_budget", None) if tc else None,
+        getattr(tc, "thinking_level", None) if tc else None,
+        list(getattr(llm_request, "tools_dict", {}) or {}),
+    )
+    return None
+
+
+async def _log_thinking_response(
+    *, callback_context: CallbackContext, llm_response: LlmResponse
+) -> Optional[LlmResponse]:
+    """Log response metadata (debug only; do not print full content)."""
+    if not _debug_adk_enabled():
+        return None
+
+    parts = []
+    try:
+        parts = list(getattr(getattr(llm_response, "content", None), "parts", []) or [])
+    except Exception:  # noqa: BLE001
+        parts = []
+
+    thought_count = 0
+    tool_call_count = 0
+    text_part_count = 0
+    for part in parts:
+        if getattr(part, "thought", False):
+            thought_count += 1
+        if getattr(part, "function_call", None):
+            tool_call_count += 1
+        if getattr(part, "text", None):
+            text_part_count += 1
+
+    usage = getattr(llm_response, "usage_metadata", None)
+    logger.debug(
+        "[adk] planning response agent=%s thoughts=%d text_parts=%d tool_calls=%d err=%s in_tok=%s out_tok=%s",
+        getattr(callback_context, "agent_name", None),
+        thought_count,
+        text_part_count,
+        tool_call_count,
+        getattr(llm_response, "error_code", None),
+        getattr(usage, "prompt_token_count", None) if usage else None,
+        getattr(usage, "candidates_token_count", None) if usage else None,
+    )
+    return None
 
 
 # ============================================================================
@@ -570,35 +541,19 @@ def _create_tool_wrappers(current_session_id: str, current_user_id: Optional[str
 # ============================================================================
 
 def create_agent_for_session(session_id: str = "default", user_id: Optional[str] = None) -> LlmAgent:
-    """
-    Create and configure the main agent for a session.
-    
-    Args:
-        session_id: Session identifier for state management
-        user_id: Optional user ID to associate with the session
-        
-    Returns:
-        LlmAgent: Configured agent instance
-        
-    Raises:
-        VisionAgentError: If agent creation fails
-    """
-    try:
-        logger.info(f"Creating agent for session_id={session_id}, user_id={user_id}")
-        
-        # Ensure API key is configured
-        _ensure_groq_api_key()
+    """Create and configure the main agent for a session."""
+    _ensure_groq_api_key()
 
-        from .session_state.agent_state import get_agent_state
+    from .session_state.agent_state import get_agent_state
 
-        agent_state = get_agent_state(session_id)
-        if user_id:
-            agent_state.user_id = user_id
-            logger.debug(f"Set user_id={user_id} for session {session_id}")
+    agent_state = get_agent_state(session_id)
+    if user_id:
+        agent_state.user_id = user_id
 
-        wrapped_tools = _create_tool_wrappers(session_id, user_id)
-        logger.debug(f"Created {len(wrapped_tools)} tools for session {session_id}")
+    wrapped_tools = _create_tool_wrappers(session_id, user_id)
 
+    def create_dynamic_instruction_provider(current_session_id: str):
+        """Create instruction provider that captures session_id in closure."""
         def instruction_provider(context: ReadonlyContext) -> str:
             """Per-turn dynamic instruction: minimal state + time."""
             try:
@@ -608,13 +563,7 @@ def create_agent_for_session(session_id: str = "default", user_id: Optional[str]
                 # Return minimal valid JSON instruction to allow agent to continue
                 return 'CURRENT_STATE_JSON:\n{"status": "COLLECTING"}\n'
 
-        # Limit thinking for faster responses (unlimited budget was causing 10-30s delays)
-        planner = BuiltInPlanner(
-            thinking_config=types.ThinkingConfig(
-                include_thoughts=False,  # Disable for snappy chat; set True + budget for complex flows
-                thinking_budget=1,
-            )
-        )
+    dynamic_instruction = create_dynamic_instruction_provider(session_id)
 
         settings = get_settings()
         agent = LlmAgent(

@@ -25,8 +25,6 @@ from ..exceptions import (
 from ..utils.retry_utils import retry_on_exception, async_retry_on_exception
 from .flow_diagram_utils import generate_agent_flow_diagram
 
-logger = logging.getLogger(__name__)
-
 
 
 # ============================================================================
@@ -41,6 +39,7 @@ def set_agent_repository(repository):
     """Set the agent repository for saving agents."""
     global _agent_repository
     _agent_repository = repository
+    print(f"[set_agent_repository] Agent repository set: {type(repository)}")
 
 
 def set_camera_repository(repository):
@@ -121,7 +120,6 @@ def _document_to_agent_sync(document: dict) -> Agent:
     )
 
 
-@retry_on_exception(max_retries=3, initial_delay=1.0)
 def _save_agent_sync(agent: Agent) -> Agent:
     """
     Save agent using sync PyMongo with retry logic.
@@ -188,70 +186,24 @@ def _save_agent_sync(agent: Agent) -> Agent:
                 operation="insert",
                 retryable=False
             )
-        
-        saved_agent = _document_to_agent_sync(doc)
-        logger.info(f"Agent created successfully: {saved_agent.id}")
-        return saved_agent
-        
-    except DatabaseError:
-        # Re-raise DatabaseError
-        raise
-    except Exception as e:
-        logger.exception(f"Failed to save agent: {e}")
-        raise DatabaseError(
-            f"Failed to save agent to database: {str(e)}",
-            operation="save",
-            retryable=True,
-            user_message="Failed to save agent. Please try again."
-        )
+            doc = coll.find_one({AgentFields.MONGO_ID: oid})
+            if doc is None:
+                raise RuntimeError(f"Agent {agent.id} was updated but could not be retrieved")
+            return _document_to_agent_sync(doc)
+        except (InvalidId, ValueError, TypeError):
+            pass
+    if AgentFields.MONGO_ID in agent_dict:
+        del agent_dict[AgentFields.MONGO_ID]
+    result = coll.insert_one(agent_dict)
+    doc = coll.find_one({AgentFields.MONGO_ID: result.inserted_id})
+    if doc is None:
+        raise RuntimeError("Agent was created but could not be retrieved")
+    return _document_to_agent_sync(doc)
 
 
 # ============================================================================
 # AGENT SAVING
 # ============================================================================
-
-
-async def save_to_db_async(
-    session_id: str = "default", user_id: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Non-blocking save. Runs sync save_to_db in thread pool.
-    Used by Agent Creation chat to avoid blocking the event loop.
-    
-    Args:
-        session_id: Session identifier
-        user_id: User ID who owns the agent
-        
-    Returns:
-        Dict with save result
-    """
-    try:
-        logger.debug(f"save_to_db_async: session={session_id}, user_id={user_id}")
-        result = await asyncio.to_thread(
-            save_to_db, session_id=session_id, user_id=user_id
-        )
-        logger.debug(f"save_to_db_async completed: saved={result.get('saved')}")
-        return result
-    except VisionAgentError as e:
-        # Known errors - return structured response
-        logger.error(f"save_to_db_async failed with VisionAgentError: {e}")
-        return {
-            "error": e.message,
-            "user_message": e.user_message,
-            "status": "COLLECTING",
-            "saved": False,
-            "message": e.user_message,
-        }
-    except Exception as e:
-        # Unexpected errors - log and return generic response
-        logger.exception(f"Unexpected error in save_to_db_async: {e}")
-        return {
-            "error": f"Unexpected error: {str(e)}",
-            "status": "COLLECTING",
-            "saved": False,
-            "message": "An unexpected error occurred. Please try again.",
-        }
-
 
 def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -263,89 +215,90 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
 
     Returns:
         Dict with status, saved flag, agent_id, and agent_name
-        
-    Raises:
-        RepositoryNotInitializedError: If repository is not initialized
-        ValidationError: If validation fails
-        DatabaseError: If database operation fails
     """
+    print(f"[save_to_db] Starting save operation for session_id={session_id}, user_id={user_id}")
     try:
-        logger.info(f"save_to_db called: session={session_id}, user_id={user_id}")
-        
         if _agent_repository is None:
-            error_msg = "Agent repository not initialized. Call set_agent_repository() first."
-            logger.error(error_msg)
-            raise RepositoryNotInitializedError("AgentRepository")
+            print("[save_to_db] ERROR: Agent repository not initialized")
+            return {
+                "error": "Agent repository not initialized. Call set_agent_repository() first.",
+                "status": "COLLECTING",
+                "saved": False,
+                "message": "System error: Agent repository not available."
+            }
 
+        print(f"[save_to_db] Agent repository is initialized: {type(_agent_repository)}")
         agent_state = get_agent_state(session_id)
-        logger.debug(f"Agent state: status={agent_state.status}, rule_id={agent_state.rule_id}")
+        print(f"[save_to_db] Agent state retrieved - status: {agent_state.status}, rule_id: {agent_state.rule_id}, missing_fields: {agent_state.missing_fields}")
 
-        # Auto-transition from COLLECTING to CONFIRMATION if ready
         if agent_state.status == "COLLECTING" and not agent_state.missing_fields:
+            print(f"[save_to_db] WARNING: Status is COLLECTING but no missing fields. Recomputing missing fields...")
             from .kb_utils import compute_missing_fields, get_rule
             try:
                 rule = get_rule(agent_state.rule_id) if agent_state.rule_id else None
                 if rule:
                     compute_missing_fields(agent_state, rule)
+                    print(f"[save_to_db] After recompute - missing_fields: {agent_state.missing_fields}")
                     if not agent_state.missing_fields:
                         agent_state.status = "CONFIRMATION"
-                        logger.info(f"Auto-transitioned session {session_id} to CONFIRMATION state")
+                        print(f"[save_to_db] Status auto-transitioned to CONFIRMATION")
             except Exception as e:
-                logger.warning(f"Failed to compute missing fields during auto-transition: {e}")
+                print(f"[save_to_db] Error during recompute: {e}")
 
-        # Validate state is ready for saving
         if agent_state.status != "CONFIRMATION":
-            error_msg = f"Cannot save: agent is not in CONFIRMATION state. Current status: {agent_state.status}"
-            logger.warning(error_msg)
-            raise InvalidStateTransitionError(
-                error_msg,
-                user_message="Agent is not ready to save. Please complete all required fields first."
-            )
+            print(f"[save_to_db] ERROR: Agent not in CONFIRMATION state. Current status: {agent_state.status}, missing_fields: {agent_state.missing_fields}")
+            return {
+                "error": f"Cannot save: agent is not in CONFIRMATION state. Current status: {agent_state.status}",
+                "status": agent_state.status,
+                "saved": False,
+                "message": "Agent is not ready to save. Please complete all required fields first."
+            }
 
         if agent_state.missing_fields:
-            error_msg = f"Cannot save: missing fields {agent_state.missing_fields}"
-            logger.warning(f"{error_msg} for session {session_id}")
-            raise ValidationError(
-                error_msg,
-                user_message=f"Please provide the following fields: {', '.join(agent_state.missing_fields)}"
-            )
+            print(f"[save_to_db] ERROR: Missing fields: {agent_state.missing_fields}")
+            return {
+                "error": f"Cannot save: missing fields {agent_state.missing_fields}",
+                "status": agent_state.status,
+                "saved": False,
+                "message": f"Please provide the following fields: {', '.join(agent_state.missing_fields)}"
+            }
 
         if not user_id:
-            error_msg = "Cannot save: user_id is required. Agent must be associated with an authenticated user."
-            logger.error(error_msg)
-            raise ValidationError(
-                error_msg,
-                user_message="Authentication error: User ID is required."
-            )
+            print("[save_to_db] ERROR: user_id is not provided")
+            return {
+                "error": "Cannot save: user_id is required. Agent must be associated with an authenticated user.",
+                "status": agent_state.status,
+                "saved": False,
+                "message": "Authentication error: User ID is required."
+            }
 
-        # Validate run_mode
+        print(f"[save_to_db] Validation passed - proceeding to create agent model")
+
         run_mode = agent_state.fields.get("run_mode")
         if run_mode and run_mode not in ["continuous", "patrol"]:
-            error_msg = f"Invalid run_mode: {run_mode}. Only 'continuous' or 'patrol' are allowed."
-            logger.error(error_msg)
-            raise ValidationError(
-                error_msg,
-                user_message=f"Invalid run mode: {run_mode}. Please use 'continuous' or 'patrol'."
-            )
+            return {
+                "error": f"Invalid run_mode: {run_mode}. Only 'continuous' or 'patrol' are allowed.",
+                "status": agent_state.status,
+                "saved": False,
+                "message": f"Invalid run mode: {run_mode}. Please use 'continuous' or 'patrol'."
+            }
 
-        # Get rule and compute zone requirement
         from .kb_utils import compute_requires_zone, get_rule
         try:
             rule = get_rule(agent_state.rule_id) if agent_state.rule_id else None
-            logger.debug(f"Retrieved rule: {agent_state.rule_id}")
         except ValueError as e:
-            logger.error(f"Invalid rule_id {agent_state.rule_id}: {e}")
-            raise ValidationError(
-                f"Invalid rule_id: {str(e)}",
-                user_message=f"Configuration error: {str(e)}"
-            )
+            return {
+                "error": f"Invalid rule_id: {str(e)}",
+                "status": agent_state.status,
+                "saved": False,
+                "message": f"Configuration error: {str(e)}"
+            }
 
         if rule:
             requires_zone = compute_requires_zone(rule, run_mode)
         else:
             requires_zone = False
 
-        # Parse and validate time fields
         start_time_str = agent_state.fields.get("start_time")
         end_time_str = agent_state.fields.get("end_time")
         start_time = None
@@ -355,32 +308,21 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
             if start_time_str:
                 if isinstance(start_time_str, str):
                     start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
-                    logger.debug(f"Parsed start_time: {start_time}")
                 elif isinstance(start_time_str, datetime):
                     start_time = start_time_str
 
             if end_time_str:
                 if isinstance(end_time_str, str):
                     end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
-                    logger.debug(f"Parsed end_time: {end_time}")
                 elif isinstance(end_time_str, datetime):
                     end_time = end_time_str
-            
-            # Validate time window if both are provided
-            if start_time and end_time and start_time >= end_time:
-                raise ValidationError(
-                    f"start_time ({start_time}) must be before end_time ({end_time})",
-                    user_message="Start time must be before end time."
-                )
-                
-        except ValidationError:
-            raise
         except ValueError as e:
-            logger.error(f"Invalid time format: {e}")
-            raise ValidationError(
-                f"Invalid time format: {str(e)}",
-                user_message=f"Time format error: {str(e)}"
-            )
+            return {
+                "error": f"Invalid time format: {str(e)}",
+                "status": agent_state.status,
+                "saved": False,
+                "message": f"Time format error: {str(e)}"
+            }
 
         source_type = (agent_state.fields.get("source_type") or "").strip().lower()
         video_path = (agent_state.fields.get("video_path") or "").strip()
@@ -419,46 +361,47 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
             if zone is not None:
                 payload["zone"] = zone
 
-        # Create agent instance
         try:
+            print(f"[save_to_db] Creating Agent domain model with payload keys: {list(payload.keys())}")
             agent = Agent(**payload)
-            logger.info(f"Created agent instance: {agent.name}")
+            print(f"[save_to_db] Agent domain model created successfully")
         except Exception as e:
-            logger.exception(f"Invalid agent configuration: {e}")
-            raise ValidationError(
-                f"Invalid agent configuration: {str(e)}",
-                user_message=f"Configuration error: {str(e)}"
-            )
+            print(f"[save_to_db] ERROR: Failed to create Agent domain model: {str(e)}")
+            import traceback
+            print(f"[save_to_db] Traceback: {traceback.format_exc()}")
+            return {
+                "error": f"Invalid agent configuration: {str(e)}",
+                "status": agent_state.status,
+                "saved": False,
+                "message": f"Configuration error: {str(e)}"
+            }
 
-        # Save agent to database
         try:
+            print(f"[save_to_db] Attempting to save agent to database...")
             saved_agent = _save_agent_sync(agent)
+            print(f"[save_to_db] Repository save() returned: {saved_agent}")
+            print(f"[save_to_db] Saved agent ID: {saved_agent.id if saved_agent else 'None'}")
+            print(f"[save_to_db] Saved agent name: {saved_agent.name if saved_agent else 'None'}")
 
             if saved_agent is None:
-                error_msg = "Failed to save agent: Repository returned None"
-                logger.error(error_msg)
-                raise DatabaseError(
-                    error_msg,
-                    operation="save",
-                    retryable=True,
-                    user_message="Database error: Agent was not saved. Please try again."
-                )
+                print("[save_to_db] ERROR: Repository save() returned None - agent was not saved")
+                return {
+                    "error": "Failed to save agent: Repository returned None",
+                    "status": agent_state.status,
+                    "saved": False,
+                    "message": "Database error: Agent was not saved. Please try again."
+                }
 
             if not hasattr(saved_agent, 'id') or saved_agent.id is None:
-                error_msg = "Failed to save agent: Agent has no ID"
-                logger.error(error_msg)
-                raise DatabaseError(
-                    error_msg,
-                    operation="save",
-                    retryable=False,
-                    user_message="Database error: Agent was not properly saved. Please try again."
-                )
-            
-            logger.info(f"Agent saved successfully: {saved_agent.id}")
+                print("[save_to_db] ERROR: Saved agent has no ID - agent was not properly saved")
+                return {
+                    "error": "Failed to save agent: Agent has no ID",
+                    "status": agent_state.status,
+                    "saved": False,
+                    "message": "Database error: Agent was not properly saved. Please try again."
+                }
 
-        except DatabaseError:
-            # Re-raise DatabaseError
-            raise
+            print(f"[save_to_db] Agent successfully saved with ID: {saved_agent.id}")
         except Exception as e:
             logger.exception(f"Unexpected error saving agent: {e}")
             raise DatabaseError(
@@ -468,20 +411,20 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
                 user_message="Failed to save agent. Please try again."
             )
 
-        # Update state
         agent_state.status = "SAVED"
         agent_state.saved_agent_id = saved_agent.id if saved_agent else None
         agent_state.saved_agent_name = saved_agent.name if saved_agent else None
-        logger.info(f"Updated session {session_id} status to SAVED")
 
-        # Generate flow diagram (non-critical - don't fail if this fails)
+        print(f"[save_to_db] Agent state updated to SAVED with agent_id={saved_agent.id}, agent_name={saved_agent.name}")
+
         flow_diagram = None
         try:
             flow_diagram = generate_agent_flow_diagram(saved_agent)
-            logger.debug(f"Generated flow diagram for agent {saved_agent.id}")
+            print(f"[save_to_db] Generated flow diagram with {len(flow_diagram.get('nodes', []))} nodes and {len(flow_diagram.get('links', []))} links")
         except Exception as e:
-            logger.warning(f"Failed to generate flow diagram for agent {saved_agent.id}: {e}")
-            # Continue without flow diagram
+            print(f"[save_to_db] WARNING: Failed to generate flow diagram: {e}")
+            import traceback
+            print(f"[save_to_db] Traceback: {traceback.format_exc()}")
 
         result = {
             "status": "SAVED",
@@ -491,37 +434,16 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
             "agent_name": saved_agent.name if saved_agent else None,
             "flow_diagram": flow_diagram,
         }
-        logger.info(f"save_to_db completed successfully for session {session_id}")
+        print(f"[save_to_db] Returning success result: {result}")
         return result
-        
-    except (ValidationError, InvalidStateTransitionError, RepositoryNotInitializedError) as e:
-        # Expected errors - return structured response
-        logger.error(f"Save failed with validation/state error: {e}")
-        return {
-            "error": e.message,
-            "user_message": e.user_message,
-            "status": agent_state.status if 'agent_state' in locals() else "COLLECTING",
-            "saved": False,
-            "message": e.user_message
-        }
-    except DatabaseError as e:
-        # Database errors - return structured response
-        logger.error(f"Save failed with database error: {e}")
-        return {
-            "error": e.message,
-            "user_message": e.user_message,
-            "status": agent_state.status if 'agent_state' in locals() else "COLLECTING",
-            "saved": False,
-            "message": e.user_message,
-            "retryable": e.retryable
-        }
     except Exception as e:
-        # Unexpected errors - log and return generic response
-        logger.exception(f"Unexpected error saving agent for session {session_id}: {e}")
+        print(f"[save_to_db] ERROR: Unexpected exception in save_to_db: {str(e)}")
+        import traceback
+        print(f"[save_to_db] Traceback: {traceback.format_exc()}")
         return {
-            "error": f"Unexpected error: {str(e)}",
-            "status": agent_state.status if 'agent_state' in locals() else "COLLECTING",
+            "error": f"Unexpected error saving agent: {str(e)}",
+            "status": "COLLECTING",
             "saved": False,
-            "message": "An unexpected error occurred. Please try again."
+            "message": f"An unexpected error occurred: {str(e)}"
         }
 
