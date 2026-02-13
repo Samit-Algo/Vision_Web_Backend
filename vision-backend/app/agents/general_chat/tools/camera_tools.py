@@ -2,15 +2,10 @@
 Camera-related tools for the General Chat Agent.
 """
 
-import logging
-from typing import Dict, Any
-
+import asyncio
+from typing import Dict, Any, Optional
 from ...tools.camera_selection_tool import list_cameras as _list_cameras_base
 from ...tools.camera_selection_tool import resolve_camera as _resolve_camera_base
-from ...exceptions import VisionAgentError
-
-logger = logging.getLogger(__name__)
-
 
 def list_my_cameras(user_id: str) -> Dict[str, Any]:
     """
@@ -20,15 +15,7 @@ def list_my_cameras(user_id: str) -> Dict[str, Any]:
     Args:
         user_id: The ID of the current user.
     """
-    try:
-        return _list_cameras_base(user_id=user_id)
-    except VisionAgentError as e:
-        logger.error(f"list_my_cameras: {e}")
-        return {"error": e.user_message, "cameras": []}
-    except Exception as e:
-        logger.exception(f"list_my_cameras: {e}")
-        return {"error": "Failed to list cameras.", "cameras": []}
-
+    return _list_cameras_base(user_id=user_id)
 
 def find_camera(name_or_id: str, user_id: str) -> Dict[str, Any]:
     """
@@ -38,15 +25,7 @@ def find_camera(name_or_id: str, user_id: str) -> Dict[str, Any]:
         name_or_id: The name or ID of the camera to find.
         user_id: The ID of the current user.
     """
-    try:
-        return _resolve_camera_base(name_or_id=name_or_id, user_id=user_id)
-    except VisionAgentError as e:
-        logger.error(f"find_camera: {e}")
-        return {"status": "not_found", "error": e.user_message}
-    except Exception as e:
-        logger.exception(f"find_camera: {e}")
-        return {"status": "not_found", "error": "Failed to find camera."}
-
+    return _resolve_camera_base(name_or_id=name_or_id, user_id=user_id)
 
 def check_camera_health(camera_id: str, user_id: str) -> Dict[str, Any]:
     """
@@ -56,15 +35,9 @@ def check_camera_health(camera_id: str, user_id: str) -> Dict[str, Any]:
         camera_id: The unique ID of the camera.
         user_id: The ID of the current user.
     """
-    try:
-        result = _resolve_camera_base(name_or_id=camera_id, user_id=user_id)
-    except VisionAgentError as e:
-        logger.error(f"check_camera_health: {e}")
-        return {"status": "error", "message": e.user_message}
-    except Exception as e:
-        logger.exception(f"check_camera_health: {e}")
-        return {"status": "error", "message": "Failed to check camera health."}
-
+    # Simply resolve the camera first
+    result = _resolve_camera_base(name_or_id=camera_id, user_id=user_id)
+    
     if result.get("status") != "exact_match":
         return {"status": "error", "message": "Camera not found or unauthorized."}
     

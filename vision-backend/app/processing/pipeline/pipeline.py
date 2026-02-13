@@ -579,6 +579,7 @@ class PipelineRunner:
             sleep_detection_scenario = None  # For per-box red when sleep confirmed (same box, change color)
             is_wall_climb_detection = False  # Orange = climbing, red = fully above (stays red)
             wall_climb_scenario = None
+            face_recognitions: List[Dict[str, Any]] = []  # Face detection: [{ "box": [...], "name": "..." }]
             
             if hasattr(self.context, '_scenario_instances'):
                 for rule_idx, scenario_instance in self.context._scenario_instances.items():
@@ -625,6 +626,10 @@ class PipelineRunner:
                             state = scenario_instance._state
                             if state.get('red_indices') or state.get('climbing_indices'):
                                 zone_violated = True
+                    # Face detection: recognized faces (box + name) for overlay
+                    elif scenario_type == 'face_detection':
+                        if hasattr(scenario_instance, '_state'):
+                            face_recognitions = list(scenario_instance._state.get("recognized_faces") or [])
                     
                     # Check if this is a line-based counting scenario (class_count or box_count)
                     elif scenario_type in ['class_count', 'box_count']:
@@ -875,11 +880,26 @@ class PipelineRunner:
                     pipeline_context=self.context
                 )
                 for scenario_instance in self.context._scenario_instances.values():
+                    scenario_type = getattr(scenario_instance, "scenario_id", "")
                     overlay_data = scenario_instance.get_overlay_data(frame_context)
                     if overlay_data:
                         scenario_overlays.extend(
                             _overlay_data_to_dict_list(overlay_data)
                         )
+                        # Face detection: use same (smoothed) overlay for face_recognitions so UI gets boxes consistently
+                        if scenario_type == "face_detection":
+                            face_recognitions = []
+                            for item in overlay_data:
+                                if dataclasses.is_dataclass(item) and not isinstance(item, type):
+                                    box = getattr(item, "box", None)
+                                    name = getattr(item, "label", "Unknown") or "Unknown"
+                                    if box and len(box) >= 4:
+                                        face_recognitions.append({"box": list(box), "name": name})
+                                elif isinstance(item, dict) and item.get("box") and len(item.get("box", [])) >= 4:
+                                    face_recognitions.append({
+                                        "box": item["box"],
+                                        "name": item.get("label", item.get("name", "Unknown")) or "Unknown",
+                                    })
             
             # Publish to shared_store
             self.shared_store[self.context.agent_id] = {
@@ -911,6 +931,7 @@ class PipelineRunner:
                 "sleep_confirmed_indices": sleep_confirmed_indices,  # Sleep: same person box, red when VLM confirmed
                 "wall_climb_red_indices": wall_climb_red_indices,  # Wall climb: fully above (stays red)
                 "wall_climb_orange_indices": wall_climb_orange_indices,  # Wall climb: climbing (orange)
+                "face_recognitions": face_recognitions,  # Face detection: [{ "box": [x1,y1,x2,y2], "name": "..." }]
             }
             
             return processed_frame

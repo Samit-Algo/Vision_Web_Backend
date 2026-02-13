@@ -123,6 +123,12 @@ class Settings:
             "EVENT_VIDEO_SAVE_ENABLED", "true"
         ).lower() in ("true", "1", "yes")
 
+        # Person gallery (reference photos for face recognition)
+        self.gallery_dir: Final[str] = os.getenv(
+            "GALLERY_DIR",
+            os.path.join(os.getcwd(), "Gallery")
+        ).split("#")[0].strip()
+
 
 # Global settings instance (singleton pattern)
 _settings: Optional[Settings] = None
