@@ -4,7 +4,7 @@ import os
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
 from pytz import UTC, timezone
@@ -271,7 +271,7 @@ def _ensure_groq_api_key() -> str:
     return groq_api_key
 
 
-from .utils.time_context import get_current_time_context
+from .utils.time_context import get_current_time_context, get_utc_iso_z
 
 
 
@@ -351,12 +351,13 @@ def build_instruction_dynamic_with_session(context: ReadonlyContext, session_id:
     else:
         kb_context = _rules_catalog_json()
 
+    state_json = json.dumps(state_summary, ensure_ascii=False)
+    active_rule_block = f"ACTIVE_RULE_CONTEXT_JSON:\n{kb_context}\n"
     now_utc_iso = get_utc_iso_z()
-    tz_name = get_settings().local_timezone or "UTC"
     return (
         f"CURRENT_STATE_JSON:\n{state_json}\n"
         f"{active_rule_block}"
-        f"NOW_LOCAL ({tz_name}): {now_line}\n"
+        f"{current_time_context}\n"
         f"NOW_UTC_ISO_Z: {now_utc_iso}\n"
     )
 
@@ -372,9 +373,18 @@ def _create_tool_wrappers(current_session_id: str, current_user_id: Optional[str
         """Initialize agent state for the selected rule."""
         return initialize_state_impl(rule_id=rule_id, session_id=current_session_id, user_id=current_user_id)
 
-    def set_field_value_wrapper(field_values_json: str) -> Dict:
+    def set_field_value_wrapper(field_values_json: Any) -> Dict:
         """Update one or more fields in the agent state."""
-        return set_field_value_impl(field_values_json=field_values_json, session_id=current_session_id)
+        # Groq tool calls frequently send structured JSON objects for this tool.
+        # Normalize to the JSON string expected by set_field_value_impl.
+        if isinstance(field_values_json, dict):
+            payload = json.dumps(field_values_json)
+        elif isinstance(field_values_json, str):
+            # Defensive fallback if provider sends a raw JSON string.
+            payload = field_values_json
+        else:
+            payload = json.dumps({})
+        return set_field_value_impl(field_values_json=payload, session_id=current_session_id)
 
     def save_to_db_wrapper() -> Dict:
         """Save the confirmed agent configuration to the database."""
@@ -542,50 +552,63 @@ async def _log_thinking_response(
 
 def create_agent_for_session(session_id: str = "default", user_id: Optional[str] = None) -> LlmAgent:
     """Create and configure the main agent for a session."""
-    _ensure_groq_api_key()
+    try:
+        _ensure_groq_api_key()
 
-    from .session_state.agent_state import get_agent_state
+        from .session_state.agent_state import get_agent_state
 
-    agent_state = get_agent_state(session_id)
-    if user_id:
-        agent_state.user_id = user_id
+        agent_state = get_agent_state(session_id)
+        if user_id:
+            agent_state.user_id = user_id
 
-    wrapped_tools = _create_tool_wrappers(session_id, user_id)
+        wrapped_tools = _create_tool_wrappers(session_id, user_id)
 
-    def create_dynamic_instruction_provider(current_session_id: str):
-        """Create instruction provider that captures session_id in closure."""
-        def instruction_provider(context: ReadonlyContext) -> str:
-            """Per-turn dynamic instruction: minimal state + time."""
-            try:
-                return build_dynamic_instruction(session_id)
-            except Exception as e:
-                logger.error(f"Failed to build dynamic instruction for session {session_id}: {e}")
-                # Return minimal valid JSON instruction to allow agent to continue
-                return 'CURRENT_STATE_JSON:\n{"status": "COLLECTING"}\n'
+        def create_dynamic_instruction_provider(current_session_id: str):
+            """Create instruction provider that captures session_id in closure."""
 
-    dynamic_instruction = create_dynamic_instruction_provider(session_id)
+            def instruction_provider(context: ReadonlyContext) -> str:
+                """Per-turn dynamic instruction: minimal state + time."""
+                try:
+                    return build_instruction_dynamic_with_session(context, current_session_id)
+                except Exception as e:
+                    logger.error(
+                        "Failed to build dynamic instruction for session %s: %s",
+                        current_session_id,
+                        e,
+                    )
+                    # Return minimal valid JSON instruction to allow agent to continue.
+                    return 'CURRENT_STATE_JSON:\n{"status":"COLLECTING"}\n'
+
+            return instruction_provider
+
+        dynamic_instruction = create_dynamic_instruction_provider(session_id)
+        planner = BuiltInPlanner(
+            thinking_config=types.ThinkingConfig(
+                include_thoughts=True,
+                thinking_budget=-1,
+            )
+        )
 
         settings = get_settings()
         agent = LlmAgent(
             name="main_agent",
             description="A main agent that guides users through creating vision analytics agents.",
-            static_instruction=STATIC_INSTRUCTION,
-            instruction=instruction_provider,
+            static_instruction=static_instruction,
+            instruction=dynamic_instruction,
             tools=wrapped_tools,
             planner=planner,
             model=settings.agent_creation_model,
         )
-        
-        logger.info(f"Agent created successfully for session {session_id}")
+
+        logger.info("Agent created successfully for session %s", session_id)
         return agent
-        
+
     except VisionAgentError:
-        # Re-raise VisionAgentError
         raise
     except Exception as e:
-        logger.exception(f"Failed to create agent for session {session_id}: {e}")
+        logger.exception("Failed to create agent for session %s: %s", session_id, e)
         raise VisionAgentError(
             f"Failed to create agent: {str(e)}",
-            user_message="Failed to initialize agent. Please try again."
+            user_message="Failed to initialize agent. Please try again.",
         )
 

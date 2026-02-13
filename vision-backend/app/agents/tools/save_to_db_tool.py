@@ -22,8 +22,9 @@ from ..exceptions import (
     InvalidStateTransitionError,
     VisionAgentError,
 )
-from ..utils.retry_utils import retry_on_exception, async_retry_on_exception
 from .flow_diagram_utils import generate_agent_flow_diagram
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -134,70 +135,54 @@ def _save_agent_sync(agent: Agent) -> Agent:
         DatabaseError: If save operation fails
         DatabaseConnectionError: If database connection fails
     """
-    try:
-        source_desc = f"video_path={getattr(agent, 'video_path', '')}" if (getattr(agent, 'source_type', '') or '').strip().lower() == 'video_file' else f"camera_id={agent.camera_id}"
-        logger.info(f"Saving agent: {agent.name} ({source_desc})")
-        coll = get_collection("agents")
-        agent_dict = _agent_to_dict_sync(agent)
-        
-        # Update existing agent
-        if agent.id:
-            try:
-                oid = ObjectId(agent.id)
-                logger.debug(f"Updating existing agent with ID: {agent.id}")
-                
-                result = coll.update_one(
-                    {AgentFields.MONGO_ID: oid},
-                    {"$set": {k: v for k, v in agent_dict.items() if k != AgentFields.MONGO_ID}},
-                )
-                
-                if result.matched_count == 0:
-                    logger.warning(f"Agent {agent.id} not found for update, will insert instead")
-                    # Agent not found, fall through to insert
-                else:
-                    doc = coll.find_one({AgentFields.MONGO_ID: oid})
-                    if doc is None:
-                        raise DatabaseError(
-                            f"Agent {agent.id} was updated but could not be retrieved",
-                            operation="update",
-                            retryable=False
-                        )
-                    logger.info(f"Agent updated successfully: {agent.id}")
-                    return _document_to_agent_sync(doc)
-                    
-            except InvalidId as e:
-                logger.warning(f"Invalid agent ID format: {agent.id}: {e}")
-                # Continue to insert
-            except (ValueError, TypeError) as e:
-                logger.warning(f"Invalid agent ID type: {agent.id}: {e}")
-                # Continue to insert
-        
-        # Insert new agent
-        if AgentFields.MONGO_ID in agent_dict:
-            del agent_dict[AgentFields.MONGO_ID]
-        
-        logger.debug("Inserting new agent")
-        result = coll.insert_one(agent_dict)
-        
-        doc = coll.find_one({AgentFields.MONGO_ID: result.inserted_id})
-        if doc is None:
-            raise DatabaseError(
-                "Agent was created but could not be retrieved",
-                operation="insert",
-                retryable=False
+    source_desc = (
+        f"video_path={getattr(agent, 'video_path', '')}"
+        if (getattr(agent, "source_type", "") or "").strip().lower() == "video_file"
+        else f"camera_id={agent.camera_id}"
+    )
+    logger.info("Saving agent: %s (%s)", agent.name, source_desc)
+    coll = get_collection("agents")
+    agent_dict = _agent_to_dict_sync(agent)
+
+    # Update existing agent when a valid ObjectId is present.
+    if agent.id:
+        try:
+            oid = ObjectId(agent.id)
+            logger.debug("Updating existing agent with ID: %s", agent.id)
+
+            result = coll.update_one(
+                {AgentFields.MONGO_ID: oid},
+                {"$set": {k: v for k, v in agent_dict.items() if k != AgentFields.MONGO_ID}},
             )
-            doc = coll.find_one({AgentFields.MONGO_ID: oid})
-            if doc is None:
-                raise RuntimeError(f"Agent {agent.id} was updated but could not be retrieved")
-            return _document_to_agent_sync(doc)
-        except (InvalidId, ValueError, TypeError):
-            pass
+
+            if result.matched_count > 0:
+                doc = coll.find_one({AgentFields.MONGO_ID: oid})
+                if doc is None:
+                    raise DatabaseError(
+                        f"Agent {agent.id} was updated but could not be retrieved",
+                        operation="update",
+                        retryable=False,
+                    )
+                logger.info("Agent updated successfully: %s", agent.id)
+                return _document_to_agent_sync(doc)
+
+            logger.warning("Agent %s not found for update, inserting instead", agent.id)
+        except (InvalidId, ValueError, TypeError) as exc:
+            logger.warning("Invalid agent ID %s, inserting instead: %s", agent.id, exc)
+
+    # Insert new agent document.
     if AgentFields.MONGO_ID in agent_dict:
         del agent_dict[AgentFields.MONGO_ID]
+
+    logger.debug("Inserting new agent")
     result = coll.insert_one(agent_dict)
     doc = coll.find_one({AgentFields.MONGO_ID: result.inserted_id})
     if doc is None:
-        raise RuntimeError("Agent was created but could not be retrieved")
+        raise DatabaseError(
+            "Agent was created but could not be retrieved",
+            operation="insert",
+            retryable=False,
+        )
     return _document_to_agent_sync(doc)
 
 

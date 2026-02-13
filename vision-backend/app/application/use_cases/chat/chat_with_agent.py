@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import threading
+import asyncio
 import uuid
 from typing import Optional, Tuple, AsyncGenerator, Dict, Any
 
@@ -419,9 +420,13 @@ class ChatWithAgentUseCase:
             )
 
         try:
-            from ....agents.tools.camera_selection_tool import list_cameras_async
+            from ....agents.tools.camera_selection_tool import list_cameras
 
-            result = await list_cameras_async(user_id=user_id, session_id=session_id)
+            # camera_selection_tool currently exposes sync list_cameras().
+            # Run in thread to keep this async path non-blocking.
+            result = await asyncio.to_thread(
+                list_cameras, user_id=user_id, session_id=session_id
+            )
             cameras = result.get("cameras") or []
             if not cameras:
                 return "No cameras were found in your account. Please add a camera first, then continue."
