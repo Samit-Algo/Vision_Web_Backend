@@ -533,7 +533,7 @@
           "Monitor the restricted zone for unauthorized access"
         ],
       
-        "model": "yolov8l.pt",
+        "model": "yolov8n.pt",
       
         "detectable_classes": [
           "person",

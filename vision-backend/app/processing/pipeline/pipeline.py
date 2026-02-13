@@ -25,6 +25,9 @@ from app.processing.drawing.frame_processor import (
     draw_bounding_boxes,
     draw_pose_keypoints,
     draw_box_count_annotations,
+    draw_zone_polygon,
+    draw_zone_line,
+    draw_boxes_in_zone_red,
 )
 from app.utils.db import get_collection
 from app.utils.datetime_utils import utc_now, now
@@ -578,6 +581,7 @@ class PipelineRunner:
             # Check scenario types
             is_restricted_zone = False
             restricted_zone_scenario = None  # Used to read in_zone_indices from state for per-box red coloring
+            restricted_zone_coordinates: Optional[List[List[float]]] = None  # Polygon for drawing on frame
             is_line_counting = False
             is_fire_detection = False
             fire_detected = False  # Whether fire is currently detected
@@ -599,6 +603,8 @@ class PipelineRunner:
                         restricted_zone_scenario = scenario_instance
                         if hasattr(scenario_instance, 'config_obj') and hasattr(scenario_instance.config_obj, 'target_class'):
                             target_class = scenario_instance.config_obj.target_class
+                        if hasattr(scenario_instance, 'config_obj') and hasattr(scenario_instance.config_obj, 'zone_coordinates'):
+                            restricted_zone_coordinates = getattr(scenario_instance.config_obj, 'zone_coordinates', None)
                         # Check if zone is violated
                         if hasattr(scenario_instance, '_state'):
                             state = scenario_instance._state
@@ -762,11 +768,9 @@ class PipelineRunner:
                             draw_class,
                             report.get("active_tracks", len(track_info_from_report)),
                         )
-            
-            # Convert to bytes
-            frame_bytes = processed_frame.tobytes()
+
             height, width = processed_frame.shape[0], processed_frame.shape[1]
-            
+
             # For restricted zone: indices into filtered detections that are inside the zone (for per-box red coloring)
             in_zone_indices: List[int] = []
             # Wall climb: red = fully above (stays red), orange = climbing
@@ -873,7 +877,13 @@ class PipelineRunner:
                         if self._calculate_iou(box, eb) >= 0.3:
                             sleep_confirmed_indices.append(i)
                             break
-            
+
+            # Draw restricted zone polygon, zone line, and red boxes for in-zone detections (on processed frame)
+            draw_zone_polygon(processed_frame, restricted_zone_coordinates, width, height)
+            draw_zone_line(processed_frame, line_zone, width, height)
+            draw_boxes_in_zone_red(processed_frame, f_boxes, f_classes, f_scores, in_zone_indices)
+            frame_bytes = processed_frame.tobytes()
+
             # Collect scenario overlays (e.g., loom ROI boxes with state labels)
             # Normalize to list of JSON-serializable dicts for WebSocket payload
             scenario_overlays = []

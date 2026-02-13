@@ -37,10 +37,7 @@ from app.processing.vision_tasks.tasks.restricted_zone import scenario as restri
 from app.processing.vision_tasks.tasks.wall_climb_detection import scenario as wall_climb_detection_scenario  # noqa: F401
 from app.processing.vision_tasks.tasks.face_detection import scenario as face_detection_scenario  # noqa: F401
 
-try:
-    from app.processing.vision_tasks.tasks.class_presence import scenario as class_presence_scenario  # noqa: F401
-except ImportError:
-    pass
+from app.processing.vision_tasks.tasks.class_presence import scenario as class_presence_scenario  # noqa: F401
 
 __all__ = [
     "BaseScenario",

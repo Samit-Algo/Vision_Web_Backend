@@ -8,7 +8,7 @@ Used by the pipeline runner and executor for visualization and event frames.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import cv2  # type: ignore
@@ -83,6 +83,109 @@ def draw_bounding_boxes(
         )
 
     return out
+
+
+def _scale_coords(
+    coords: List[List[float]], width: int, height: int
+) -> List[Tuple[int, int]]:
+    """Scale coordinates to pixel values. If max coord <= 1 assume normalized 0-1."""
+    if not coords or width <= 0 or height <= 0:
+        return []
+    max_val = max(max(p[0], p[1]) for p in coords)
+    if max_val <= 1.0:
+        return [(int(p[0] * width), int(p[1] * height)) for p in coords]
+    return [(int(p[0]), int(p[1])) for p in coords]
+
+
+def draw_zone_polygon(
+    frame: np.ndarray,
+    zone_coordinates: Optional[List[List[float]]],
+    width: int,
+    height: int,
+    color: Tuple[int, int, int] = (0, 0, 255),  # BGR red (outline)
+    thickness: int = 2,
+    fill_color: Optional[Tuple[int, int, int]] = (0, 0, 255),  # BGR red for fill
+    fill_alpha: float = 0.25,  # 0–1: light red tint over the zone
+) -> None:
+    """
+    Draw restricted zone polygon on frame (in-place): light red fill + red outline.
+    zone_coordinates: list of [x,y] (normalized 0-1 or pixel).
+    """
+    _ensure_cv2()
+    if not zone_coordinates or len(zone_coordinates) < 3:
+        return
+    pts = _scale_coords(zone_coordinates, width, height)
+    if len(pts) < 3:
+        return
+    pts_arr = np.array(pts, dtype=np.int32)
+    # Light red fill: blend a red overlay over the zone
+    if fill_color is not None and fill_alpha > 0:
+        overlay = np.zeros_like(frame)
+        cv2.fillPoly(overlay, [pts_arr], fill_color)
+        cv2.addWeighted(overlay, fill_alpha, frame, 1.0 - fill_alpha, 0, frame)
+    # Red outline so the zone boundary is clear
+    cv2.polylines(frame, [pts_arr], isClosed=True, color=color, thickness=thickness)
+
+
+def draw_zone_line(
+    frame: np.ndarray,
+    line_zone: Optional[Dict[str, Any]],
+    width: int,
+    height: int,
+    color: Tuple[int, int, int] = (0, 255, 255),  # BGR yellow
+    thickness: int = 2,
+) -> None:
+    """
+    Draw zone line on frame (in-place).
+    line_zone: {"type": "line", "coordinates": [[x1,y1], [x2,y2]]} (normalized or pixel).
+    """
+    _ensure_cv2()
+    if not line_zone or line_zone.get("type") != "line":
+        return
+    coords = line_zone.get("coordinates")
+    if not coords or len(coords) != 2:
+        return
+    pts = _scale_coords(coords, width, height)
+    if len(pts) != 2:
+        return
+    cv2.line(frame, tuple(pts[0]), tuple(pts[1]), color, thickness)
+
+
+def draw_boxes_in_zone_red(
+    frame: np.ndarray,
+    boxes: List[List[float]],
+    classes: List[Any],
+    scores: List[float],
+    in_zone_indices: List[int],
+    color_in_zone: Tuple[int, int, int] = (0, 0, 255),  # BGR red
+) -> None:
+    """
+    Overlay red bounding boxes only for indices in in_zone_indices (in-place).
+    Call after draw_bounding_boxes so normal boxes are green and in-zone ones get red overlay.
+    """
+    _ensure_cv2()
+    in_zone_set = set(in_zone_indices or [])
+    if not in_zone_set:
+        return
+    thickness = 2
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.5
+    font_thickness = 1
+    for i in in_zone_set:
+        if i >= len(boxes) or len(boxes[i]) < 4:
+            continue
+        box = boxes[i]
+        x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+        cls_name = str(classes[i]) if i < len(classes) else ""
+        score = float(scores[i]) if i < len(scores) else 0.0
+        label = f"{cls_name} {score:.2f}" if cls_name else f"{score:.2f}"
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color_in_zone, thickness)
+        (tw, th), _ = cv2.getTextSize(label, font, font_scale, font_thickness)
+        cv2.rectangle(frame, (x1, y1 - th - 4), (x1 + tw, y1), color_in_zone, -1)
+        cv2.putText(
+            frame, label, (x1, y1 - 2),
+            font, font_scale, (0, 0, 0), font_thickness, cv2.LINE_AA
+        )
 
 
 def draw_pose_keypoints(
