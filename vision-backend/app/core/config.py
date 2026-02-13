@@ -31,6 +31,10 @@ class Settings:
         self.groq_api_key: Final[str] = os.getenv("GROQ_API_KEY", "").split('#')[0].strip()
         self.llm_temperature: Final[float] = float(os.getenv("LLM_TEMPERATURE", "0.2").split('#')[0].strip())
         self.llm_model: Final[str] = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile").split('#')[0].strip()
+        # Agent creation chatbot model (Groq provider)
+        self.agent_creation_model: Final[str] = os.getenv(
+            "AGENT_CREATION_MODEL", "groq/qwen/qwen3-32b"
+        ).split('#')[0].strip()
         self.memory_recent_limit: Final[int] = int(os.getenv("MEMORY_RECENT_LIMIT", "12").split('#')[0].strip())
         self.memory_max_chars: Final[int] = int(os.getenv("MEMORY_MAX_CHARS", "1000").split('#')[0].strip())
         self.local_timezone: Final[str] = os.getenv("LOCAL_TIMEZONE", "Asia/Kolkata").split('#')[0].strip()
@@ -48,6 +52,13 @@ class Settings:
         
         # VLM Configuration (Vision Language Model for weapon detection)
         self.vlm_model: Final[str] = os.getenv("VLM_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct").split('#')[0].strip()
+
+        # Gemini API (for static video analysis - native video understanding)
+        self.gemini_api_key: Final[str] = os.getenv("GEMINI_API_KEY", os.getenv("GOOGLE_API_KEY", "")).split('#')[0].strip()
+        # Static video agent: Groq reasoning model (qwen3-32b for better inference)
+        self.static_video_agent_model: Final[str] = os.getenv(
+            "STATIC_VIDEO_AGENT_MODEL", "qwen/qwen3-32b"
+        ).split('#')[0].strip()
         
         # Local Model Configuration
         # Faster Whisper model size: tiny, base, small, medium, large, large-v2, large-v3
@@ -55,13 +66,7 @@ class Settings:
         # Edge TTS voice (e.g., "en-US-AriaNeural", "en-GB-SoniaNeural")
         self.local_tts_voice: Final[str] = os.getenv("LOCAL_TTS_VOICE", "en-US-AriaNeural").split('#')[0].strip()
         
-        # Jetson Backend Configuration
-        self.jetson_backend_url: Final[str] = os.getenv(
-            "JETSON_BACKEND_URL",
-            "http://localhost:8001"
-        ).split('#')[0].strip()
-        
-        # Web Backend Configuration (for Jetson backend to connect back)
+        # Web Backend Configuration (used by detection_tools for API URLs)
         self.web_backend_url: Final[str] = os.getenv(
             "WEB_BACKEND_URL",
             "http://localhost:8000"
@@ -122,6 +127,21 @@ class Settings:
         self.event_video_save_enabled: Final[bool] = os.getenv(
             "EVENT_VIDEO_SAVE_ENABLED", "true"
         ).lower() in ("true", "1", "yes")
+
+        # Static video uploads (for "create agent for this video" in chat)
+        self.static_video_upload_dir: Final[str] = os.getenv(
+            "STATIC_VIDEO_UPLOAD_DIR",
+            os.path.join(os.getcwd(), "static_video_uploads"),
+        ).split("#")[0].strip()
+        self.static_video_upload_max_mb: Final[int] = int(
+            os.getenv("STATIC_VIDEO_UPLOAD_MAX_MB", "500").split("#")[0].strip()
+        )
+
+        # Static video analysis (Gemini + ChromaDB)
+        self.static_video_vector_db_dir: Final[str] = os.getenv(
+            "STATIC_VIDEO_VECTOR_DB_DIR",
+            os.path.join(os.getcwd(), "static_video_chroma_db"),
+        ).split("#")[0].strip()
 
 
 # Global settings instance (singleton pattern)

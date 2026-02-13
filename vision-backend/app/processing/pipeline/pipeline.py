@@ -318,6 +318,10 @@ class PipelineRunner:
             # Stage 1: Acquire frame
             frame_packet = acquire_frame_stage(self.source)
             if frame_packet is None:
+                if self.context.is_video_file:
+                    self.context.update_status(self.tasks_collection, "completed")
+                    print(f"[worker {self.context.task_id}] ✅ Video file finished (EOF). Completed.")
+                    return
                 time.sleep(0.05)
                 continue
             
@@ -450,6 +454,10 @@ class PipelineRunner:
                 # Stage 1: Acquire frame
                 frame_packet = acquire_frame_stage(self.source)
                 if frame_packet is None:
+                    if self.context.is_video_file:
+                        self.context.update_status(self.tasks_collection, "completed")
+                        print(f"[worker {self.context.task_id}] ✅ Video file finished (EOF). Completed.")
+                        return
                     time.sleep(0.05)
                     continue
                 

@@ -4,7 +4,6 @@ from ...infrastructure.db.mongo_connection import (
     get_user_collection,
     get_camera_collection,
     get_agent_collection,
-    get_device_collection,
     get_event_collection,
 )
 
@@ -35,7 +34,6 @@ class DatabaseProvider:
         container.register_singleton("user_collection", get_user_collection())
         container.register_singleton("camera_collection", get_camera_collection())
         container.register_singleton("agent_collection", get_agent_collection())
-        container.register_singleton("device_collection", get_device_collection())
         container.register_singleton("event_collection", get_event_collection())
         
         # Future collections can be added here:

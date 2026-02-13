@@ -35,6 +35,9 @@ class PipelineContext:
         self.agent_name = task.get("name") or task.get("task_name") or f"agent-{task_id}"
         self.agent_id = task.get("id") or task.get("agent_id") or task_id
         self.camera_id = (task.get("camera_id") or "").strip()
+        self.video_path = (task.get("video_path") or "").strip()
+        source_type = (task.get("source_type") or "").strip().lower()
+        self.is_video_file = bool(self.video_path) or source_type == "video_file"
         self.fps = int(task.get("fps", 5))
         
         # Run mode
@@ -81,16 +84,17 @@ class PipelineContext:
         if stop_requested:
             return "stop_requested"
         
+        # Video file agents: no end_time — stop only on EOF
+        if self.is_video_file:
+            return None
         end_at_value = task_document.get("end_time") or task_document.get("end_at")
         if end_at_value:
             if isinstance(end_at_value, datetime):
                 end_at_dt = mongo_datetime_to_app_timezone(end_at_value)
             else:
                 end_at_dt = parse_iso(end_at_value)
-            
             if end_at_dt and now() >= end_at_dt:
                 return "end_time_reached"
-        
         return None
     
     def update_status(self, tasks_collection, status: str) -> None:

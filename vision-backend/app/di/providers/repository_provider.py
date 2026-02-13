@@ -2,12 +2,10 @@ from typing import TYPE_CHECKING
 from ...domain.repositories.user_repository import UserRepository
 from ...domain.repositories.camera_repository import CameraRepository
 from ...domain.repositories.agent_repository import AgentRepository
-from ...domain.repositories.device_repository import DeviceRepository
 from ...domain.repositories.event_repository import EventRepository
 from ...infrastructure.db.mongo_user_repository import MongoUserRepository
 from ...infrastructure.db.mongo_camera_repository import MongoCameraRepository
 from ...infrastructure.db.mongo_agent_repository import MongoAgentRepository
-from ...infrastructure.db.mongo_device_repository import MongoDeviceRepository
 from ...infrastructure.db.mongo_event_repository import MongoEventRepository
 
 if TYPE_CHECKING:
@@ -27,7 +25,6 @@ class RepositoryProvider:
         user_collection = container.get("user_collection")
         camera_collection = container.get("camera_collection")
         agent_collection = container.get("agent_collection")
-        device_collection = container.get("device_collection")
         event_collection = container.get("event_collection")
         
         # Register repository implementations
@@ -45,11 +42,6 @@ class RepositoryProvider:
         container.register_singleton(
             AgentRepository,
             MongoAgentRepository(agent_collection=agent_collection)
-        )
-        
-        container.register_singleton(
-            DeviceRepository,
-            MongoDeviceRepository(device_collection=device_collection)
         )
 
         container.register_singleton(

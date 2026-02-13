@@ -20,7 +20,9 @@ class AgentFields:
     CREATED_AT = "created_at"
     OWNER_USER_ID = "owner_user_id"
     STREAM_CONFIG = "stream_config"
-    
+    VIDEO_PATH = "video_path"
+    SOURCE_TYPE = "source_type"
+
     # MongoDB specific
     MONGO_ID = "_id"  # MongoDB's internal _id field
 

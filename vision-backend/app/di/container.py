@@ -6,7 +6,6 @@ from .providers import (
     CameraProvider,
     ChatProvider,
     DatabaseProvider,
-    DeviceProvider,
     RepositoryProvider,
     StreamingProvider,
     EventsProvider,
@@ -47,7 +46,6 @@ class DIContainer(BaseContainer):
         AuthProvider.register(self)
         CameraProvider.register(self)
         ChatProvider.register(self)  # Depends on AudioProvider
-        DeviceProvider.register(self)
         EventsProvider.register(self)
         
         # Future providers can be added here:

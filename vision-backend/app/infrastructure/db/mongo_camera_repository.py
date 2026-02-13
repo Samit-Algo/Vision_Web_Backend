@@ -70,29 +70,7 @@ class MongoCameraRepository(CameraRepository):
             return cameras
         except Exception as e:
             raise RuntimeError(f"Error listing cameras for owner: {str(e)}")
-    
-    async def find_by_device(self, device_id: str) -> List[Camera]:
-        """
-        Find all cameras for a device
-        
-        Args:
-            device_id: The device ID
-            
-        Returns:
-            List of Camera domain models
-        """
-        if not device_id:
-            return []
-        
-        try:
-            cursor = self.camera_collection.find({CameraFields.DEVICE_ID: device_id})
-            cameras = []
-            async for document in cursor:
-                cameras.append(self._document_to_camera(document))
-            return cameras
-        except Exception as e:
-            raise RuntimeError(f"Error listing cameras for device: {str(e)}")
-    
+
     async def search_by_name(self, query: str, owner_user_id: str, limit: int = 5) -> List[Camera]:
         """
         Search cameras by name using regex (case-insensitive partial matching).

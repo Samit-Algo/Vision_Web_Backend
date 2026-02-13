@@ -25,15 +25,19 @@ class Agent:
     created_at: Optional[datetime] = None
     owner_user_id: Optional[str] = None
     stream_config: Optional[Dict[str, Any]] = None
+    video_path: str = ""
+    source_type: str = "rtsp"  # "rtsp" | "video_file"
 
     def __post_init__(self):
-        """Business validations"""
-        if not self.camera_id:
-            raise ValueError("Camera ID is required")
+        """Business validations: need either camera_id (RTSP) or video_path with source_type video_file."""
         if not self.model:
             raise ValueError("Model is required")
         if not self.rules:
             raise ValueError("At least one rule is required")
+        is_video_file = (self.source_type or "").strip().lower() == "video_file" and (self.video_path or "").strip()
+        has_camera = bool((self.camera_id or "").strip())
+        if not has_camera and not is_video_file:
+            raise ValueError("Either camera_id (RTSP) or video_path with source_type 'video_file' is required")
         if self.created_at is None:
             # Store persisted timestamps as UTC. Mongo stores BSON dates as UTC.
             self.created_at = utc_now()

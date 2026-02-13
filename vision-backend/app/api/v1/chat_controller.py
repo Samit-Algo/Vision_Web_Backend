@@ -8,6 +8,7 @@ from ...application.dto.chat_dto import ChatMessageRequest, ChatMessageResponse
 from ...application.dto.user_dto import UserResponse
 from ...application.use_cases.chat.chat_with_agent import ChatWithAgentUseCase
 from ...di.container import get_container
+from ...agents.exceptions import ValidationError
 from .dependencies import get_current_user
 
 
@@ -38,6 +39,11 @@ async def chat_message(
             user_id=current_user.id
         )
         return response
+    except ValidationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=e.user_message
+        )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -72,6 +78,14 @@ async def chat_message_stream(
                 ev = item.get("event") or "message"
                 data = item.get("data") or {}
                 yield _encode_sse(str(ev), data if isinstance(data, dict) else {"data": data})
+        except ValidationError as e:
+            fallback_session_id = request.session_id or "validation-error"
+            yield _encode_sse("error", {"message": e.user_message})
+            yield _encode_sse("done", ChatMessageResponse(
+                response=e.user_message,
+                session_id=fallback_session_id,
+                status="error",
+            ).model_dump())
         except Exception as e:
             # Last-resort safety: always emit an error event if something goes wrong in streaming layer
             yield _encode_sse("error", {"message": str(e)})

@@ -236,7 +236,7 @@ def send_event_to_backend_sync(
         # Fetch camera info to get owner_user_id and device_id
         owner_user_id = None
         device_id = None
-        
+
         if camera_id:
             try:
                 cameras_collection = get_collection("cameras")
@@ -246,7 +246,21 @@ def send_event_to_backend_sync(
                     device_id = camera_doc.get("device_id")
             except Exception as e:
                 print(f"[event_notifier] ⚠️  Error fetching camera details: {e}")
-        
+        elif agent_id:
+            # Video file agent: no camera_id; get owner from agent document
+            try:
+                from bson import ObjectId
+                from bson.errors import InvalidId
+                agents_collection = get_collection("agents")
+                try:
+                    agent_doc = agents_collection.find_one({"_id": ObjectId(agent_id)})
+                except (InvalidId, ValueError, TypeError):
+                    agent_doc = agents_collection.find_one({"id": agent_id})
+                if agent_doc:
+                    owner_user_id = agent_doc.get("owner_user_id")
+            except Exception as e:
+                print(f"[event_notifier] ⚠️  Error fetching agent details for owner: {e}")
+
         # Parse event timestamp (may be local tz-aware depending on input)
         event_ts = None
         if video_timestamp:
@@ -258,11 +272,12 @@ def send_event_to_backend_sync(
 
         # Persist event_ts/received_at as UTC BSON datetime for consistency
         event_ts = ensure_utc(event_ts)
-        
-        # Save frame to file
+
+        # Save frame to file (use "video" as storage key when camera_id empty — video file agents)
         image_path = None
-        if camera_id and agent_id:
-            image_path = _save_frame_to_file(annotated_frame, camera_id, agent_id)
+        if agent_id:
+            storage_key = camera_id if camera_id else "video"
+            image_path = _save_frame_to_file(annotated_frame, storage_key, agent_id)
         
         # Infer severity
         label = event.get("label", "Unknown")

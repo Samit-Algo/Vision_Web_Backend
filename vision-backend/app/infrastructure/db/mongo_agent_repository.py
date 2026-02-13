@@ -139,6 +139,8 @@ class MongoAgentRepository(AgentRepository):
         if end_time and isinstance(end_time, str):
             end_time = datetime.fromisoformat(end_time.replace('Z', '+00:00'))
         
+        video_path = document.get(AgentFields.VIDEO_PATH, "") or ""
+        source_type = document.get(AgentFields.SOURCE_TYPE, "rtsp") or "rtsp"
         try:
             return Agent(
                 id=str(document[AgentFields.MONGO_ID]),
@@ -158,6 +160,8 @@ class MongoAgentRepository(AgentRepository):
                 created_at=document.get(AgentFields.CREATED_AT),
                 owner_user_id=document.get(AgentFields.OWNER_USER_ID),
                 stream_config=document.get(AgentFields.STREAM_CONFIG),
+                video_path=video_path,
+                source_type=source_type,
             )
         except Exception as e:
             raise ValueError(f"Error converting document to Agent: {str(e)}")
@@ -169,7 +173,7 @@ class MongoAgentRepository(AgentRepository):
         
         agent_dict = {
             AgentFields.NAME: agent.name,
-            AgentFields.CAMERA_ID: agent.camera_id,
+            AgentFields.CAMERA_ID: getattr(agent, "camera_id", "") or "",
             AgentFields.MODEL: agent.model,
             AgentFields.FPS: agent.fps,
             AgentFields.RULES: agent.rules,
@@ -184,6 +188,8 @@ class MongoAgentRepository(AgentRepository):
             AgentFields.CREATED_AT: agent.created_at,
             AgentFields.OWNER_USER_ID: agent.owner_user_id,
             AgentFields.STREAM_CONFIG: agent.stream_config,
+            AgentFields.VIDEO_PATH: getattr(agent, "video_path", "") or "",
+            AgentFields.SOURCE_TYPE: getattr(agent, "source_type", "rtsp") or "rtsp",
         }
         
         # Only include _id if agent.id is valid

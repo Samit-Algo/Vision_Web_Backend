@@ -48,6 +48,11 @@ def initialize_state(rule_id: str, session_id: str = "default", user_id: Optiona
         logger.error(f"Rule not found: {rule_id}: {e}")
         raise RuleNotFoundError(rule_id)
 
+    # Preserve source_type and video_path if set by request (e.g. "create agent for this video") before reset
+    prev_state = get_agent_state(session_id)
+    preserved_source_type = (prev_state.fields.get("source_type") or "").strip().lower()
+    preserved_video_path = (prev_state.fields.get("video_path") or "").strip()
+
     # Initialize state
     try:
         agent = reset_agent_state(session_id)
@@ -57,6 +62,11 @@ def initialize_state(rule_id: str, session_id: str = "default", user_id: Optiona
         if user_id:
             agent.user_id = user_id
             logger.debug(f"Set user_id={user_id} for session {session_id}")
+
+        if preserved_source_type == "video_file" and preserved_video_path:
+            agent.fields["source_type"] = "video_file"
+            agent.fields["video_path"] = preserved_video_path
+            logger.debug(f"Preserved video file source for session {session_id}: video_path={preserved_video_path[:50]}...")
 
         # Apply defaults and compute missing fields
         apply_rule_defaults(agent, rule)

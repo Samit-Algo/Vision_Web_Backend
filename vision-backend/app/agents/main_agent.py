@@ -13,6 +13,7 @@ from google.adk.planners import BuiltInPlanner
 from google.adk.tools import FunctionTool
 from google.genai import types
 
+from ..core.config import get_settings
 from .exceptions import VisionAgentError, KnowledgeBaseError
 
 logger = logging.getLogger(__name__)
@@ -148,10 +149,16 @@ _BASE_INSTRUCTION = """
     → re-process the SAME user message to extract values
 
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    CAMERA HANDLING (AFTER RULE INIT ONLY)
+    SOURCE: CAMERA (RTSP) OR VIDEO FILE
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    CAMERA IS ALWAYS THE FIRST REQUIRED FIELD AFTER RULE INITIALIZATION.
+    After rule init the first required "source" is either camera_id (live RTSP) OR video_path (uploaded file).
 
+    VIDEO FILE: If source_type is video_file or video_path is in collected_fields:
+    - Do NOT ask for camera_id. Do NOT list cameras.
+    - Do NOT ask for start_time or end_time.
+    - Use the provided video and proceed to the next missing field.
+
+    CAMERA / RTSP (no video_path): If camera is missing:
     RULES:
     - If camera is missing:
     1. ALWAYS call list_cameras_wrapper FIRST
@@ -171,8 +178,8 @@ _BASE_INSTRUCTION = """
     - If no match:
     → re-list cameras and ask again
 
-    ONCE camera is set:
-    - NEVER ask about camera again
+    ONCE source is set (camera_id OR video_path):
+    - NEVER ask about camera again (for RTSP flow)
     - NEVER re-list cameras again
     - MOVE TO NEXT MISSING FIELD IMMEDIATELY
 
@@ -201,7 +208,7 @@ _BASE_INSTRUCTION = """
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     ZONE HANDLING (STRICT)
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    - Ask about zone ONLY AFTER camera is set
+    - Ask about zone ONLY AFTER source is set (camera_id or video_path)
     - If zone is REQUIRED:
     → ask once and wait
     - If zone is OPTIONAL:
@@ -212,13 +219,13 @@ _BASE_INSTRUCTION = """
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     TIME WINDOW HANDLING
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    - Interpret all times as IST (India Standard Time, UTC+5:30)
+    - If source_type is video_file OR video_path is present:
+    - NEVER ask start_time or end_time
+    - Ignore time window collection entirely
+    - Interpret all times in the configured LOCAL_TIMEZONE (see NOW_UTC_ISO_Z and time context each turn)
     - start_time and end_time MUST be full ISO 8601 UTC format: YYYY-MM-DDTHH:MM:SSZ
     - FORBIDDEN: time-only strings like "05:00", "05:00+05:30" - these will cause save failure
-    - Build full ISO from NOW_UTC_ISO_Z and user intent:
-      - today 04:00 IST → date from NOW_UTC_ISO_Z, time 22:30 UTC (previous day) → YYYY-MM-DDTHH:MM:SSZ
-      - tomorrow 04:00 IST → add 1 day to date, time 22:30 UTC → YYYY-MM-DDTHH:MM:SSZ
-      - IST to UTC: subtract 5h30m (e.g., 04:00 IST = 22:30 UTC previous day)
+    - Build full ISO from NOW_UTC_ISO_Z and user intent (convert local time to UTC for storage)
     - If time window is required:
     - BOTH start time AND end time are mandatory
     - NEVER assume missing values
@@ -404,10 +411,11 @@ def build_dynamic_instruction(session_id: str) -> str:
             active_rule_block = f"\nACTIVE_RULE_JSON (for current rule {agent_state.rule_id}):\n{rule_json}\n"
 
     now_utc_iso = get_utc_iso_z()
+    tz_name = get_settings().local_timezone or "UTC"
     return (
         f"CURRENT_STATE_JSON:\n{state_json}\n"
         f"{active_rule_block}"
-        f"NOW_IST: {now_line}\n"
+        f"NOW_LOCAL ({tz_name}): {now_line}\n"
         f"NOW_UTC_ISO_Z: {now_utc_iso}\n"
     )
 
@@ -597,8 +605,8 @@ def create_agent_for_session(session_id: str = "default", user_id: Optional[str]
                 return build_dynamic_instruction(session_id)
             except Exception as e:
                 logger.error(f"Failed to build dynamic instruction for session {session_id}: {e}")
-                # Return minimal instruction to allow agent to continue
-                return f"CURRENT_STATE_JSON:\n{{'status': 'COLLECTING'}}\n"
+                # Return minimal valid JSON instruction to allow agent to continue
+                return 'CURRENT_STATE_JSON:\n{"status": "COLLECTING"}\n'
 
         # Limit thinking for faster responses (unlimited budget was causing 10-30s delays)
         planner = BuiltInPlanner(
@@ -608,6 +616,7 @@ def create_agent_for_session(session_id: str = "default", user_id: Optional[str]
             )
         )
 
+        settings = get_settings()
         agent = LlmAgent(
             name="main_agent",
             description="A main agent that guides users through creating vision analytics agents.",
@@ -615,7 +624,7 @@ def create_agent_for_session(session_id: str = "default", user_id: Optional[str]
             instruction=instruction_provider,
             tools=wrapped_tools,
             planner=planner,
-            model="groq/qwen/qwen3-32b",
+            model=settings.agent_creation_model,
         )
         
         logger.info(f"Agent created successfully for session {session_id}")
@@ -631,9 +640,3 @@ def create_agent_for_session(session_id: str = "default", user_id: Optional[str]
             user_message="Failed to initialize agent. Please try again."
         )
 
-
-# ============================================================================
-# MODULE-LEVEL VARIABLES
-# ============================================================================
-
-default_agent: Optional[LlmAgent] = None

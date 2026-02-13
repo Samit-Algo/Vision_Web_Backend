@@ -68,16 +68,6 @@ def get_agent_collection() -> AsyncIOMotorCollection:
     return get_database()["agents"]
 
 
-def get_device_collection() -> AsyncIOMotorCollection:
-    """
-    Get devices collection from MongoDB
-    
-    Returns:
-        MongoDB collection for devices
-    """
-    return get_database()["devices"]
-
-
 def get_event_collection() -> AsyncIOMotorCollection:
     """
     Get events collection from MongoDB

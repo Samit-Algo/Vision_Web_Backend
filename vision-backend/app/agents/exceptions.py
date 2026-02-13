@@ -121,19 +121,6 @@ class ExternalServiceError(VisionAgentError):
         self.retryable = retryable
 
 
-class JetsonRegistrationError(ExternalServiceError):
-    """Raised when Jetson backend registration fails."""
-    
-    def __init__(self, message: str, **kwargs):
-        super().__init__(
-            message,
-            service_name="Jetson",
-            user_message="Failed to register agent with processing backend.",
-            retryable=True,
-            **kwargs
-        )
-
-
 class CameraServiceError(ExternalServiceError):
     """Raised when camera service operations fail."""
     
