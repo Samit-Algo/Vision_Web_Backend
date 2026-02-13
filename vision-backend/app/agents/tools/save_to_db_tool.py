@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -13,15 +12,7 @@ from ...domain.constants import AgentFields
 from ...utils.datetime_utils import utc_now
 from ...utils.db import get_collection
 from ..session_state.agent_state import get_agent_state
-from ..exceptions import (
-    DatabaseError,
-    DatabaseConnectionError,
-    ExternalServiceError,
-    RepositoryNotInitializedError,
-    ValidationError,
-    InvalidStateTransitionError,
-    VisionAgentError,
-)
+from ..exceptions import DatabaseError
 from .flow_diagram_utils import generate_agent_flow_diagram
 
 logger = logging.getLogger(__name__)
@@ -40,7 +31,7 @@ def set_agent_repository(repository):
     """Set the agent repository for saving agents."""
     global _agent_repository
     _agent_repository = repository
-    print(f"[set_agent_repository] Agent repository set: {type(repository)}")
+    logger.debug("Agent repository set: %s", type(repository))
 
 
 def set_camera_repository(repository):
@@ -133,7 +124,6 @@ def _save_agent_sync(agent: Agent) -> Agent:
         
     Raises:
         DatabaseError: If save operation fails
-        DatabaseConnectionError: If database connection fails
     """
     source_desc = (
         f"video_path={getattr(agent, 'video_path', '')}"
@@ -193,129 +183,134 @@ def _save_agent_sync(agent: Agent) -> Agent:
 def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Finalize the agent configuration and save to database.
-
-    Args:
-        session_id: Session identifier for state management
-        user_id: User ID who owns this agent
-
-    Returns:
-        Dict with status, saved flag, agent_id, and agent_name
+    Returns deterministic payloads that the LLM can reason about.
     """
-    print(f"[save_to_db] Starting save operation for session_id={session_id}, user_id={user_id}")
+
+    def _failure(
+        *,
+        code: str,
+        user_message: str,
+        status_value: str,
+        details_internal: Optional[Dict[str, Any]] = None,
+        retryable: bool = False,
+    ) -> Dict[str, Any]:
+        payload = {
+            "error": code,
+            "code": code,
+            "user_message": user_message,
+            "status": status_value,
+            "saved": False,
+            "message": user_message,
+            "retryable": retryable,
+            "details_internal": details_internal or {},
+        }
+        return payload
+
     try:
         if _agent_repository is None:
-            print("[save_to_db] ERROR: Agent repository not initialized")
-            return {
-                "error": "Agent repository not initialized. Call set_agent_repository() first.",
-                "status": "COLLECTING",
-                "saved": False,
-                "message": "System error: Agent repository not available."
-            }
+            return _failure(
+                code="repository_not_initialized",
+                user_message="System error: Agent repository not available.",
+                status_value="COLLECTING",
+                retryable=False,
+            )
 
-        print(f"[save_to_db] Agent repository is initialized: {type(_agent_repository)}")
         agent_state = get_agent_state(session_id)
-        print(f"[save_to_db] Agent state retrieved - status: {agent_state.status}, rule_id: {agent_state.rule_id}, missing_fields: {agent_state.missing_fields}")
 
+        # Recompute once if status/fields are out of sync.
         if agent_state.status == "COLLECTING" and not agent_state.missing_fields:
-            print(f"[save_to_db] WARNING: Status is COLLECTING but no missing fields. Recomputing missing fields...")
             from .kb_utils import compute_missing_fields, get_rule
+
             try:
                 rule = get_rule(agent_state.rule_id) if agent_state.rule_id else None
                 if rule:
                     compute_missing_fields(agent_state, rule)
-                    print(f"[save_to_db] After recompute - missing_fields: {agent_state.missing_fields}")
                     if not agent_state.missing_fields:
                         agent_state.status = "CONFIRMATION"
-                        print(f"[save_to_db] Status auto-transitioned to CONFIRMATION")
-            except Exception as e:
-                print(f"[save_to_db] Error during recompute: {e}")
+            except Exception:
+                logger.exception("Failed to recompute missing_fields for session %s", session_id)
 
         if agent_state.status != "CONFIRMATION":
-            print(f"[save_to_db] ERROR: Agent not in CONFIRMATION state. Current status: {agent_state.status}, missing_fields: {agent_state.missing_fields}")
-            return {
-                "error": f"Cannot save: agent is not in CONFIRMATION state. Current status: {agent_state.status}",
-                "status": agent_state.status,
-                "saved": False,
-                "message": "Agent is not ready to save. Please complete all required fields first."
-            }
+            return _failure(
+                code="invalid_state_transition",
+                user_message="Agent is not ready to save. Please complete all required fields first.",
+                status_value=agent_state.status,
+                details_internal={"missing_fields": list(agent_state.missing_fields or [])},
+                retryable=False,
+            )
 
         if agent_state.missing_fields:
-            print(f"[save_to_db] ERROR: Missing fields: {agent_state.missing_fields}")
-            return {
-                "error": f"Cannot save: missing fields {agent_state.missing_fields}",
-                "status": agent_state.status,
-                "saved": False,
-                "message": f"Please provide the following fields: {', '.join(agent_state.missing_fields)}"
-            }
+            return _failure(
+                code="missing_fields",
+                user_message=f"Please provide the following fields: {', '.join(agent_state.missing_fields)}",
+                status_value=agent_state.status,
+                details_internal={"missing_fields": list(agent_state.missing_fields)},
+                retryable=False,
+            )
 
         if not user_id:
-            print("[save_to_db] ERROR: user_id is not provided")
-            return {
-                "error": "Cannot save: user_id is required. Agent must be associated with an authenticated user.",
-                "status": agent_state.status,
-                "saved": False,
-                "message": "Authentication error: User ID is required."
-            }
-
-        print(f"[save_to_db] Validation passed - proceeding to create agent model")
+            return _failure(
+                code="missing_user_id",
+                user_message="Authentication error: User ID is required.",
+                status_value=agent_state.status,
+                retryable=False,
+            )
 
         run_mode = agent_state.fields.get("run_mode")
         if run_mode and run_mode not in ["continuous", "patrol"]:
-            return {
-                "error": f"Invalid run_mode: {run_mode}. Only 'continuous' or 'patrol' are allowed.",
-                "status": agent_state.status,
-                "saved": False,
-                "message": f"Invalid run mode: {run_mode}. Please use 'continuous' or 'patrol'."
-            }
+            return _failure(
+                code="invalid_run_mode",
+                user_message=f"Invalid run mode: {run_mode}. Please use 'continuous' or 'patrol'.",
+                status_value=agent_state.status,
+                retryable=False,
+            )
 
         from .kb_utils import compute_requires_zone, get_rule
+
         try:
             rule = get_rule(agent_state.rule_id) if agent_state.rule_id else None
-        except ValueError as e:
-            return {
-                "error": f"Invalid rule_id: {str(e)}",
-                "status": agent_state.status,
-                "saved": False,
-                "message": f"Configuration error: {str(e)}"
-            }
+        except ValueError as exc:
+            return _failure(
+                code="invalid_rule_id",
+                user_message=f"Configuration error: {str(exc)}",
+                status_value=agent_state.status,
+                retryable=False,
+            )
 
-        if rule:
-            requires_zone = compute_requires_zone(rule, run_mode)
-        else:
-            requires_zone = False
+        requires_zone = compute_requires_zone(rule, run_mode) if rule else False
 
         start_time_str = agent_state.fields.get("start_time")
         end_time_str = agent_state.fields.get("end_time")
         start_time = None
         end_time = None
-
         try:
             if start_time_str:
-                if isinstance(start_time_str, str):
-                    start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
-                elif isinstance(start_time_str, datetime):
-                    start_time = start_time_str
-
+                start_time = (
+                    datetime.fromisoformat(start_time_str.replace("Z", "+00:00"))
+                    if isinstance(start_time_str, str)
+                    else start_time_str
+                )
             if end_time_str:
-                if isinstance(end_time_str, str):
-                    end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
-                elif isinstance(end_time_str, datetime):
-                    end_time = end_time_str
-        except ValueError as e:
-            return {
-                "error": f"Invalid time format: {str(e)}",
-                "status": agent_state.status,
-                "saved": False,
-                "message": f"Time format error: {str(e)}"
-            }
+                end_time = (
+                    datetime.fromisoformat(end_time_str.replace("Z", "+00:00"))
+                    if isinstance(end_time_str, str)
+                    else end_time_str
+                )
+        except ValueError as exc:
+            return _failure(
+                code="invalid_time_format",
+                user_message=f"Time format error: {str(exc)}",
+                status_value=agent_state.status,
+                retryable=False,
+            )
 
         source_type = (agent_state.fields.get("source_type") or "").strip().lower()
         video_path = (agent_state.fields.get("video_path") or "").strip()
-        is_video_file = source_type == "video_file" and video_path
-        # Video file agents: no start/end time — agent runs until video ends
+        is_video_file = source_type == "video_file" and bool(video_path)
         if is_video_file:
             start_time = None
             end_time = None
+
         payload: Dict[str, Any] = {
             "name": agent_state.fields.get("name", ""),
             "camera_id": agent_state.fields.get("camera_id") or "",
@@ -347,88 +342,62 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
                 payload["zone"] = zone
 
         try:
-            print(f"[save_to_db] Creating Agent domain model with payload keys: {list(payload.keys())}")
             agent = Agent(**payload)
-            print(f"[save_to_db] Agent domain model created successfully")
-        except Exception as e:
-            print(f"[save_to_db] ERROR: Failed to create Agent domain model: {str(e)}")
-            import traceback
-            print(f"[save_to_db] Traceback: {traceback.format_exc()}")
-            return {
-                "error": f"Invalid agent configuration: {str(e)}",
-                "status": agent_state.status,
-                "saved": False,
-                "message": f"Configuration error: {str(e)}"
-            }
+        except Exception as exc:
+            logger.exception("Invalid agent payload for session %s", session_id)
+            return _failure(
+                code="invalid_agent_payload",
+                user_message=f"Configuration error: {str(exc)}",
+                status_value=agent_state.status,
+                retryable=False,
+            )
 
         try:
-            print(f"[save_to_db] Attempting to save agent to database...")
             saved_agent = _save_agent_sync(agent)
-            print(f"[save_to_db] Repository save() returned: {saved_agent}")
-            print(f"[save_to_db] Saved agent ID: {saved_agent.id if saved_agent else 'None'}")
-            print(f"[save_to_db] Saved agent name: {saved_agent.name if saved_agent else 'None'}")
-
-            if saved_agent is None:
-                print("[save_to_db] ERROR: Repository save() returned None - agent was not saved")
-                return {
-                    "error": "Failed to save agent: Repository returned None",
-                    "status": agent_state.status,
-                    "saved": False,
-                    "message": "Database error: Agent was not saved. Please try again."
-                }
-
-            if not hasattr(saved_agent, 'id') or saved_agent.id is None:
-                print("[save_to_db] ERROR: Saved agent has no ID - agent was not properly saved")
-                return {
-                    "error": "Failed to save agent: Agent has no ID",
-                    "status": agent_state.status,
-                    "saved": False,
-                    "message": "Database error: Agent was not properly saved. Please try again."
-                }
-
-            print(f"[save_to_db] Agent successfully saved with ID: {saved_agent.id}")
-        except Exception as e:
-            logger.exception(f"Unexpected error saving agent: {e}")
+        except Exception as exc:
+            logger.exception("Failed saving agent for session %s", session_id)
             raise DatabaseError(
-                f"Failed to save agent to database: {str(e)}",
+                f"Failed to save agent to database: {str(exc)}",
                 operation="save",
                 retryable=True,
-                user_message="Failed to save agent. Please try again."
+                user_message="Failed to save agent. Please try again.",
+            )
+
+        if not saved_agent or not getattr(saved_agent, "id", None):
+            return _failure(
+                code="save_result_invalid",
+                user_message="Database error: Agent was not properly saved. Please try again.",
+                status_value=agent_state.status,
+                retryable=True,
             )
 
         agent_state.status = "SAVED"
-        agent_state.saved_agent_id = saved_agent.id if saved_agent else None
-        agent_state.saved_agent_name = saved_agent.name if saved_agent else None
-
-        print(f"[save_to_db] Agent state updated to SAVED with agent_id={saved_agent.id}, agent_name={saved_agent.name}")
+        agent_state.saved_agent_id = saved_agent.id
+        agent_state.saved_agent_name = saved_agent.name
 
         flow_diagram = None
         try:
             flow_diagram = generate_agent_flow_diagram(saved_agent)
-            print(f"[save_to_db] Generated flow diagram with {len(flow_diagram.get('nodes', []))} nodes and {len(flow_diagram.get('links', []))} links")
-        except Exception as e:
-            print(f"[save_to_db] WARNING: Failed to generate flow diagram: {e}")
-            import traceback
-            print(f"[save_to_db] Traceback: {traceback.format_exc()}")
+        except Exception:
+            logger.exception("Failed to generate flow diagram for agent %s", saved_agent.id)
 
-        result = {
+        return {
             "status": "SAVED",
             "saved": True,
             "message": "Agent configuration saved. Tell user agent is successfully created",
-            "agent_id": saved_agent.id if saved_agent else None,
-            "agent_name": saved_agent.name if saved_agent else None,
+            "agent_id": saved_agent.id,
+            "agent_name": saved_agent.name,
             "flow_diagram": flow_diagram,
+            "retryable": False,
+            "code": "saved",
         }
-        print(f"[save_to_db] Returning success result: {result}")
-        return result
-    except Exception as e:
-        print(f"[save_to_db] ERROR: Unexpected exception in save_to_db: {str(e)}")
-        import traceback
-        print(f"[save_to_db] Traceback: {traceback.format_exc()}")
-        return {
-            "error": f"Unexpected error saving agent: {str(e)}",
-            "status": "COLLECTING",
-            "saved": False,
-            "message": f"An unexpected error occurred: {str(e)}"
-        }
+    except Exception as exc:
+        logger.exception("Unexpected error saving agent for session %s", session_id)
+        return _failure(
+            code="unexpected_save_error",
+            user_message="An unexpected error occurred while saving. Please try again.",
+            status_value="COLLECTING",
+            details_internal={"error": str(exc)},
+            retryable=True,
+        )
 

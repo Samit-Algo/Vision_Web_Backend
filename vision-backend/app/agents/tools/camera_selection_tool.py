@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import logging
 from typing import Any, Dict
 
 from ...domain.constants.camera_fields import CameraFields
@@ -10,6 +11,8 @@ from .save_to_db_tool import (
     set_camera_repository as _set_camera_repository_shared,
 )
 
+logger = logging.getLogger(__name__)
+
 
 # ============================================================================
 # REPOSITORY MANAGEMENT
@@ -18,7 +21,6 @@ from .save_to_db_tool import (
 def set_camera_repository(repository):
     """Set the camera repository for camera operations."""
     _set_camera_repository_shared(repository)
-    print(f"[camera_selection_tool.set_camera_repository] Camera repository set: {type(repository)}")
 
 
 def _get_camera_repository():
@@ -68,12 +70,10 @@ def list_cameras(user_id: str, session_id: str = "default") -> Dict[str, Any]:
         coll = _cameras_collection()
         cursor = coll.find({CameraFields.OWNER_USER_ID: user_id})
         cameras = [_doc_to_camera_item(doc) for doc in cursor]
-        print(f"[list_cameras] Found {len(cameras)} cameras for user {user_id}")
+        logger.debug("Found %d cameras for user %s", len(cameras), user_id)
         return {"cameras": cameras}
     except Exception as e:
-        import traceback
-        print(f"[list_cameras] ERROR: Failed to list cameras for user {user_id}: {str(e)}")
-        print(traceback.format_exc())
+        logger.exception("Failed to list cameras for user %s: %s", user_id, e)
         return {"error": f"Failed to list cameras: {str(e)}", "cameras": []}
 
 
@@ -102,7 +102,11 @@ def resolve_camera(name_or_id: str, user_id: str, session_id: str = "default") -
                 doc = coll.find_one({CameraFields.MONGO_ID: ObjectId(name_or_id)})
                 if doc and doc.get(CameraFields.OWNER_USER_ID) == user_id:
                     item = _doc_to_camera_item(doc)
-                    print(f"[resolve_camera] Found exact match by ID: {item['id']} ({item['name']})")
+                    logger.debug(
+                        "Resolved camera by ObjectId: %s (%s)",
+                        item["id"],
+                        item["name"],
+                    )
                     return {"status": "exact_match", "camera_id": item["id"], "camera_name": item["name"]}
             except Exception:
                 pass
@@ -111,7 +115,7 @@ def resolve_camera(name_or_id: str, user_id: str, session_id: str = "default") -
         doc = coll.find_one({CameraFields.ID: name_or_id})
         if doc and doc.get(CameraFields.OWNER_USER_ID) == user_id:
             item = _doc_to_camera_item(doc)
-            print(f"[resolve_camera] Found exact match by ID: {item['id']} ({item['name']})")
+            logger.debug("Resolved camera by ID: %s (%s)", item["id"], item["name"])
             return {"status": "exact_match", "camera_id": item["id"], "camera_name": item["name"]}
 
         # Search by name (partial, case-insensitive)
@@ -127,12 +131,15 @@ def resolve_camera(name_or_id: str, user_id: str, session_id: str = "default") -
             return {"status": "not_found"}
         if len(cameras_by_name) == 1:
             c = cameras_by_name[0]
-            print(f"[resolve_camera] Found exact match by name: {c['id']} ({c['name']})")
+            logger.debug("Resolved camera by name: %s (%s)", c["id"], c["name"])
             return {"status": "exact_match", "camera_id": c["id"], "camera_name": c["name"]}
-        print(f"[resolve_camera] Found {len(cameras_by_name)} multiple matches")
+        logger.debug("Found %d camera matches for query %r", len(cameras_by_name), name_or_id)
         return {"status": "multiple_matches", "cameras": cameras_by_name}
     except Exception as e:
-        import traceback
-        print(f"[resolve_camera] ERROR: Failed to resolve camera '{name_or_id}' for user {user_id}: {str(e)}")
-        print(traceback.format_exc())
+        logger.exception(
+            "Failed to resolve camera %r for user %s: %s",
+            name_or_id,
+            user_id,
+            e,
+        )
         return {"status": "not_found", "error": str(e)}

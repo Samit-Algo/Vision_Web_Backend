@@ -3,8 +3,11 @@ Tools for the General Chat Agent to provide information about the Vision AI syst
 """
 
 import json
+import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+
+logger = logging.getLogger(__name__)
 
 # Constants
 KB_PATH = Path(__file__).resolve().parent.parent.parent.parent / "knowledge_base" / "vision_rule_knowledge_base.json"
@@ -15,7 +18,7 @@ def _load_kb() -> Dict[str, Any]:
         with open(KB_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        print(f"Error loading knowledge base: {e}")
+        logger.exception("Error loading knowledge base: %s", e)
         return {"rules": []}
 
 def get_vision_rules_catalog() -> str:

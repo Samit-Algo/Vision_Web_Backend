@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Dict
 
 from ..session_state.agent_state import AgentState, get_agent_state
 from .kb_utils import compute_missing_fields, get_rule
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -40,10 +43,19 @@ def set_field_value(field_values_json: str, session_id: str = "default") -> Dict
             "message": "Invalid field values format."
         }
 
-    print(f"[set_field_value] Called with session_id={session_id}, field_values_json={field_values_json}")
+    logger.debug(
+        "set_field_value called (session_id=%s, payload_length=%s)",
+        session_id,
+        len(field_values_json or ""),
+    )
     try:
         agent = get_agent_state(session_id)
-        print(f"[set_field_value] Current agent state - status: {agent.status}, rule_id: {agent.rule_id}, missing_fields: {agent.missing_fields}")
+        logger.debug(
+            "Current state before set_field_value (status=%s rule_id=%s missing=%s)",
+            agent.status,
+            agent.rule_id,
+            agent.missing_fields,
+        )
 
         if not agent.rule_id:
             return {
@@ -78,24 +90,28 @@ def set_field_value(field_values_json: str, session_id: str = "default") -> Dict
 
         compute_missing_fields(agent, rule)
 
-        print(f"[set_field_value] After updating fields - updated_fields: {updated_fields}, missing_fields: {agent.missing_fields}, current_status: {agent.status}")
+        logger.debug(
+            "Fields updated (updated=%s missing=%s status=%s)",
+            updated_fields,
+            agent.missing_fields,
+            agent.status,
+        )
 
         if updated_fields and not agent.missing_fields:
             agent.status = "CONFIRMATION"
-            print(f"[set_field_value] Status changed to CONFIRMATION - all fields collected")
+            logger.debug("Status transitioned to CONFIRMATION")
         elif not updated_fields:
-            print(f"[set_field_value] No fields updated - keeping status: {agent.status}")
-            pass
+            logger.debug("No fields updated; keeping status=%s", agent.status)
         else:
             agent.status = "COLLECTING"
-            print(f"[set_field_value] Status set to COLLECTING - still missing fields: {agent.missing_fields}")
+            logger.debug("Status set to COLLECTING; remaining missing=%s", agent.missing_fields)
 
         result = {
             "updated_fields": updated_fields,
             "status": agent.status,
             "message": f"Updated {len(updated_fields)} field(s). Check CURRENT AGENT STATE in instruction for current missing_fields.",
         }
-        print(f"[set_field_value] Returning result: {result}")
+        logger.debug("set_field_value returning: %s", result)
         return result
     except ValueError as e:
         return {

@@ -2,9 +2,29 @@
 Detection and event related tools for the General Chat Agent.
 """
 
-import asyncio
+import logging
 from datetime import timedelta
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any
+
+logger = logging.getLogger(__name__)
+
+
+def _format_event_time(event_ts) -> str:
+    """Format event time safely for UI display."""
+    if event_ts is None:
+        return "Unknown time"
+    try:
+        # datetime object case
+        return event_ts.strftime("%I:%M %p")
+    except Exception:
+        pass
+    try:
+        # ISO string case
+        from datetime import datetime
+        dt = datetime.fromisoformat(str(event_ts).replace("Z", "+00:00"))
+        return dt.strftime("%I:%M %p")
+    except Exception:
+        return str(event_ts)
 
 def get_recent_detections(
     user_id: str, 
@@ -21,17 +41,16 @@ def get_recent_detections(
         days_ago: How many days ago to look (0 for today, 1 for yesterday, etc.).
         limit: Max number of results to return (default 10).
     """
-    from ....di.container import get_container
-    from ....domain.repositories.event_repository import EventRepository
-    from ....domain.repositories.camera_repository import CameraRepository
+    from ....utils.db import get_collection
     from ....utils.datetime_utils import now, ensure_utc
     from ....core.config import get_settings
+    from ....domain.constants.event_fields import EventFields
+    from ....domain.constants.camera_fields import CameraFields
 
-    print(f"[Backend Tool Debug] get_recent_detections called: user_id={user_id}, days_ago={days_ago}")
+    logger.debug("get_recent_detections called (user_id=%s days_ago=%s)", user_id, days_ago)
 
-    container = get_container()
-    event_repo = container.get(EventRepository)
-    camera_repo = container.get(CameraRepository)
+    event_collection = get_collection("events")
+    camera_collection = get_collection("cameras")
     settings = get_settings()
     base_url = settings.web_backend_url.rstrip("/")
     
@@ -45,46 +64,68 @@ def get_recent_detections(
     end_utc = ensure_utc(end_local)
     
     try:
-        async def _fetch():
-            total, events = await event_repo.list(
-                owner_user_id=user_id,
-                start_utc=start_utc,
-                end_utc=end_utc,
-                limit=100,
-                skip=0
+        # Match repository behavior: include user-owned + legacy events with null/missing owner.
+        query = {
+            "$or": [
+                {EventFields.OWNER_USER_ID: user_id},
+                {EventFields.OWNER_USER_ID: None},
+                {EventFields.OWNER_USER_ID: {"$exists": False}},
+            ],
+            EventFields.EVENT_TS: {"$gte": start_utc, "$lt": end_utc},
+        }
+
+        # Fetch recent events for the date window.
+        event_docs = list(
+            event_collection.find(query)
+            .sort([(EventFields.EVENT_TS, -1), (EventFields.RECEIVED_AT, -1)])
+            .limit(100)
+        )
+
+        # Build camera name map once.
+        camera_docs = list(
+            camera_collection.find(
+                {CameraFields.OWNER_USER_ID: user_id},
+                {CameraFields.ID: 1, CameraFields.NAME: 1},
             )
-            
-            # Pre-fetch all cameras to resolve names efficiently
-            cameras = await camera_repo.find_by_owner(user_id)
-            camera_map = {c.id: c.name for c in cameras}
-            
-            return events, camera_map
+        )
+        camera_map = {}
+        for c in camera_docs:
+            cam_id = c.get(CameraFields.ID)
+            if cam_id:
+                camera_map[str(cam_id)] = c.get(CameraFields.NAME) or "Unknown"
         
-        events, camera_map = asyncio.run(_fetch())
-        
-        print(f"[Backend Tool Debug] Found {len(events)} total events in repository.")
+        logger.debug("Found %d total events in repository", len(event_docs))
 
         filtered_events = []
-        for e in events:
-            if camera_id and e.camera_id != camera_id:
+        for e in event_docs:
+            event_camera_id = e.get(EventFields.CAMERA_ID)
+            if camera_id and event_camera_id != camera_id:
                 continue
             
             # Resolve camera name
-            camera_name = e.metadata.get("camera_name")
-            if not camera_name and e.camera_id:
-                camera_name = camera_map.get(e.camera_id, "Unknown")
+            metadata = e.get(EventFields.METADATA) or {}
+            camera_name = metadata.get("camera_name")
+            if not camera_name and event_camera_id:
+                camera_name = camera_map.get(str(event_camera_id), "Unknown")
             
-            evidence_image_url = f"{base_url}/api/v1/events/{e.id}/image" if e.image_path else None
+            event_id = str(e.get(EventFields.MONGO_ID))
+            image_path = e.get(EventFields.IMAGE_PATH)
+            evidence_image_url = f"{base_url}/api/v1/events/{event_id}/image" if image_path else None
             
-            print(f"[Backend Tool Debug] Event {e.id}: has_image={bool(e.image_path)}, url={evidence_image_url}")
+            logger.debug(
+                "Event %s has_image=%s evidence_url=%s",
+                event_id,
+                bool(image_path),
+                evidence_image_url,
+            )
 
             filtered_events.append({
-                "event_id": e.id,
-                "label": e.label,
+                "event_id": event_id,
+                "label": e.get(EventFields.LABEL) or "Event",
                 "camera_name": camera_name or "Unknown",
-                "camera_id": e.camera_id,
-                "timestamp": e.event_ts.strftime("%I:%M %p"),
-                "severity": e.severity,
+                "camera_id": event_camera_id,
+                "timestamp": _format_event_time(e.get(EventFields.EVENT_TS)),
+                "severity": e.get(EventFields.SEVERITY) or "info",
                 "evidence_url": evidence_image_url
             })
             
@@ -98,65 +139,82 @@ def get_recent_detections(
         }
         
     except Exception as e:
-        print(f"[Backend Tool Debug] ERROR: {str(e)}")
+        logger.exception("Failed to fetch recent detections: %s", e)
         return {"status": "error", "message": f"Failed to fetch events: {str(e)}"}
 
 def get_event_details(user_id: str, event_id: str) -> Dict[str, Any]:
     """
     Get full technical details of a specific event, including raw metadata.
     """
-    from ....di.container import get_container
-    from ....domain.repositories.event_repository import EventRepository
-    from ....domain.repositories.camera_repository import CameraRepository
+    from bson import ObjectId
+    from bson.errors import InvalidId
+    from ....utils.db import get_collection
     from ....core.config import get_settings
+    from ....domain.constants.event_fields import EventFields
+    from ....domain.constants.camera_fields import CameraFields
 
-    print(f"[Backend Tool Debug] get_event_details called: event_id={event_id}")
+    logger.debug("get_event_details called (event_id=%s)", event_id)
 
-    container = get_container()
-    event_repo = container.get(EventRepository)
-    camera_repo = container.get(CameraRepository)
+    event_collection = get_collection("events")
+    camera_collection = get_collection("cameras")
     settings = get_settings()
     base_url = settings.web_backend_url.rstrip("/")
 
     try:
-        async def _fetch():
-            event = await event_repo.get_by_id(owner_user_id=user_id, event_id=event_id)
-            if not event:
-                return None, None
-            
-            camera = None
-            if event.camera_id:
-                camera = await camera_repo.find_by_id(event.camera_id)
-            
-            return event, camera
-
-        event, camera = asyncio.run(_fetch())
-
-        if not event:
-            print(f"[Backend Tool Debug] Event {event_id} not found.")
+        try:
+            object_id = ObjectId(event_id)
+        except (InvalidId, ValueError, TypeError):
             return {"status": "error", "message": f"Event with ID `{event_id}` not found or access denied."}
 
-        evidence_image_url = f"{base_url}/api/v1/events/{event.id}/image" if event.image_path else None
-        print(f"[Backend Tool Debug] Event details for {event.id}: has_image={bool(event.image_path)}, url={evidence_image_url}")
+        query = {
+            EventFields.MONGO_ID: object_id,
+            "$or": [
+                {EventFields.OWNER_USER_ID: user_id},
+                {EventFields.OWNER_USER_ID: None},
+                {EventFields.OWNER_USER_ID: {"$exists": False}},
+            ],
+        }
+        event = event_collection.find_one(query)
+
+        if not event:
+            logger.debug("Event not found: %s", event_id)
+            return {"status": "error", "message": f"Event with ID `{event_id}` not found or access denied."}
+
+        camera = None
+        event_camera_id = event.get(EventFields.CAMERA_ID)
+        if event_camera_id:
+            camera = camera_collection.find_one({CameraFields.ID: event_camera_id})
+
+        evidence_image_url = (
+            f"{base_url}/api/v1/events/{str(event.get(EventFields.MONGO_ID))}/image"
+            if event.get(EventFields.IMAGE_PATH)
+            else None
+        )
+        logger.debug(
+            "Event details %s has_image=%s evidence_url=%s",
+            str(event.get(EventFields.MONGO_ID)),
+            bool(event.get(EventFields.IMAGE_PATH)),
+            evidence_image_url,
+        )
 
         return {
             "status": "success",
-            "event_id": event.id,
-            "label": event.label,
-            "severity": event.severity,
-            "timestamp": event.event_ts.isoformat(),
+            "event_id": str(event.get(EventFields.MONGO_ID)),
+            "label": event.get(EventFields.LABEL) or "Event",
+            "severity": event.get(EventFields.SEVERITY) or "info",
+            "timestamp": str(event.get(EventFields.EVENT_TS)),
             "camera": {
-                "id": event.camera_id,
-                "name": camera.name if camera else "Unknown"
+                "id": event_camera_id,
+                "name": (camera.get(CameraFields.NAME) if camera else "Unknown")
             },
             "agent": {
-                "id": event.agent_id,
-                "name": event.agent_name
+                "id": event.get(EventFields.AGENT_ID),
+                "name": event.get(EventFields.AGENT_NAME)
             },
-            "metadata": event.metadata,
+            "metadata": event.get(EventFields.METADATA) or {},
             "evidence_url": evidence_image_url
         }
 
     except Exception as e:
-        print(f"[Backend Tool Debug] ERROR in get_event_details: {str(e)}")
+        logger.exception("Failed to fetch event details for %s: %s", event_id, e)
         return {"status": "error", "message": f"Failed to fetch event details: {str(e)}"}
