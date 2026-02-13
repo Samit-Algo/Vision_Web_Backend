@@ -1,13 +1,11 @@
 import json
 import logging
 import os
-from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
-from pytz import UTC, timezone
 
 from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
@@ -19,7 +17,7 @@ from google.adk.tools import FunctionTool
 from google.genai import types
 
 from ..core.config import get_settings
-from .exceptions import VisionAgentError, KnowledgeBaseError
+from .exceptions import VisionAgentError
 
 logger = logging.getLogger(__name__)
 
@@ -30,13 +28,6 @@ from .tools.camera_selection_tool import (
 from .tools.initialize_state_tool import initialize_state as initialize_state_impl
 from .tools.save_to_db_tool import save_to_db as save_to_db_impl
 from .tools.set_field_value_tool import set_field_value as set_field_value_impl
-
-
-# ============================================================================
-# LOGGING & CONFIGURATION
-# ============================================================================
-
-logger = logging.getLogger(__name__)
 
 
 # ============================================================================

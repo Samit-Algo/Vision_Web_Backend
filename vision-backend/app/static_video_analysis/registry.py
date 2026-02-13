@@ -54,3 +54,31 @@ def get_video_path(video_id: str, user_id: Optional[str] = None) -> Optional[str
     if path and Path(path).exists():
         return path
     return None
+
+
+def list_user_videos(user_id: str) -> list[dict]:
+    """List registered static videos for a user (newest first)."""
+    data = _load_registry()
+    items: list[dict] = []
+    for video_id, entry in data.items():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("user_id") != user_id:
+            continue
+        video_path = entry.get("path")
+        if not video_path:
+            continue
+        resolved_path = Path(video_path).resolve()
+        if not resolved_path.exists() or not resolved_path.is_file():
+            continue
+        items.append(
+            {
+                "video_id": video_id,
+                "video_path": str(resolved_path),
+                "filename": resolved_path.name,
+                "created_at": entry.get("created_at"),
+            }
+        )
+
+    items.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+    return items

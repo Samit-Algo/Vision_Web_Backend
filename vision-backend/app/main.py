@@ -1,227 +1,255 @@
-# Standard library imports
-from pathlib import Path
-from contextlib import asynccontextmanager
-from typing import Optional, Tuple, Dict, Any
-import logging
-import asyncio
-import threading
-from multiprocessing import Manager
+"""
+Application entry point for the Vision Backend API.
 
-# External package imports
+This module creates the FastAPI application, wires middleware and routers,
+and manages startup/shutdown (WebSockets, Kafka, event session, vision runner).
+"""
+
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
+import asyncio
+import logging
+import threading
+from contextlib import asynccontextmanager
+from multiprocessing import Manager
+from pathlib import Path
+from typing import Any, Optional
+
+# -----------------------------------------------------------------------------
+# Third-party
+# -----------------------------------------------------------------------------
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# Local application imports
+# -----------------------------------------------------------------------------
+# API (routers)
+# -----------------------------------------------------------------------------
 from .api.v1 import (
     auth_router,
     camera_router,
     chat_router,
+    events_router,
     general_chat_router,
     notifications_router,
-    streaming_router,
-    events_router,
-    static_video_analysis_router,
-    video_upload_router,
-    notifications_router,
-    streaming_router,
-    events_router,
     person_gallery_router,
+    static_video_analysis_router,
+    streaming_router,
+    video_upload_router,
 )
 from .api.v1.notifications_controller import set_websocket_manager
-from .infrastructure.notifications import WebSocketManager, NotificationService
-from .infrastructure.streaming import WsFmp4Service
+
+# -----------------------------------------------------------------------------
+# Infrastructure
+# -----------------------------------------------------------------------------
 from .infrastructure.messaging import KafkaEventConsumer
+from .infrastructure.notifications import NotificationService, WebSocketManager
+from .infrastructure.streaming import WsFmp4Service
+
+# -----------------------------------------------------------------------------
+# DI, processing, utils
+# -----------------------------------------------------------------------------
 from .di.container import get_container
-from .processing.main_process.run_vision_app import main as run_runner
 from .processing.helpers import set_shared_store
+from .processing.main_process.run_vision_app import main as run_vision_runner
 from .utils.event_session_manager import get_event_session_manager
 
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 
-# Global instances
-_websocket_manager: Optional[WebSocketManager] = None
-_notification_service: Optional[NotificationService] = None
-_kafka_consumer: Optional[KafkaEventConsumer] = None
-_shared_store: Optional[Any] = None
-_runner_thread: Optional[threading.Thread] = None
+# -----------------------------------------------------------------------------
+# Constants (used in lifespan)
+# -----------------------------------------------------------------------------
+# Seconds to wait after starting the vision runner so camera publishers can init.
+RUNNER_STARTUP_DELAY_SECONDS = 3
+
+# CORS origins allowed for the API (dev/demo).
+CORS_ORIGINS = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:8081",
+    "https://spicy-garlics-wonder.loca.lt",
+]
+
+# -----------------------------------------------------------------------------
+# Application-global state (set during lifespan startup, cleared on shutdown)
+# -----------------------------------------------------------------------------
+websocket_manager: Optional[WebSocketManager] = None
+notification_service: Optional[NotificationService] = None
+kafka_consumer: Optional[KafkaEventConsumer] = None
+shared_store: Optional[Any] = None
+runner_thread: Optional[threading.Thread] = None
 
 
 def get_websocket_manager() -> Optional[WebSocketManager]:
-    """
-    Get the global WebSocketManager instance.
-    
-    This allows other modules (like event_notifier) to access the WebSocketManager
-    to send notifications directly to connected clients.
-    
-    Returns:
-        WebSocketManager instance if available, None otherwise
-    """
-    return _websocket_manager
+    """Return the global WebSocket manager, or None if not yet initialized."""
+    return websocket_manager
 
 
 def get_notification_service() -> Optional[NotificationService]:
-    """
-    Get the global NotificationService instance.
-    
-    Returns:
-        NotificationService instance if available, None otherwise
-    """
-    return _notification_service
+    """Return the global notification service, or None if not yet initialized."""
+    return notification_service
+
+
+# -----------------------------------------------------------------------------
+# Lifespan: startup and shutdown
+# -----------------------------------------------------------------------------
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Lifespan context manager for startup/shutdown events.
-    
-    Initializes WebSocket manager, notification service,
-    Event Session Manager, and YOLO processing Runner.
+    Handle application startup and shutdown.
+
+    Startup (in order):
+        1. WebSocket manager and notification service
+        2. Kafka event consumer (optional; logs warning if it fails)
+        3. Event session manager
+        4. Shared store for frame sharing
+        5. Vision runner in a background thread
+
+    Shutdown (in order):
+        1. Stop all live WebSocket streams
+        2. Stop event session manager
+        3. Stop Kafka consumer
+        (Runner thread is daemon; it exits with the process.)
     """
-    global _websocket_manager, _notification_service, _kafka_consumer
-    global _shared_store, _runner_thread
-    
-    # Initialize WebSocket manager and notification service
+    global websocket_manager, notification_service, kafka_consumer
+    global shared_store, runner_thread
+
+    # ----- Startup -----
+
+    # 1. WebSocket and notification service
     try:
-        _websocket_manager = WebSocketManager()
-        _notification_service = NotificationService()
-        
-        # Set global WebSocket manager for notifications controller
-        set_websocket_manager(_websocket_manager)
-        
+        websocket_manager = WebSocketManager()
+        notification_service = NotificationService()
+        set_websocket_manager(websocket_manager)
         logger.info("WebSocket manager and notification service initialized")
     except Exception as e:
-        logger.error(f"Failed to initialize notification services: {e}", exc_info=True)
-        _websocket_manager = None
-        _notification_service = None
+        logger.error("Failed to initialize notification services: %s", e, exc_info=True)
+        websocket_manager = None
+        notification_service = None
 
-    # Startup: Start Kafka consumer (FastAPI side) for realtime notifications
-    # IMPORTANT: no retry logic; if Kafka is down, we just log and continue.
+    # 2. Kafka consumer (optional)
     try:
-        if _websocket_manager and _notification_service:
-            if KafkaEventConsumer is not None:
-                loop = asyncio.get_running_loop()
-                _kafka_consumer = KafkaEventConsumer(
-                    websocket_manager=_websocket_manager,
-                    notification_service=_notification_service,
-                    loop=loop,
-                )
-                _kafka_consumer.start()
-                logger.info("KafkaEventConsumer started")
+        if websocket_manager and notification_service and KafkaEventConsumer is not None:
+            loop = asyncio.get_running_loop()
+            kafka_consumer = KafkaEventConsumer(
+                websocket_manager=websocket_manager,
+                notification_service=notification_service,
+                loop=loop,
+            )
+            kafka_consumer.start()
+            logger.info("Kafka event consumer started")
+        else:
+            kafka_consumer = None
     except Exception as e:
-        logger.warning(f"KafkaEventConsumer not started: {e}")
-        _kafka_consumer = None
-    
-    # Startup: Initialize Event Session Manager
+        logger.warning("Kafka consumer not started: %s", e)
+        kafka_consumer = None
+
+    # 3. Event session manager
     try:
-        session_manager = get_event_session_manager()  # This starts background workers
-        logger.info("Event Session Manager initialized and started")
+        get_event_session_manager()
+        logger.info("Event session manager initialized")
     except Exception as e:
-        logger.error(f"Failed to initialize Event Session Manager: {e}", exc_info=True)
-    
-    # Startup: Create shared store for runner (frame sharing between CameraPublisher and workers)
+        logger.error("Failed to initialize event session manager: %s", e, exc_info=True)
+
+    # 4. Shared store for vision runner (frame sharing)
     try:
         manager = Manager()
-        _shared_store = manager.dict()
-        # Expose to other modules (e.g. streaming overlays)
-        set_shared_store(_shared_store)
+        shared_store = manager.dict()
+        set_shared_store(shared_store)
         logger.info("Shared store created for frame sharing")
     except Exception as e:
-        logger.error(f"Failed to create shared store: {e}", exc_info=True)
-        _shared_store = None
-    
-    # Startup: Start Runner in background thread
-    # Runner will start CameraPublisher for each camera and Worker for each agent
-    try:
-        def run_runner_with_store():
-            run_runner(_shared_store)
-        
-        _runner_thread = threading.Thread(target=run_runner_with_store, daemon=True)
-        _runner_thread.start()
-        logger.info("YOLO processing Runner started in background thread")
-        logger.info("Waiting for CameraPublisher to initialize...")
-        
-        # Give CameraPublisher time to connect and start publishing
-        await asyncio.sleep(3)
-        logger.info("Runner initialization complete")
-    except Exception as e:
-        logger.error(f"Failed to start Runner: {e}", exc_info=True)
-        _runner_thread = None
-    
+        logger.error("Failed to create shared store: %s", e, exc_info=True)
+        shared_store = None
+
+    # 5. Vision runner in background thread (only if shared store is available)
+    if shared_store is not None:
+        try:
+            def run_runner():
+                run_vision_runner(shared_store)
+
+            runner_thread = threading.Thread(target=run_runner, daemon=True)
+            runner_thread.start()
+            logger.info("Vision runner started in background thread")
+            await asyncio.sleep(RUNNER_STARTUP_DELAY_SECONDS)
+            logger.info("Vision runner initialization complete")
+        except Exception as e:
+            logger.error("Failed to start vision runner: %s", e, exc_info=True)
+            runner_thread = None
+    else:
+        logger.warning("Vision runner not started: shared store unavailable")
+        runner_thread = None
+
     yield
-    
-    # Shutdown: Clean up live WS streams
+
+    # ----- Shutdown -----
+
+    # 1. Stop all live WebSocket streams
     try:
         container = get_container()
         ws_service: WsFmp4Service = container.get(WsFmp4Service)
         await ws_service.cleanup_all_streams()
-        logger.info("All live WS streams stopped during application shutdown")
+        logger.info("All live WebSocket streams stopped")
     except Exception as e:
-        logger.error(f"Error stopping live WS streams: {e}", exc_info=True)
-    
-    # Shutdown: Stop Event Session Manager
-    try:
-        session_manager = get_event_session_manager()
-        session_manager.stop()
-        logger.info("Event Session Manager stopped")
-    except Exception as e:
-        logger.error(f"Error stopping Event Session Manager: {e}", exc_info=True)
+        logger.error("Error stopping WebSocket streams: %s", e, exc_info=True)
 
-    # Shutdown: Stop Kafka consumer
+    # 2. Stop event session manager
     try:
-        if _kafka_consumer:
-            _kafka_consumer.stop()
-            logger.info("KafkaEventConsumer stopped")
+        get_event_session_manager().stop()
+        logger.info("Event session manager stopped")
     except Exception as e:
-        logger.error(f"Error stopping KafkaEventConsumer: {e}", exc_info=True)
-    
-    # Shutdown: Cleanup complete
-    
-    # Note: Runner thread is daemon, so it will terminate when main process exits
-    # CameraPublisher and Worker processes are also daemon, so they will terminate automatically
+        logger.error("Error stopping event session manager: %s", e, exc_info=True)
+
+    # 3. Stop Kafka consumer
+    try:
+        if kafka_consumer is not None:
+            kafka_consumer.stop()
+            logger.info("Kafka consumer stopped")
+    except Exception as e:
+        logger.error("Error stopping Kafka consumer: %s", e, exc_info=True)
+
     logger.info("Application shutdown complete")
+
+
+# -----------------------------------------------------------------------------
+# App factory and instance
+# -----------------------------------------------------------------------------
 
 
 def create_application() -> FastAPI:
     """
-    Create and configure FastAPI application.
-    
-    This function sets up the FastAPI application with:
-    - Environment variable loading
-    - CORS middleware configuration
-    - API route registration
-    
-    Returns:
-        Configured FastAPI application instance
+    Create and configure the FastAPI application.
+
+    - Loads environment from .env
+    - Applies CORS middleware
+    - Registers all v1 API routers
+    - Uses lifespan for startup/shutdown
     """
-    # Load environment variables from .env file
     env_path = Path(__file__).resolve().parent.parent / ".env"
     load_dotenv(env_path)
-    
-    # Create FastAPI app
+
     application = FastAPI(
         title="Vision Backend API",
         version="1.0.0",
         description="Clean Architecture Vision Backend Application",
-        lifespan=lifespan
+        lifespan=lifespan,
     )
-    
-    # Add CORS middleware
+
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://localhost:5173",
-            "http://localhost:3000",
-            "http://127.0.0.1:3000",  # Desktop app (Electron)
-            "http://localhost:8081",
-            "https://spicy-garlics-wonder.loca.lt",
-        ],
+        allow_origins=CORS_ORIGINS,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    
-    # Register API routers
+
+    # Register API routers (v1)
     application.include_router(auth_router, prefix="/api/v1/auth")
     application.include_router(camera_router, prefix="/api/v1/cameras")
     application.include_router(chat_router, prefix="/api/v1/chat")
@@ -236,6 +264,4 @@ def create_application() -> FastAPI:
     return application
 
 
-# Create application instance
 app = create_application()
-

@@ -9,7 +9,7 @@ Flow:
 from .agent import run_agent
 from .gemini_client import analyze_video, analyze_video_full, ask_video
 from .vector_store import has_video, search, store_analysis
-from .registry import register_video, get_video_path
+from .registry import register_video, get_video_path, list_user_videos
 
 __all__ = [
     "run_agent",
@@ -21,4 +21,5 @@ __all__ = [
     "store_analysis",
     "register_video",
     "get_video_path",
+    "list_user_videos",
 ]

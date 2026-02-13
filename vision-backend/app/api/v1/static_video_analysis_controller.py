@@ -7,6 +7,7 @@ Static video analysis — two simple APIs:
 
 import uuid
 from pathlib import Path
+import re
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, status, UploadFile
 
@@ -18,6 +19,7 @@ from ...static_video_analysis import (
     analyze_video_full,
     get_video_path,
     has_video,
+    list_user_videos,
     register_video,
     run_agent,
     store_analysis,
@@ -30,9 +32,16 @@ router = APIRouter(tags=["static-video-analysis"])
 ALLOWED_EXTENSIONS = {".mp4", ".webm", ".avi", ".mov", ".mkv"}
 
 
-def _upload_dir() -> Path:
+def _safe_user_segment(user_id: str) -> str:
+    """Filesystem-safe user folder name."""
+    return re.sub(r"[^a-zA-Z0-9._-]", "_", str(user_id))
+
+
+def _upload_dir(user_id: str | None = None) -> Path:
     base = Path(get_settings().static_video_upload_dir)
     upload_dir = base / "static"
+    if user_id:
+        upload_dir = upload_dir / _safe_user_segment(user_id)
     upload_dir.mkdir(parents=True, exist_ok=True)
     return upload_dir
 
@@ -71,7 +80,7 @@ async def upload_and_analyze(
 
     video_id = uuid.uuid4().hex
     ext = Path(file.filename).suffix.lower()
-    video_path = _upload_dir() / f"{video_id}{ext}"
+    video_path = _upload_dir(current_user.id) / f"{video_id}{ext}"
 
     size = 0
     with open(video_path, "wb") as f:
@@ -117,3 +126,61 @@ async def ask(
 
     answer = run_agent(video_id, question, video_path)
     return AskResponse(answer=answer)
+
+
+@router.get("/videos/static/library")
+async def list_static_video_library(
+    current_user: UserResponse = Depends(get_current_user),
+) -> dict:
+    """
+    Return previously uploaded static videos for the authenticated user.
+    Source of truth: user's static upload folder used by chat upload flow.
+    """
+    items: list[dict] = []
+    user_dir = _upload_dir(current_user.id)
+
+    if user_dir.exists():
+        for file_path in sorted(
+            [p for p in user_dir.iterdir() if p.is_file() and p.suffix.lower() in ALLOWED_EXTENSIONS],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        ):
+            video_id = file_path.stem
+            resolved = str(file_path.resolve())
+            # Keep registry in sync so /videos/static/ask works for folder-listed videos.
+            register_video(video_id, resolved, current_user.id)
+            items.append(
+                {
+                    "video_id": video_id,
+                    "video_path": resolved,
+                    "filename": file_path.name,
+                    "created_at": None,
+                }
+            )
+
+    # Backward compatibility 1: legacy flat static folder (before per-user folders).
+    if not items:
+        legacy_dir = _upload_dir()
+        if legacy_dir.resolve() != user_dir.resolve() and legacy_dir.exists():
+            for file_path in sorted(
+                [p for p in legacy_dir.iterdir() if p.is_file() and p.suffix.lower() in ALLOWED_EXTENSIONS],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            ):
+                video_id = file_path.stem
+                resolved = str(file_path.resolve())
+                register_video(video_id, resolved, current_user.id)
+                items.append(
+                    {
+                        "video_id": video_id,
+                        "video_path": resolved,
+                        "filename": file_path.name,
+                        "created_at": None,
+                    }
+                )
+
+    # Backward compatibility 2: include registry-based entries.
+    if not items:
+        items = list_user_videos(current_user.id)
+
+    return {"videos": items}
