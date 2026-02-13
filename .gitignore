@@ -34,4 +34,6 @@ vision-backend/*.pt
 vision-backend/event_videos/*.mp4
 *.yml
 *.pt
+!vision-backend/box_detection.pt
+!vision-backend/fire_detection.pt
 back_up_models
