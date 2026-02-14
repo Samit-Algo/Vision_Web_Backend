@@ -1,28 +1,45 @@
+"""
+Events API: list events (with range filter), get event by ID, get event image.
+"""
+
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 import logging
 from datetime import datetime, timedelta
-from typing import Optional
-
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import FileResponse
 from pathlib import Path
+from typing import Optional
 from zoneinfo import ZoneInfo
 
+# -----------------------------------------------------------------------------
+# Third-party
+# -----------------------------------------------------------------------------
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import FileResponse
+
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
+from ...application.dto.event_dto import EventDetailResponse, EventListResponse
+from ...application.dto.user_dto import UserResponse
+from ...application.use_cases.event.get_event import GetEventUseCase
+from ...application.use_cases.event.list_events import ListEventsUseCase
 from ...core.config import get_settings
 from ...di.container import get_container
-from ...application.dto.user_dto import UserResponse
-from ...application.dto.event_dto import EventListResponse, EventDetailResponse
-from ...application.use_cases.event.list_events import ListEventsUseCase
-from ...application.use_cases.event.get_event import GetEventUseCase
 from ...domain.repositories.event_repository import EventRepository
 from ...utils.event_storage import EVENTS_BASE_DIR
+
 from .dependencies import get_current_user
 
+# -----------------------------------------------------------------------------
+# Logging and router
+# -----------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
-
 router = APIRouter(tags=["events"])
 
 
-def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
+def parse_iso_timestamp(ts: Optional[str]) -> Optional[datetime]:
+    """Parse ISO timestamp string to datetime. Returns None if invalid."""
     if not ts:
         return None
     try:
@@ -31,7 +48,7 @@ def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def _range_to_utc(range_name: str) -> tuple[Optional[datetime], Optional[datetime]]:
+def range_to_utc(range_name: str) -> tuple[Optional[datetime], Optional[datetime]]:
     """
     Convert range selection (today/yesterday/all) into UTC datetime boundaries.
     Uses LOCAL_TIMEZONE from settings.
@@ -79,12 +96,10 @@ async def list_events(
     use_case = container.get(ListEventsUseCase)
 
     try:
-        start_utc, end_utc = _range_to_utc(range)
-
-        # Allow explicit date override if provided
+        start_utc, end_utc = range_to_utc(range)
         if start_ts or end_ts:
-            start_utc = _parse_iso(start_ts)
-            end_utc = _parse_iso(end_ts)
+            start_utc = parse_iso_timestamp(start_ts)
+            end_utc = parse_iso_timestamp(end_ts)
 
         return await use_case.execute(
             owner_user_id=current_user.id,
@@ -94,7 +109,7 @@ async def list_events(
             skip=skip,
         )
     except Exception as e:
-        logger.error(f"Error listing events: {e}", exc_info=True)
+        logger.error("Error listing events: %s", e, exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to list events")
 
 
@@ -110,7 +125,7 @@ async def get_event(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
-        logger.error(f"Error getting event: {e}", exc_info=True)
+        logger.error("Error getting event: %s", e, exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get event")
 
 

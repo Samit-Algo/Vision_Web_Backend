@@ -1,11 +1,27 @@
+"""
+Time context helpers for agent prompts.
+
+Provides current time in UTC and application timezone for use in LLM instructions.
+"""
+
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 from datetime import datetime
+
+# -----------------------------------------------------------------------------
+# Third-party
+# -----------------------------------------------------------------------------
 from pytz import UTC, timezone
 
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
 from ...core.config import get_settings
 
 
-def _get_local_tz():
-    """Get application timezone from config (e.g. Asia/Kolkata)."""
+def get_local_tz():
+    """Return application timezone from config (e.g. Asia/Kolkata)."""
     tz_str = get_settings().local_timezone or "UTC"
     try:
         return timezone(tz_str)
@@ -15,11 +31,12 @@ def _get_local_tz():
 
 def get_current_time_context() -> str:
     """
-    Get current time context for the LLM prompt.
-    Machine-readable and human-readable formats for UTC and local timezone.
-    Uses LOCAL_TIMEZONE from config (default Asia/Kolkata).
+    Return current time context for the LLM prompt.
+
+    Includes machine-readable and human-readable UTC and local time.
+    Uses LOCAL_TIMEZONE from config.
     """
-    local_tz = _get_local_tz()
+    local_tz = get_local_tz()
     tz_name = get_settings().local_timezone or "UTC"
 
     now_utc = datetime.now(UTC)
@@ -43,11 +60,8 @@ def get_current_time_context() -> str:
 
 
 def get_short_time_context() -> str:
-    """
-    Minimal one-line time context for dynamic (per-turn) instructions.
-    Uses LOCAL_TIMEZONE from config.
-    """
-    local_tz = _get_local_tz()
+    """Return a minimal one-line time context for per-turn instructions."""
+    local_tz = get_local_tz()
     now_utc = datetime.now(UTC)
     now_local = now_utc.astimezone(local_tz)
     tz_name = get_settings().local_timezone or "UTC"
@@ -55,8 +69,5 @@ def get_short_time_context() -> str:
 
 
 def get_utc_iso_z() -> str:
-    """
-    Minimal UTC ISO 8601 string for time window formatting.
-    Format: YYYY-MM-DDTHH:MM:SSZ
-    """
+    """Return current UTC as ISO 8601 string (YYYY-MM-DDTHH:MM:SSZ)."""
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

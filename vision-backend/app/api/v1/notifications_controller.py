@@ -1,50 +1,67 @@
-"""Notifications API endpoints for real-time event notifications via WebSocket"""
+"""
+Notifications API: WebSocket for real-time events, video chunks, event images, push (FCM).
+"""
 
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
+import json
 import logging
-import base64
-import time
 from pathlib import Path
-from typing import Optional, List, Dict, Any
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, HTTPException, status, Depends, Response, Request
+from typing import Any, Dict, List, Optional
+from urllib.parse import quote
+
+# -----------------------------------------------------------------------------
+# Third-party
+# -----------------------------------------------------------------------------
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
+from ...application.dto.user_dto import UserResponse
 from ...core.security import decode_jwt_token
-from ...infrastructure.notifications import WebSocketManager, send_push_notification, send_push_notification_multicast
+from ...infrastructure.notifications import (
+    WebSocketManager,
+    send_push_notification,
+    send_push_notification_multicast,
+)
 from ...utils.event_storage import (
     EVENTS_BASE_DIR,
-    get_video_chunk_path,
     get_video_chunk_metadata_path,
-    list_video_chunks_for_session
+    get_video_chunk_path,
+    list_video_chunks_for_session,
 )
+
 from .dependencies import get_current_user
-from ...application.dto.user_dto import UserResponse
 
+# -----------------------------------------------------------------------------
+# Logging and router
+# -----------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
-
 router = APIRouter(tags=["notifications"])
 
-# Global WebSocket manager (set from main.py)
-_global_websocket_manager: Optional[WebSocketManager] = None
-
-# In-memory storage for device tokens (simple list)
-_registered_device_tokens: List[str] = []
+# Set from main.py at startup
+global_websocket_manager: Optional[WebSocketManager] = None
+registered_device_tokens: List[str] = []
 
 
 def set_websocket_manager(manager: WebSocketManager) -> None:
-    """Set the global WebSocket manager instance"""
-    global _global_websocket_manager
-    _global_websocket_manager = manager
+    """Set the global WebSocket manager (called from main.py lifespan)."""
+    global global_websocket_manager
+    global_websocket_manager = manager
 
 
 def get_websocket_manager() -> WebSocketManager:
-    """Get the global WebSocket manager instance"""
-    if _global_websocket_manager is None:
+    """Return the global WebSocket manager. Raises if not initialized."""
+    if global_websocket_manager is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="WebSocket manager not available"
+            detail="WebSocket manager not available",
         )
-    return _global_websocket_manager
+    return global_websocket_manager
 
 
 async def get_user_id_from_token(token: str) -> str:
@@ -67,10 +84,10 @@ async def get_user_id_from_token(token: str) -> str:
             raise ValueError("Token does not contain user ID")
         return user_id
     except Exception as e:
-        logger.warning(f"Invalid token for WebSocket connection: {e}")
+        logger.warning("Invalid token for WebSocket connection: %s", e)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid or expired token: {str(e)}"
+            detail="Invalid or expired token",
         )
 
 
@@ -114,7 +131,7 @@ async def websocket_notifications(
     
     # Accept WebSocket connection
     await websocket.accept()
-    logger.info(f"WebSocket connection accepted for user {user_id}")
+    logger.info("WebSocket connection accepted for user %s", user_id)
     
     try:
         # Register connection with manager
@@ -141,25 +158,25 @@ async def websocket_notifications(
                     pass
                 else:
                     # Log unexpected messages
-                    logger.debug(f"Received message from user {user_id}: {message}")
+                    logger.debug("Received message from user %s: %s", user_id, message)
                     
             except WebSocketDisconnect:
                 # Client disconnected
-                logger.info(f"WebSocket disconnected for user {user_id}")
+                logger.info("WebSocket disconnected for user %s", user_id)
                 break
             except Exception as e:
-                logger.error(f"Error handling WebSocket message for user {user_id}: {e}", exc_info=True)
+                logger.error("Error handling WebSocket message for user %s: %s", user_id, e, exc_info=True)
                 break
                 
     except Exception as e:
-        logger.error(f"Error in WebSocket connection for user {user_id}: {e}", exc_info=True)
+        logger.error("Error in WebSocket connection for user %s: %s", user_id, e, exc_info=True)
     finally:
         # Clean up: remove connection from manager
         try:
             await manager.remove_connection(user_id, websocket)
-            logger.info(f"WebSocket connection cleaned up for user {user_id}")
+            logger.info("WebSocket connection cleaned up for user %s", user_id)
         except Exception as e:
-            logger.error(f"Error cleaning up WebSocket connection for user {user_id}: {e}", exc_info=True)
+            logger.error("Error cleaning up WebSocket connection for user %s: %s", user_id, e, exc_info=True)
 
 
 @router.get("/video-chunks/{session_id}")
@@ -201,7 +218,7 @@ async def list_video_chunks(
         if not chunks:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"No video chunks found for session_id: {session_id}"
+                detail="No video chunks found for session",
             )
         
         return {
@@ -211,10 +228,10 @@ async def list_video_chunks(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error listing video chunks for session {session_id}: {e}", exc_info=True)
+        logger.error("Error listing video chunks for session %s: %s", session_id, e, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error listing video chunks: {str(e)}"
+            detail="Error listing video chunks",
         )
 
 
@@ -246,7 +263,7 @@ async def get_video_chunk(
         if not video_path or not Path(video_path).exists():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Video chunk not found: session_id={session_id}, chunk_number={chunk_number}"
+                detail="Video chunk not found",
             )
         
         return FileResponse(
@@ -261,12 +278,15 @@ async def get_video_chunk(
         raise
     except Exception as e:
         logger.error(
-            f"Error retrieving video chunk: session_id={session_id}, chunk_number={chunk_number}, error={e}",
-            exc_info=True
+            "Error retrieving video chunk: session_id=%s, chunk_number=%s: %s",
+            session_id,
+            chunk_number,
+            e,
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error retrieving video chunk: {str(e)}"
+            detail="Error retrieving video chunk",
         )
 
 
@@ -327,10 +347,8 @@ async def get_video_chunk_metadata(
         if not metadata_path or not Path(metadata_path).exists():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Video chunk metadata not found: session_id={session_id}, chunk_number={chunk_number}"
+                detail="Video chunk metadata not found",
             )
-        
-        import json
         with open(metadata_path, "r", encoding="utf-8") as f:
             metadata = json.load(f)
         
@@ -339,12 +357,15 @@ async def get_video_chunk_metadata(
         raise
     except Exception as e:
         logger.error(
-            f"Error retrieving video chunk metadata: session_id={session_id}, chunk_number={chunk_number}, error={e}",
-            exc_info=True
+            "Error retrieving video chunk metadata: session_id=%s, chunk_number=%s: %s",
+            session_id,
+            chunk_number,
+            e,
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error retrieving video chunk metadata: {str(e)}"
+            detail="Error retrieving video chunk metadata",
         )
 
 
@@ -371,25 +392,22 @@ async def register_device_token(request: DeviceTokenRequest) -> Dict[str, Any]:
     Returns:
         Success message with registered token count
     """
-    global _registered_device_tokens
-    
+    global registered_device_tokens
+
     token = request.token.strip()
     if not token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Token cannot be empty"
+            detail="Token cannot be empty",
         )
-    
-    # Add token if not already registered
-    if token not in _registered_device_tokens:
-        _registered_device_tokens.append(token)
-        logger.info(f"[notifications] ✅ Device token registered. Total tokens: {len(_registered_device_tokens)}")
+    if token not in registered_device_tokens:
+        registered_device_tokens.append(token)
+        logger.info("Device token registered; total tokens: %s", len(registered_device_tokens))
     else:
-        logger.debug(f"[notifications] Device token already registered")
-    
+        logger.debug("Device token already registered")
     return {
         "message": "Device token registered successfully",
-        "total_tokens": len(_registered_device_tokens)
+        "total_tokens": len(registered_device_tokens),
     }
 
 
@@ -422,13 +440,13 @@ async def send_notification(
             "failure_count": int
         }
     """
-    global _registered_device_tokens
-    
-    if not token and not _registered_device_tokens:
+    global registered_device_tokens
+
+    if not token and not registered_device_tokens:
         return {
             "message": "No device tokens registered or provided",
             "success_count": 0,
-            "failure_count": 0
+            "failure_count": 0,
         }
 
     # Default notification content
@@ -439,17 +457,14 @@ async def send_notification(
     image_url: Optional[str] = None
     if image_path:
         try:
-            # Construct full URL to the event image endpoint
-            base_url = str(request.base_url).rstrip('/')
-            # URL encode the path
-            from urllib.parse import quote
-            encoded_path = quote(image_path, safe='')
+            base_url = str(request.base_url).rstrip("/")
+            encoded_path = quote(image_path, safe="")
             image_url = f"{base_url}/api/v1/notifications/event-image?path={encoded_path}"
-            logger.info(f"[notifications] Image URL: {image_url}")
+            logger.info("Notification image URL: %s", image_url)
         except Exception as e:
-            logger.warning(f"[notifications] Failed to build image URL: {e}")
+            logger.warning("Failed to build image URL: %s", e)
             image_url = None
-    
+
     if token:
         result = send_push_notification(
             token=token,
@@ -459,23 +474,21 @@ async def send_notification(
         )
     else:
         result = send_push_notification_multicast(
-            tokens=_registered_device_tokens,
+            tokens=registered_device_tokens,
             title=notification_title,
             body=notification_body,
             image_url=image_url,
         )
 
-    
-    # Send notifications to all registered tokens using multicast (more efficient)
     logger.info(
-        f"[notifications] ✅ Push notifications sent: "
-        f"{result['success_count']} successful, {result['failure_count']} failed"
+        "Push notifications sent: %s successful, %s failed",
+        result["success_count"],
+        result["failure_count"],
     )
-    
     return {
         "message": "Notifications sent",
-        "total_tokens": len(_registered_device_tokens),
+        "total_tokens": len(registered_device_tokens),
         "success_count": result["success_count"],
-        "failure_count": result["failure_count"]
+        "failure_count": result["failure_count"],
     }
 

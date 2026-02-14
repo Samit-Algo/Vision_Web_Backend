@@ -1,3 +1,13 @@
+"""
+Main agent for Vision Agent Creation flow.
+
+Builds an LLM agent with dynamic instructions, session state, and tools
+(initialize_state, set_field_value, save_to_db, list_cameras, resolve_camera).
+"""
+
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 import json
 import logging
 import os
@@ -5,8 +15,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+# -----------------------------------------------------------------------------
+# Third-party
+# -----------------------------------------------------------------------------
 from dotenv import load_dotenv
-
 from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.readonly_context import ReadonlyContext
@@ -16,11 +28,11 @@ from google.adk.planners import BuiltInPlanner
 from google.adk.tools import FunctionTool
 from google.genai import types
 
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
 from ..core.config import get_settings
 from .exceptions import VisionAgentError
-
-logger = logging.getLogger(__name__)
-
 from .tools.camera_selection_tool import (
     list_cameras as list_cameras_impl,
     resolve_camera as resolve_camera_impl,
@@ -28,19 +40,21 @@ from .tools.camera_selection_tool import (
 from .tools.initialize_state_tool import initialize_state as initialize_state_impl
 from .tools.save_to_db_tool import save_to_db as save_to_db_impl
 from .tools.set_field_value_tool import set_field_value as set_field_value_impl
+from .utils.time_context import get_current_time_context, get_utc_iso_z
 
+logger = logging.getLogger(__name__)
 
-# ============================================================================
-# CONSTANTS
-# ============================================================================
+# -----------------------------------------------------------------------------
+# Knowledge base and rules
+# -----------------------------------------------------------------------------
 
 KB_PATH = Path(__file__).resolve().parent.parent / "knowledge_base" / "vision_rule_knowledge_base.json"
 
-with open(KB_PATH, "r") as f:
-    _kb_data = json.load(f)
+with open(KB_PATH, "r", encoding="utf-8") as f:
+    kb_data = json.load(f)
 
-rules = _kb_data.get("rules", [])
-_rules_by_id: Dict[str, dict] = {r.get("rule_id"): r for r in rules if r.get("rule_id")}
+rules = kb_data.get("rules", [])
+rules_by_id: Dict[str, dict] = {r.get("rule_id"): r for r in rules if r.get("rule_id")}
 
 static_instruction = """
 You are the assistant for a Vision Agent Creation system.
@@ -234,14 +248,14 @@ NON-NEGOTIABLE RULES:
 # UTILITY FUNCTIONS
 # ============================================================================
 
-def _debug_adk_enabled() -> bool:
-    """Check if ADK debug mode is enabled."""
+def debug_adk_enabled() -> bool:
+    """Return True if ADK debug mode is enabled (DEBUG_ADK=true)."""
     return os.getenv("DEBUG_ADK") == "true"
 
 
 @lru_cache(maxsize=1)
-def _load_env() -> None:
-    """Load environment variables once (no stdout prints)."""
+def load_env() -> None:
+    """Load environment variables from .env once."""
     try:
         env_path = Path(__file__).resolve().parent.parent.parent / ".env"
         load_dotenv(env_path)
@@ -249,9 +263,9 @@ def _load_env() -> None:
         logger.warning("Failed to load .env: %s", exc)
 
 
-def _ensure_groq_api_key() -> str:
-    """Ensure GROQ_API_KEY is present; return it."""
-    _load_env()
+def ensure_groq_api_key() -> str:
+    """Ensure GROQ_API_KEY is set; return it. Raises ValueError if missing."""
+    load_env()
     groq_api_key = os.getenv("GROQ_API_KEY", "")
     if not groq_api_key:
         raise ValueError(
@@ -262,11 +276,7 @@ def _ensure_groq_api_key() -> str:
     return groq_api_key
 
 
-from .utils.time_context import get_current_time_context, get_utc_iso_z
-
-
-
-def _compact_rule(rule: dict) -> dict:
+def compact_rule(rule: dict) -> dict:
     """
     Create a compact rule representation for prompt context (token-efficient).
     Do NOT include long examples or huge class lists.
@@ -295,12 +305,9 @@ def _compact_rule(rule: dict) -> dict:
     }
 
 
-def _rules_catalog_json() -> str:
-    """
-    Compact catalog of all rules for initial selection.
-    This replaces the full KB dump to reduce tokens drastically.
-    """
-    catalog = [_compact_rule(r) for r in rules]
+def rules_catalog_json() -> str:
+    """Return compact JSON catalog of all rules for initial selection."""
+    catalog = [compact_rule(r) for r in rules]
     return json.dumps(catalog, separators=(",", ":"), ensure_ascii=False)
 
 
@@ -337,10 +344,10 @@ def build_instruction_dynamic_with_session(context: ReadonlyContext, session_id:
         state_summary = {"status": "UNINITIALIZED"}
 
     if agent_state.rule_id:
-        active_rule = _rules_by_id.get(agent_state.rule_id)
-        kb_context = json.dumps(_compact_rule(active_rule), separators=(",", ":"), ensure_ascii=False)
+        active_rule = rules_by_id.get(agent_state.rule_id)
+        kb_context = json.dumps(compact_rule(active_rule), separators=(",", ":"), ensure_ascii=False)
     else:
-        kb_context = _rules_catalog_json()
+        kb_context = rules_catalog_json()
 
     state_json = json.dumps(state_summary, ensure_ascii=False)
     active_rule_block = f"ACTIVE_RULE_CONTEXT_JSON:\n{kb_context}\n"
@@ -357,7 +364,7 @@ def build_instruction_dynamic_with_session(context: ReadonlyContext, session_id:
 # TOOL WRAPPERS
 # ============================================================================
 
-def _create_tool_wrappers(current_session_id: str, current_user_id: Optional[str]):
+def create_tool_wrappers(current_session_id: str, current_user_id: Optional[str]):
     """Create tool wrappers with session context injected."""
 
     def initialize_state_wrapper(rule_id: str) -> Dict:
@@ -379,14 +386,14 @@ def _create_tool_wrappers(current_session_id: str, current_user_id: Optional[str
 
     def save_to_db_wrapper() -> Dict:
         """Save the confirmed agent configuration to the database."""
-        if _debug_adk_enabled():
+        if debug_adk_enabled():
             logger.debug(
                 "[save_to_db_wrapper] Called (session_id=%s user_id=%s)",
                 current_session_id,
                 current_user_id,
             )
         result = save_to_db_impl(session_id=current_session_id, user_id=current_user_id)
-        if _debug_adk_enabled():
+        if debug_adk_enabled():
             logger.debug("[save_to_db_wrapper] Result: %s", result)
         return result
 
@@ -433,110 +440,6 @@ def _create_tool_wrappers(current_session_id: str, current_user_id: Optional[str
         FunctionTool(list_cameras_wrapper),
         FunctionTool(resolve_camera_wrapper),
     ]
-
-    if _debug_adk_enabled():
-        logger.debug(
-            "[create_tool_wrappers] Created tools: %s",
-            [getattr(tool, "name", "<unknown>") for tool in tools],
-        )
-        for tool in tools:
-            try:
-                decl = tool._get_declaration()
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("[create_tool_wrappers] Error getting declaration: %s", exc)
-                continue
-            if decl and getattr(tool, "name", None) != getattr(decl, "name", None):
-                logger.warning(
-                    "[create_tool_wrappers] Tool name mismatch: tool.name=%s decl.name=%s",
-                    getattr(tool, "name", None),
-                    getattr(decl, "name", None),
-                )
-
-    if _debug_adk_enabled():
-        logger.debug("[tools] Created %d wrapped tools", len(tools))
-        for tool in tools:
-            try:
-                decl = tool._get_declaration()
-                desc = getattr(decl, "description", None) if decl else None
-                logger.debug(
-                    "[tools] %s (%s) decl.name=%s desc=%s",
-                    getattr(tool, "name", "<unknown>"),
-                    type(tool).__name__,
-                    getattr(decl, "name", None) if decl else None,
-                    (desc[:50] + "...") if isinstance(desc, str) and len(desc) > 50 else desc,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("[tools] Error introspecting tool: %s", exc)
-
-    return tools
-
-
-# ============================================================================
-# CALLBACKS
-# ============================================================================
-
-async def _log_thinking_request(
-    *, callback_context: CallbackContext, llm_request: LlmRequest
-) -> Optional[LlmResponse]:
-    """Log thinking config before model request (debug only)."""
-    if not _debug_adk_enabled():
-        return None
-
-    tc = None
-    try:
-        tc = llm_request.config.thinking_config if llm_request.config else None
-    except Exception:  # noqa: BLE001
-        tc = None
-
-    logger.debug(
-        "[adk] planning request agent=%s include_thoughts=%s budget=%s level=%s tools=%s",
-        getattr(callback_context, "agent_name", None),
-        getattr(tc, "include_thoughts", None) if tc else None,
-        getattr(tc, "thinking_budget", None) if tc else None,
-        getattr(tc, "thinking_level", None) if tc else None,
-        list(getattr(llm_request, "tools_dict", {}) or {}),
-    )
-    return None
-
-
-async def _log_thinking_response(
-    *, callback_context: CallbackContext, llm_response: LlmResponse
-) -> Optional[LlmResponse]:
-    """Log response metadata (debug only; do not print full content)."""
-    if not _debug_adk_enabled():
-        return None
-
-    parts = []
-    try:
-        parts = list(getattr(getattr(llm_response, "content", None), "parts", []) or [])
-    except Exception:  # noqa: BLE001
-        parts = []
-
-    thought_count = 0
-    tool_call_count = 0
-    text_part_count = 0
-    for part in parts:
-        if getattr(part, "thought", False):
-            thought_count += 1
-        if getattr(part, "function_call", None):
-            tool_call_count += 1
-        if getattr(part, "text", None):
-            text_part_count += 1
-
-    usage = getattr(llm_response, "usage_metadata", None)
-    logger.debug(
-        "[adk] planning response agent=%s thoughts=%d text_parts=%d tool_calls=%d err=%s in_tok=%s out_tok=%s",
-        getattr(callback_context, "agent_name", None),
-        thought_count,
-        text_part_count,
-        tool_call_count,
-        getattr(llm_response, "error_code", None),
-        getattr(usage, "prompt_token_count", None) if usage else None,
-        getattr(usage, "candidates_token_count", None) if usage else None,
-    )
-    return None
-
-
 # ============================================================================
 # MAIN AGENT CREATION
 # ============================================================================
@@ -544,7 +447,7 @@ async def _log_thinking_response(
 def create_agent_for_session(session_id: str = "default", user_id: Optional[str] = None) -> LlmAgent:
     """Create and configure the main agent for a session."""
     try:
-        _ensure_groq_api_key()
+        ensure_groq_api_key()
 
         from .session_state.agent_state import get_agent_state
 
@@ -552,7 +455,7 @@ def create_agent_for_session(session_id: str = "default", user_id: Optional[str]
         if user_id:
             agent_state.user_id = user_id
 
-        wrapped_tools = _create_tool_wrappers(session_id, user_id)
+        wrapped_tools = create_tool_wrappers(session_id, user_id)
 
         def create_dynamic_instruction_provider(current_session_id: str):
             """Create instruction provider that captures session_id in closure."""

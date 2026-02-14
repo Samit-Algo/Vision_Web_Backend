@@ -7,8 +7,8 @@ from typing import Any, Dict
 from ...domain.constants.camera_fields import CameraFields
 from ...utils.db import get_collection
 from .save_to_db_tool import (
-    get_camera_repository as _get_camera_repository_shared,
-    set_camera_repository as _set_camera_repository_shared,
+    get_camera_repository as get_camera_repository_shared,
+    set_camera_repository as set_camera_repository_shared,
 )
 
 logger = logging.getLogger(__name__)
@@ -20,20 +20,20 @@ logger = logging.getLogger(__name__)
 
 def set_camera_repository(repository):
     """Set the camera repository for camera operations."""
-    _set_camera_repository_shared(repository)
+    set_camera_repository_shared(repository)
 
 
-def _get_camera_repository():
-    """Get the shared camera repository from save_to_db_tool."""
-    return _get_camera_repository_shared()
+def get_camera_repository_internal():
+    """Return the shared camera repository from save_to_db_tool."""
+    return get_camera_repository_shared()
 
 
-def _cameras_collection():
-    """Sync PyMongo collection for cameras. No async, works in Docker and any context."""
+def cameras_collection():
+    """Return sync PyMongo collection for cameras."""
     return get_collection("cameras")
 
 
-def _doc_to_camera_item(doc: Dict[str, Any]) -> Dict[str, str]:
+def doc_to_camera_item(doc: Dict[str, Any]) -> Dict[str, str]:
     """Extract id and name from a camera document."""
     camera_id = doc.get(CameraFields.ID) or (str(doc[CameraFields.MONGO_ID]) if doc.get(CameraFields.MONGO_ID) else "")
     return {"id": camera_id, "name": doc.get(CameraFields.NAME, "")}
@@ -67,9 +67,9 @@ def list_cameras(user_id: str, session_id: str = "default") -> Dict[str, Any]:
         }
 
     try:
-        coll = _cameras_collection()
+        coll = cameras_collection()
         cursor = coll.find({CameraFields.OWNER_USER_ID: user_id})
-        cameras = [_doc_to_camera_item(doc) for doc in cursor]
+        cameras = [doc_to_camera_item(doc) for doc in cursor]
         logger.debug("Found %d cameras for user %s", len(cameras), user_id)
         return {"cameras": cameras}
     except Exception as e:
@@ -93,7 +93,7 @@ def resolve_camera(name_or_id: str, user_id: str, session_id: str = "default") -
         return {"status": "not_found", "error": "name_or_id and user_id are required"}
 
     try:
-        coll = _cameras_collection()
+        coll = cameras_collection()
 
         # Try by ID first only if it looks like ObjectId (24 hex chars)
         if len(name_or_id) == 24 and all(c in "0123456789abcdefABCDEF" for c in name_or_id):
@@ -101,7 +101,7 @@ def resolve_camera(name_or_id: str, user_id: str, session_id: str = "default") -
                 from bson import ObjectId
                 doc = coll.find_one({CameraFields.MONGO_ID: ObjectId(name_or_id)})
                 if doc and doc.get(CameraFields.OWNER_USER_ID) == user_id:
-                    item = _doc_to_camera_item(doc)
+                    item = doc_to_camera_item(doc)
                     logger.debug(
                         "Resolved camera by ObjectId: %s (%s)",
                         item["id"],
@@ -114,7 +114,7 @@ def resolve_camera(name_or_id: str, user_id: str, session_id: str = "default") -
         # Try by string id field (e.g. CAM-xxx)
         doc = coll.find_one({CameraFields.ID: name_or_id})
         if doc and doc.get(CameraFields.OWNER_USER_ID) == user_id:
-            item = _doc_to_camera_item(doc)
+            item = doc_to_camera_item(doc)
             logger.debug("Resolved camera by ID: %s (%s)", item["id"], item["name"])
             return {"status": "exact_match", "camera_id": item["id"], "camera_name": item["name"]}
 
@@ -125,7 +125,7 @@ def resolve_camera(name_or_id: str, user_id: str, session_id: str = "default") -
             CameraFields.OWNER_USER_ID: user_id,
             CameraFields.NAME: pattern
         }).limit(10)
-        cameras_by_name = [_doc_to_camera_item(doc) for doc in cursor]
+        cameras_by_name = [doc_to_camera_item(doc) for doc in cursor]
 
         if not cameras_by_name:
             return {"status": "not_found"}

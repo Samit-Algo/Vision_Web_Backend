@@ -1,24 +1,29 @@
 """
-Custom exception hierarchy for Vision Agent system - Simplified.
+Custom exception hierarchy for the Vision Agent system.
 
-Only includes exceptions that are actually used in the codebase.
+Used by agent tools, main agent, and chat use cases. All agent-related
+exceptions inherit from VisionAgentError and can carry a user-facing message.
 """
 
-from typing import Optional, Dict, Any
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
+from typing import Any, Dict, Optional
 
 
-# ============================================================================
-# BASE EXCEPTION
-# ============================================================================
+# -----------------------------------------------------------------------------
+# Base
+# -----------------------------------------------------------------------------
+
 
 class VisionAgentError(Exception):
     """Base exception for all Vision Agent errors."""
-    
+
     def __init__(
         self,
         message: str,
         user_message: Optional[str] = None,
-        details: Optional[Dict[str, Any]] = None
+        details: Optional[Dict[str, Any]] = None,
     ):
         super().__init__(message)
         self.message = message
@@ -26,9 +31,10 @@ class VisionAgentError(Exception):
         self.details = details or {}
 
 
-# ============================================================================
-# VALIDATION EXCEPTIONS
-# ============================================================================
+# -----------------------------------------------------------------------------
+# Validation
+# -----------------------------------------------------------------------------
+
 
 class ValidationError(VisionAgentError):
     """Raised when input validation fails."""
@@ -40,9 +46,10 @@ class InvalidStateTransitionError(VisionAgentError):
     pass
 
 
-# ============================================================================
-# STATE MANAGEMENT EXCEPTIONS
-# ============================================================================
+# -----------------------------------------------------------------------------
+# State management
+# -----------------------------------------------------------------------------
+
 
 class StateError(VisionAgentError):
     """Base exception for state management errors."""
@@ -59,19 +66,20 @@ class StateLockError(StateError):
     pass
 
 
-# ============================================================================
-# DATABASE EXCEPTIONS
-# ============================================================================
+# -----------------------------------------------------------------------------
+# Database
+# -----------------------------------------------------------------------------
+
 
 class DatabaseError(VisionAgentError):
     """Base exception for database errors."""
-    
+
     def __init__(
         self,
         message: str,
         operation: Optional[str] = None,
         retryable: bool = True,
-        **kwargs
+        **kwargs,
     ):
         super().__init__(message, **kwargs)
         self.operation = operation
@@ -80,41 +88,42 @@ class DatabaseError(VisionAgentError):
 
 class DatabaseConnectionError(DatabaseError):
     """Raised when database connection fails."""
-    
+
     def __init__(self, message: str, **kwargs):
         super().__init__(
             message,
             user_message="Database connection failed. Please try again.",
             retryable=True,
-            **kwargs
+            **kwargs,
         )
 
 
 class DatabaseTimeoutError(DatabaseError):
     """Raised when database operation times out."""
-    
+
     def __init__(self, message: str, **kwargs):
         super().__init__(
             message,
             user_message="Database operation timed out. Please try again.",
             retryable=True,
-            **kwargs
+            **kwargs,
         )
 
 
-# ============================================================================
-# EXTERNAL SERVICE EXCEPTIONS
-# ============================================================================
+# -----------------------------------------------------------------------------
+# External services
+# -----------------------------------------------------------------------------
+
 
 class ExternalServiceError(VisionAgentError):
     """Base exception for external service errors."""
-    
+
     def __init__(
         self,
         message: str,
         service_name: Optional[str] = None,
         retryable: bool = True,
-        **kwargs
+        **kwargs,
     ):
         super().__init__(message, **kwargs)
         self.service_name = service_name
@@ -123,36 +132,38 @@ class ExternalServiceError(VisionAgentError):
 
 class CameraServiceError(ExternalServiceError):
     """Raised when camera service operations fail."""
-    
+
     def __init__(self, message: str, **kwargs):
         super().__init__(
             message,
             service_name="Camera",
             user_message="Camera service error. Please try again.",
             retryable=True,
-            **kwargs
+            **kwargs,
         )
 
 
-# ============================================================================
-# REPOSITORY EXCEPTIONS  
-# ============================================================================
+# -----------------------------------------------------------------------------
+# Repository
+# -----------------------------------------------------------------------------
+
 
 class RepositoryNotInitializedError(VisionAgentError):
     """Raised when a repository is not initialized."""
-    
+
     def __init__(self, repository_name: str):
         super().__init__(
             f"{repository_name} repository not initialized",
             user_message="System configuration error. Please contact support.",
-            details={"repository": repository_name}
+            details={"repository": repository_name},
         )
         self.repository_name = repository_name
 
 
-# ============================================================================
-# KNOWLEDGE BASE EXCEPTIONS
-# ============================================================================
+# -----------------------------------------------------------------------------
+# Knowledge base
+# -----------------------------------------------------------------------------
+
 
 class KnowledgeBaseError(VisionAgentError):
     """Base exception for knowledge base errors."""
@@ -160,12 +171,12 @@ class KnowledgeBaseError(VisionAgentError):
 
 
 class RuleNotFoundError(KnowledgeBaseError):
-    """Raised when a rule is not found in knowledge base."""
-    
+    """Raised when a rule is not found in the knowledge base."""
+
     def __init__(self, rule_id: str):
         super().__init__(
             f"Rule not found: {rule_id}",
             user_message="The requested rule is not available.",
-            details={"rule_id": rule_id}
+            details={"rule_id": rule_id},
         )
         self.rule_id = rule_id

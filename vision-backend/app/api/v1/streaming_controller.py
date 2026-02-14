@@ -1,24 +1,37 @@
-# Standard library imports
-import dataclasses
-from typing import Any, List, Optional
-import subprocess
+"""
+Streaming API: live camera stream (WebSocket fMP4), stream status, snapshot, agent overlay WebSocket.
+"""
 
-# External package imports
-from fastapi import APIRouter, Depends, HTTPException, status, Request
-from fastapi import WebSocket, WebSocketDisconnect
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
+import asyncio
+import dataclasses
+import logging
+import subprocess
+from typing import Any, List, Optional
+
+# -----------------------------------------------------------------------------
+# Third-party
+# -----------------------------------------------------------------------------
+from fastapi import APIRouter, Depends, HTTPException, Request, status, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 
-# Local application imports
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
 from ...application.dto.user_dto import UserResponse
 from ...application.use_cases.camera.get_camera import GetCameraUseCase
 from ...domain.repositories.agent_repository import AgentRepository
-from ...infrastructure.streaming import WsFmp4Service
 from ...di.container import get_container
+from ...infrastructure.streaming import WsFmp4Service
 from ...processing.helpers import get_shared_store
-from .dependencies import get_current_user
-import logging
-import asyncio
 
+from .dependencies import get_current_user
+
+# -----------------------------------------------------------------------------
+# Logging and router
+# -----------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 
 
@@ -196,12 +209,10 @@ async def websocket_live_stream(websocket: WebSocket, camera_id: str) -> None:
         await websocket.close(code=1008, reason="Authentication token required")
         return
 
-    # Authenticate from query token (WebSocket clients often can't set Authorization header easily)
     try:
         class MockCredentials:
             credentials = token
-
-        current_user = await get_current_user(MockCredentials())
+        current_user = await get_current_user(credentials=MockCredentials(), token=token)
     except Exception:
         await websocket.close(code=1008, reason="Invalid or expired token")
         return
@@ -251,12 +262,10 @@ async def websocket_agent_overlay(websocket: WebSocket, agent_id: str) -> None:
         await websocket.close(code=1008, reason="Authentication token required")
         return
 
-    # Authenticate from query token
     try:
         class MockCredentials:
             credentials = token
-
-        current_user = await get_current_user(MockCredentials())
+        current_user = await get_current_user(credentials=MockCredentials(), token=token)
     except Exception:
         await websocket.close(code=1008, reason="Invalid or expired token")
         return

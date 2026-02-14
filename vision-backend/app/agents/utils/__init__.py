@@ -1,1 +1,3 @@
-"""Utils package for agent utilities."""
+"""
+Agent utilities: time context for prompts, time parsing for natural language.
+"""

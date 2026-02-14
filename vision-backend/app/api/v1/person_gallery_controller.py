@@ -1,46 +1,58 @@
 """
 Person gallery API: upload reference photos for face recognition.
-- One folder per person: Gallery/<name>/ with all their photos.
-- One MongoDB document per person with arrays: images, file_paths, embeddings, etc.
-- Minimum 4 photos per person for recognition; status "active" when count >= 4.
+
+- One folder per person (Gallery/<name>/); one MongoDB document per person.
+- Minimum 4 photos per person; status "active" when count >= 4.
 """
+
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 import logging
 from pathlib import Path
 from typing import List, Optional
 
+# -----------------------------------------------------------------------------
+# Third-party
+# -----------------------------------------------------------------------------
 from fastapi import APIRouter, Depends, File, Form, HTTPException, status, UploadFile
 
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
 from ...application.dto.user_dto import UserResponse
 from ...core.config import get_settings
+from ...domain.constants import (
+    ALLOWED_IMAGE_EXTENSIONS,
+    ALLOWED_IMAGE_MIME,
+    MIN_PHOTOS_PER_PERSON,
+)
 from ...infrastructure.db.mongo_connection import get_person_gallery_collection
 from ...utils.datetime_utils import utc_now
-from ...utils.face_embedding import (
-    compute_face_embedding_for_gallery,
-    DEFAULT_EMBEDDING_MODEL,
-)
+from ...utils.face_embedding import DEFAULT_EMBEDDING_MODEL, compute_face_embedding_for_gallery
+
 from .dependencies import get_current_user
 
-router = APIRouter(tags=["person-gallery"])
+# -----------------------------------------------------------------------------
+# Router and helpers
+# -----------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
-
-MIN_PHOTOS_PER_PERSON = 4
-ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
-ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp"}
+router = APIRouter(tags=["person-gallery"])
 
 
-def _safe_folder_name(name: str) -> str:
-    """Name safe for folder: alphanumeric and underscore only."""
+def safe_folder_name(name: str) -> str:
+    """Return a folder-safe name: alphanumeric and underscores only."""
     s = "".join(c if c.isalnum() or c in " -_" else "_" for c in name.strip())
     return s.replace(" ", "_").strip("_")[:80] or "person"
 
 
-def _normalized_name(name: str) -> str:
+def normalized_name(name: str) -> str:
     """Normalized for MongoDB lookup: lowercase, single spaces."""
     return " ".join(name.strip().lower().split())
 
 
-def _compute_face_embedding_for_upload(image_path: str) -> Optional[List[float]]:
-    """Compute face embedding for gallery upload; supports front and side-facing photos."""
+def compute_face_embedding_for_upload(image_path: str) -> Optional[List[float]]:
+    """Compute face embedding for one gallery image (front or side)."""
     return compute_face_embedding_for_gallery(image_path, model_name=DEFAULT_EMBEDDING_MODEL)
 
 
@@ -65,11 +77,11 @@ async def upload_reference_photos(
     gallery_dir = Path(settings.gallery_dir)
     gallery_dir.mkdir(parents=True, exist_ok=True)
 
-    safe_name = _safe_folder_name(name)
+    safe_name = safe_folder_name(name)
     person_dir = gallery_dir / safe_name
     person_dir.mkdir(parents=True, exist_ok=True)
 
-    normalized = _normalized_name(name)
+    normalized = normalized_name(name)
     display_name = name.strip()
 
     coll = get_person_gallery_collection()
@@ -92,8 +104,8 @@ async def upload_reference_photos(
                 logger.warning("person-gallery upload 400: %s", detail)
                 raise HTTPException(status_code=400, detail=detail)
             ext = Path(file.filename).suffix.lower()
-            if ext not in ALLOWED_EXTENSIONS:
-                detail = f"Allowed formats: {', '.join(ALLOWED_EXTENSIONS)}"
+            if ext not in ALLOWED_IMAGE_EXTENSIONS:
+                detail = f"Allowed formats: {', '.join(sorted(ALLOWED_IMAGE_EXTENSIONS))}"
                 logger.warning("person-gallery upload 400: %s", detail)
                 raise HTTPException(status_code=400, detail=detail)
 
@@ -106,7 +118,7 @@ async def upload_reference_photos(
             file_path.write_bytes(contents)
             saved_paths.append(file_path)
 
-            embedding = _compute_face_embedding_for_upload(str(file_path.resolve()))
+            embedding = compute_face_embedding_for_upload(str(file_path.resolve()))
             if embedding is None:
                 for p in saved_paths:
                     try:

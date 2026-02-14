@@ -28,12 +28,12 @@ logger = logging.getLogger(__name__)
 
 KB_PATH = Path(__file__).resolve().parent.parent.parent / "knowledge_base" / "vision_rule_knowledge_base.json"
 
-_KB_RULES: List[Dict] = []
+kb_rules: List[Dict] = []
 
 
-def _load_knowledge_base() -> None:
-    """Load knowledge base with proper error handling. Called at module init."""
-    global _KB_RULES
+def load_knowledge_base() -> None:
+    """Load knowledge base; called at module init."""
+    global kb_rules
     try:
         if not KB_PATH.exists():
             raise FileNotFoundError(f"Knowledge base file not found: {KB_PATH}")
@@ -42,17 +42,17 @@ def _load_knowledge_base() -> None:
         rules = data.get("rules", [])
         if not rules:
             raise ValueError("Knowledge base contains no rules")
-        _KB_RULES = rules
-        logger.info(f"Loaded {len(_KB_RULES)} rules from knowledge base")
+        kb_rules = rules
+        logger.info("Loaded %s rules from knowledge base", len(kb_rules))
     except json.JSONDecodeError as e:
-        logger.critical(f"Failed to parse knowledge base JSON: {e}")
+        logger.critical("Failed to parse knowledge base JSON: %s", e)
         raise
     except Exception as e:
-        logger.critical(f"Failed to load knowledge base: {e}")
+        logger.critical("Failed to load knowledge base: %s", e)
         raise
 
 
-_load_knowledge_base()
+load_knowledge_base()
 
 
 # ============================================================================
@@ -72,7 +72,7 @@ def get_rule(rule_id: str) -> Dict:
     Raises:
         ValueError: If rule_id is not found in knowledge base
     """
-    for rule in _KB_RULES:
+    for rule in kb_rules:
         if rule.get("rule_id") == rule_id:
             return rule
     raise ValueError(f"Unknown rule_id: {rule_id}")

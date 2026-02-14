@@ -23,33 +23,33 @@ logger = logging.getLogger(__name__)
 # REPOSITORY MANAGEMENT
 # ============================================================================
 
-_agent_repository: Optional[Any] = None
-_camera_repository: Optional[Any] = None
+agent_repository: Optional[Any] = None
+camera_repository: Optional[Any] = None
 
 
 def set_agent_repository(repository):
     """Set the agent repository for saving agents."""
-    global _agent_repository
-    _agent_repository = repository
+    global agent_repository
+    agent_repository = repository
     logger.debug("Agent repository set: %s", type(repository))
 
 
 def set_camera_repository(repository):
     """Set the camera repository for looking up cameras."""
-    global _camera_repository
-    _camera_repository = repository
+    global camera_repository
+    camera_repository = repository
 
 
 def get_camera_repository():
-    """Get the camera repository (for use by other tools)."""
-    return _camera_repository
+    """Return the camera repository (for use by other tools)."""
+    return camera_repository
 
 
 # ============================================================================
 # SYNC AGENT SAVE (no asyncio – works in Docker and from running event loop)
 # ============================================================================
 
-def _agent_to_dict_sync(agent: Agent) -> dict:
+def agent_to_dict_sync(agent: Agent) -> dict:
     """Convert Agent to MongoDB document (sync, same shape as MongoAgentRepository)._agent_to_dict)."""
     d = {
         AgentFields.NAME: agent.name,
@@ -79,7 +79,7 @@ def _agent_to_dict_sync(agent: Agent) -> dict:
     return d
 
 
-def _document_to_agent_sync(document: dict) -> Agent:
+def document_to_agent_sync(document: dict) -> Agent:
     """Convert MongoDB document to Agent (sync, same shape as MongoAgentRepository._document_to_agent)."""
     if not document or AgentFields.MONGO_ID not in document:
         raise ValueError("Invalid document: missing _id field")
@@ -112,7 +112,7 @@ def _document_to_agent_sync(document: dict) -> Agent:
     )
 
 
-def _save_agent_sync(agent: Agent) -> Agent:
+def save_agent_sync(agent: Agent) -> Agent:
     """
     Save agent using sync PyMongo with retry logic.
     
@@ -132,7 +132,7 @@ def _save_agent_sync(agent: Agent) -> Agent:
     )
     logger.info("Saving agent: %s (%s)", agent.name, source_desc)
     coll = get_collection("agents")
-    agent_dict = _agent_to_dict_sync(agent)
+    agent_dict = agent_to_dict_sync(agent)
 
     # Update existing agent when a valid ObjectId is present.
     if agent.id:
@@ -154,7 +154,7 @@ def _save_agent_sync(agent: Agent) -> Agent:
                         retryable=False,
                     )
                 logger.info("Agent updated successfully: %s", agent.id)
-                return _document_to_agent_sync(doc)
+                return document_to_agent_sync(doc)
 
             logger.warning("Agent %s not found for update, inserting instead", agent.id)
         except (InvalidId, ValueError, TypeError) as exc:
@@ -173,7 +173,7 @@ def _save_agent_sync(agent: Agent) -> Agent:
             operation="insert",
             retryable=False,
         )
-    return _document_to_agent_sync(doc)
+    return document_to_agent_sync(doc)
 
 
 # ============================================================================
@@ -186,7 +186,7 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
     Returns deterministic payloads that the LLM can reason about.
     """
 
-    def _failure(
+    def failure(
         *,
         code: str,
         user_message: str,
@@ -207,8 +207,8 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
         return payload
 
     try:
-        if _agent_repository is None:
-            return _failure(
+        if agent_repository is None:
+            return failure(
                 code="repository_not_initialized",
                 user_message="System error: Agent repository not available.",
                 status_value="COLLECTING",
@@ -231,7 +231,7 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
                 logger.exception("Failed to recompute missing_fields for session %s", session_id)
 
         if agent_state.status != "CONFIRMATION":
-            return _failure(
+            return failure(
                 code="invalid_state_transition",
                 user_message="Agent is not ready to save. Please complete all required fields first.",
                 status_value=agent_state.status,
@@ -240,7 +240,7 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
             )
 
         if agent_state.missing_fields:
-            return _failure(
+            return failure(
                 code="missing_fields",
                 user_message=f"Please provide the following fields: {', '.join(agent_state.missing_fields)}",
                 status_value=agent_state.status,
@@ -249,7 +249,7 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
             )
 
         if not user_id:
-            return _failure(
+            return failure(
                 code="missing_user_id",
                 user_message="Authentication error: User ID is required.",
                 status_value=agent_state.status,
@@ -258,7 +258,7 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
 
         run_mode = agent_state.fields.get("run_mode")
         if run_mode and run_mode not in ["continuous", "patrol"]:
-            return _failure(
+            return failure(
                 code="invalid_run_mode",
                 user_message=f"Invalid run mode: {run_mode}. Please use 'continuous' or 'patrol'.",
                 status_value=agent_state.status,
@@ -270,7 +270,7 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
         try:
             rule = get_rule(agent_state.rule_id) if agent_state.rule_id else None
         except ValueError as exc:
-            return _failure(
+            return failure(
                 code="invalid_rule_id",
                 user_message=f"Configuration error: {str(exc)}",
                 status_value=agent_state.status,
@@ -297,7 +297,7 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
                     else end_time_str
                 )
         except ValueError as exc:
-            return _failure(
+            return failure(
                 code="invalid_time_format",
                 user_message=f"Time format error: {str(exc)}",
                 status_value=agent_state.status,
@@ -345,7 +345,7 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
             agent = Agent(**payload)
         except Exception as exc:
             logger.exception("Invalid agent payload for session %s", session_id)
-            return _failure(
+            return failure(
                 code="invalid_agent_payload",
                 user_message=f"Configuration error: {str(exc)}",
                 status_value=agent_state.status,
@@ -353,7 +353,7 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
             )
 
         try:
-            saved_agent = _save_agent_sync(agent)
+            saved_agent = save_agent_sync(agent)
         except Exception as exc:
             logger.exception("Failed saving agent for session %s", session_id)
             raise DatabaseError(
@@ -364,7 +364,7 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
             )
 
         if not saved_agent or not getattr(saved_agent, "id", None):
-            return _failure(
+            return failure(
                 code="save_result_invalid",
                 user_message="Database error: Agent was not properly saved. Please try again.",
                 status_value=agent_state.status,
@@ -393,7 +393,7 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
         }
     except Exception as exc:
         logger.exception("Unexpected error saving agent for session %s", session_id)
-        return _failure(
+        return failure(
             code="unexpected_save_error",
             user_message="An unexpected error occurred while saving. Please try again.",
             status_value="COLLECTING",

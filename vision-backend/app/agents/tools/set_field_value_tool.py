@@ -75,7 +75,7 @@ def set_field_value(field_values_json: str, session_id: str = "default") -> Dict
             agent.fields[key] = value
             updated_fields.append(key)
 
-        _update_rules_field(agent, rule)
+        update_rules_field(agent, rule)
 
         if not agent.fields.get("name"):
             compute_missing_fields(agent, rule)
@@ -133,7 +133,7 @@ def set_field_value(field_values_json: str, session_id: str = "default") -> Dict
 # HELPER FUNCTIONS
 # ============================================================================
 
-def _update_rules_field(agent: AgentState, rule: Dict) -> None:
+def update_rules_field(agent: AgentState, rule: Dict) -> None:
     """
     Dynamically update the rules array with complete configuration based on knowledge base definition.
 
