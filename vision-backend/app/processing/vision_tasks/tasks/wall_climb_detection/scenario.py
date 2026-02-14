@@ -1,15 +1,19 @@
 """
-Wall Climb Detection - Scenario
--------------------------------
+Wall climb detection scenario
+------------------------------
 
-- User draws a polygon for the wall boundary.
-- Orange: person is climbing (part of box above wall).
-- Red: person is fully above the wall. Once red, we keep the color red.
+User polygon = wall boundary. Orange = climbing (part above wall). Red = fully above (stays red).
 """
 
-from typing import List, Dict, Any
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 from datetime import datetime
+from typing import Any, Dict, List
 
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
     ScenarioFrameContext,
@@ -144,7 +148,7 @@ class WallClimbScenario(BaseScenario):
             if last_alert is None or not isinstance(last_alert, datetime) or \
                (now - last_alert).total_seconds() >= self.config_obj.alert_cooldown_seconds:
                 self._state["last_alert_time"] = now
-                label = self._generate_label(len(fully_above))
+                label = self.generate_label(len(fully_above))
                 events.append(
                     ScenarioEvent(
                         event_type="wall_climb_detection",
@@ -163,7 +167,7 @@ class WallClimbScenario(BaseScenario):
 
         return events
 
-    def _generate_label(self, count: int) -> str:
+    def generate_label(self, count: int) -> str:
         if self.config_obj.custom_label and isinstance(self.config_obj.custom_label, str) and self.config_obj.custom_label.strip():
             return self.config_obj.custom_label.strip()
         if count == 1:

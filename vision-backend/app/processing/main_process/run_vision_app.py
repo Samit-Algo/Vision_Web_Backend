@@ -1,19 +1,16 @@
 """
-Runner (Simple Orchestrator)
+Vision runner (orchestrator)
 ----------------------------
 
-Role:
-- Poll MongoDB for cameras and agent tasks
-- Start CameraPublisher for each registered camera (runs at native FPS)
-- Launch one worker process per agent task
-- Clean up finished workers and stopped cameras
-
-Data flow:
-- Cameras Collection → CameraPublisher (one per camera)
-- Tasks Collection → Worker (one per task)
-- Both read from shared_store[camera_id] independently
+Polls MongoDB for cameras and agent tasks, starts CameraPublishers and workers.
+- Cameras with active agents → one CameraPublisher per camera (RTSP → shared_store)
+- Active tasks → one worker process per task (reads from shared_store or video file)
+Cleans up stopped cameras and finished workers each poll.
 """
 
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 import os
 import sys
 import time
@@ -27,31 +24,54 @@ _project_root = os.path.abspath(os.path.join(_current_dir, "..", "..", ".."))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
 from app.processing.worker.agent_main import run_task_worker
 from app.processing.data_input.camera_publisher import CameraCommand, CameraPublisher
 from app.utils.db import get_collection
 from app.utils.datetime_utils import mongo_datetime_to_app_timezone, now, parse_iso, utc_now
 
+# -----------------------------------------------------------------------------
+# Helpers (parse task start/end time once, reuse)
+# -----------------------------------------------------------------------------
 
-# ============================================================================
-# MAIN RUNNER
-# ============================================================================
+
+def parse_task_start_end(task: Dict[str, Any]) -> Tuple[Optional[datetime], Optional[datetime]]:
+    """Parse start_time/start_at and end_time/end_at from task. Returns (start_at, end_at) in app timezone."""
+    start_val = task.get("start_time") or task.get("start_at")
+    end_val = task.get("end_time") or task.get("end_at")
+    start_at = None
+    if start_val is not None:
+        if isinstance(start_val, datetime):
+            start_at = mongo_datetime_to_app_timezone(start_val)
+        else:
+            start_at = parse_iso(start_val)
+    end_at = None
+    if end_val is not None:
+        if isinstance(end_val, datetime):
+            end_at = mongo_datetime_to_app_timezone(end_val)
+        else:
+            end_at = parse_iso(end_val)
+    return (start_at, end_at)
+
+
+# -----------------------------------------------------------------------------
+# Main runner loop
+# -----------------------------------------------------------------------------
+
 
 def main(shared_store=None) -> None:
     """
-    Monitor MongoDB for cameras and agent tasks, start publishers and workers.
-    
-    FLOW:
-    -----
-    1. Query active agents - collect camera_ids that have at least one active agent
-    2. Poll cameras collection - start CameraPublisher ONLY for cameras with active agents
-    3. Poll tasks collection - start Worker for each active task
-    4. Workers read from shared_store (populated by CameraPublisher)
-    5. Clean up stopped cameras and finished tasks
-    
-    Args:
-        shared_store: Optional[shared store from multiprocessing.Manager().dict()]
-                     If None, creates a new one.
+    Main loop: poll MongoDB, start/stop CameraPublishers and workers.
+
+    1. Query active tasks → collect camera_ids that have at least one active agent.
+    2. Start CameraPublisher only for those cameras (RTSP → shared_store).
+    3. Stop publishers for cameras with no active agents.
+    4. Start a worker for each active task; workers read from shared_store or video file.
+    5. Clean up finished workers and stopped publishers.
+
+    shared_store: multiprocessing Manager().dict() or None (creates one).
     """
     print("[runner] 🚀 Starting Agent Runner")
     tasks_collection = get_collection()  # Default: 'agents' collection
@@ -72,9 +92,7 @@ def main(shared_store=None) -> None:
         while True:
             current_time = now()
 
-            # ============================================================
-            # STEP 0: Query active agents first to get camera_ids that have agents
-            # ============================================================
+            # Step 0: Active tasks and camera_ids that need a publisher
             active_task_cursor = tasks_collection.find({
                 "status": {"$in": ["PENDING", "ACTIVE", "RUNNING", "pending", "scheduled", "running", None]}
             }).sort("created_at", 1)
@@ -92,21 +110,7 @@ def main(shared_store=None) -> None:
                 if not camera_id:
                     continue
 
-                # Support both old (start_at, end_at) and new (start_time, end_time) field names
-                # Handle MongoDB datetime objects (UTC, naive) vs strings
-                start_at_value = task.get("start_time") or task.get("start_at")
-                end_at_value = task.get("end_time") or task.get("end_at")
-
-                if isinstance(start_at_value, datetime):
-                    start_at = mongo_datetime_to_app_timezone(start_at_value)
-                else:
-                    start_at = parse_iso(start_at_value) if start_at_value else None
-
-                if isinstance(end_at_value, datetime):
-                    end_at = mongo_datetime_to_app_timezone(end_at_value)
-                else:
-                    end_at = parse_iso(end_at_value) if end_at_value else None
-
+                start_at, end_at = parse_task_start_end(task)
                 # Runnable now if:
                 # - no start time OR start time already reached
                 # - no end time OR we are before end time
@@ -117,9 +121,7 @@ def main(shared_store=None) -> None:
 
                 camera_ids_with_agents.add(camera_id)
             
-            # ============================================================
-            # STEP 1: Handle Cameras - Start CameraPublisher ONLY for cameras with active agents
-            # ============================================================
+            # Step 1: Start CameraPublisher for each camera that has active agents
             # Query cameras: include all cameras that either don't have a status field,
             # or have status != "inactive". This supports both old (no status) and new (with status) schemas.
             active_cameras = cameras_collection.find({})
@@ -163,9 +165,7 @@ def main(shared_store=None) -> None:
                 camera_publishers[camera_id] = (publisher_process, command_queue, source_uri)
                 print(f"[runner] 🎥 Started publisher for camera {camera_id} (has active agents)")
 
-            # ============================================================
-            # STEP 2: Stop publishers for cameras that no longer have active agents
-            # ============================================================
+            # Step 2: Stop publishers for cameras with no active agents
             for camera_id in list(camera_publishers.keys()):
                 if camera_id not in active_camera_ids:
                     publisher_process, command_queue, _source_uri = camera_publishers[camera_id]
@@ -178,10 +178,7 @@ def main(shared_store=None) -> None:
                     del camera_publishers[camera_id]
                     print(f"[runner] 🎥 Stopped publisher for camera {camera_id} (no active agents)")
 
-            # ============================================================
-            # STEP 3: Handle Tasks - Start Worker for each active task
-            # ============================================================
-            # tasks_list already queried in STEP 0
+            # Step 3: Terminate workers for tasks that are no longer active
             
             # Terminate workers for tasks that are no longer active
             # Support both old and new field names for task ID
@@ -198,9 +195,7 @@ def main(shared_store=None) -> None:
                     del task_processes[task_id_for_cleanup]
                     print(f"[runner] 🛑 Terminated worker for inactive/missing task {task_id_for_cleanup}")
 
-            # ============================================================
-            # STEP 4: Launch new workers for tasks
-            # ============================================================
+            # Step 4: Launch new workers for active tasks
             for task in tasks_list:
                 # Support both old and new field names
                 task_id = str(task.get("id") or task.get("agent_id") or task["_id"])
@@ -209,23 +204,10 @@ def main(shared_store=None) -> None:
                 if task_id in task_processes and task_processes[task_id].is_alive():
                     continue
 
-                # Video file tasks: no start/end time — run until video EOF
                 video_path = (task.get("video_path") or "").strip()
                 source_type = (task.get("source_type") or "").strip().lower()
                 is_video_file = bool(video_path) or source_type == "video_file"
-                start_at = None
-                end_at = None
-                if not is_video_file:
-                    start_at_value = task.get("start_time") or task.get("start_at")
-                    end_at_value = task.get("end_time") or task.get("end_at")
-                    if isinstance(start_at_value, datetime):
-                        start_at = mongo_datetime_to_app_timezone(start_at_value)
-                    else:
-                        start_at = parse_iso(start_at_value) if start_at_value else None
-                    if isinstance(end_at_value, datetime):
-                        end_at = mongo_datetime_to_app_timezone(end_at_value)
-                    else:
-                        end_at = parse_iso(end_at_value) if end_at_value else None
+                start_at, end_at = (None, None) if is_video_file else parse_task_start_end(task)
 
                 # Handle "scheduled" tasks (future start time)
                 if start_at and current_time < start_at:

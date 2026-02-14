@@ -1,24 +1,34 @@
 """
-Scenario Data Contracts
------------------------
+Scenario data contracts
+------------------------
 
-Defines the base interfaces for scenarios:
-- BaseScenario: Abstract base class for all scenarios
-- ScenarioFrameContext: Per-frame input from pipeline
-- ScenarioEvent: Semantic event output from scenarios
-
-These contracts are minimal - scenarios define their own internal DTOs.
+Per-frame input (ScenarioFrameContext), event output (ScenarioEvent), overlay (OverlayData),
+and base class (BaseScenario). Scenarios define their own internal state and DTOs.
 """
 
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Any
 from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+# -----------------------------------------------------------------------------
+# Third-party
+# -----------------------------------------------------------------------------
 import numpy as np
 
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
 from app.processing.processing_output.data_models import DetectionPacket
 from app.processing.pipeline.data_models import RuleMatch
 from app.processing.pipeline.context import PipelineContext
+
+# -----------------------------------------------------------------------------
+# Per-frame context (input to scenario.process)
+# -----------------------------------------------------------------------------
 
 
 @dataclass
@@ -40,8 +50,12 @@ class ScenarioFrameContext:
     # Rule matches (if any)
     rule_matches: List[RuleMatch]  # All rule matches from this frame
     
-    # Pipeline context (for task config, agent info)
-    pipeline_context: PipelineContext  # Full pipeline context
+    pipeline_context: PipelineContext
+
+
+# -----------------------------------------------------------------------------
+# Event output (what scenarios return when they have a result)
+# -----------------------------------------------------------------------------
 
 
 @dataclass
@@ -72,6 +86,11 @@ class ScenarioEvent:
             self.metadata = {}
 
 
+# -----------------------------------------------------------------------------
+# Overlay data (for drawing on frame)
+# -----------------------------------------------------------------------------
+
+
 @dataclass
 class OverlayData:
     """
@@ -81,6 +100,11 @@ class OverlayData:
     label: Optional[str] = None
     color: Optional[tuple[int, int, int]] = None
     keypoints: Optional[List[List[float]]] = None
+
+
+# -----------------------------------------------------------------------------
+# Base scenario (abstract base for all scenario types)
+# -----------------------------------------------------------------------------
 
 
 class BaseScenario(ABC):

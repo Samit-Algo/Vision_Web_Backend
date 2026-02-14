@@ -1,13 +1,19 @@
 """
 Face detection scenario
------------------------
-Loads face embeddings from person_gallery (MongoDB), runs face detection +
-recognition on each frame, and emits an event when a watched person is identified.
-Uses DeepFace (Facenet/ArcFace etc.) for detection and embedding; matching by cosine similarity.
-"""
-from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime
+------------------------
 
+Loads embeddings from person_gallery; runs face detection + recognition per frame.
+Alerts when a watched person is identified. Uses DeepFace; matching by cosine similarity.
+"""
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
     ScenarioFrameContext,
@@ -24,7 +30,7 @@ from app.utils.face_embedding import (
 )
 
 
-def _load_gallery_embeddings() -> Tuple[List[List[float]], List[str]]:
+def load_gallery_embeddings() -> Tuple[List[List[float]], List[str]]:
     """
     Load all (embedding, name) from person_gallery. Only persons with status "active"
     and matching embedding_model (DeepFace) are used. Each person can have multiple
@@ -68,12 +74,12 @@ class FaceDetectionScenario(BaseScenario):
         self._state["consecutive_frames_without_face"] = 0  # track consecutive frames without face (for state management)
         self._known_encodings: List[List[float]] = []
         self._known_names: List[str] = []
-        self._load_gallery()
+        self.load_gallery()
 
-    def _load_gallery(self) -> None:
+    def load_gallery(self) -> None:
         """Load all gallery embeddings from MongoDB."""
         try:
-            self._known_encodings, self._known_names = _load_gallery_embeddings()
+            self._known_encodings, self._known_names = load_gallery_embeddings()
             names_str = ", ".join(sorted(set(self._known_names))) if self._known_names else "none"
             print(f"[FaceDetection] ✅ Gallery loaded: {len(self._known_encodings)} encodings for names: [{names_str}] (min_similarity={self.config_obj.min_similarity})")
         except Exception as e:
@@ -208,4 +214,4 @@ class FaceDetectionScenario(BaseScenario):
         self._state["last_recognized_faces"] = []
         self._state["last_recognized_time"] = None
         self._state["consecutive_frames_without_face"] = 0
-        self._load_gallery()
+        self.load_gallery()

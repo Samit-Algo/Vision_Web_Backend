@@ -1,15 +1,19 @@
 """
-Class Count Scenario
---------------------
+Class count scenario
+---------------------
 
-Counts detections of a specified class with two modes:
-1. Simple per-frame counting (no zone)
-2. Line-based counting with tracking (objects touching a line)
+Counts target class: simple per-frame or line-based (tracker + line crossing). Uses counter, reporter, report_storage.
 """
 
-from typing import List, Dict, Any, Optional
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 from datetime import datetime
+from typing import Any, Dict, List, Optional
 
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
     ScenarioFrameContext,
@@ -20,7 +24,8 @@ from .config import ClassCountConfig
 from .counter import (
     count_class_detections,
     generate_count_label,
-    filter_detections_by_class
+    filter_detections_by_class,
+    calculate_iou,
 )
 from .reporter import generate_report
 from .report_storage import (
@@ -67,7 +72,7 @@ class ClassCountScenario(BaseScenario):
 
         # Initialize report session when agent starts
         self._report_initialized = False
-        self._initialize_report_session()
+        self.initialize_report_session()
 
     def process(self, frame_context: ScenarioFrameContext) -> List[ScenarioEvent]:
         """
@@ -83,12 +88,12 @@ class ClassCountScenario(BaseScenario):
 
         # Line-based counting (with tracking)
         if self.config_obj.zone_type == "line" and self.tracker and self.line_counter:
-            return self._process_line_counting(frame_context)
+            return self.process_line_counting(frame_context)
 
         # Simple per-frame counting (no zone)
-        return self._process_simple_counting(frame_context)
+        return self.process_simple_counting(frame_context)
 
-    def _process_line_counting(self, frame_context: ScenarioFrameContext) -> List[ScenarioEvent]:
+    def process_line_counting(self, frame_context: ScenarioFrameContext) -> List[ScenarioEvent]:
         """Process line-based counting with tracking."""
         frame_height, frame_width = frame_context.frame.shape[:2]
         self.line_counter.update_frame_dimensions(frame_width, frame_height)
@@ -114,7 +119,7 @@ class ClassCountScenario(BaseScenario):
                     "timestamp": frame_context.timestamp.isoformat(),
                     "frame_index": frame_context.frame_index
                 })
-                self._save_counting_event_to_db(
+                self.save_counting_event_to_db(
                     track_id=track.track_id,
                     event_type=touch_result,
                     timestamp=frame_context.timestamp,
@@ -146,7 +151,7 @@ class ClassCountScenario(BaseScenario):
         else:
             count = counts["net_count"]
 
-        label = self._generate_line_count_label(counts)
+        label = self.generate_line_count_label(counts)
         report = generate_report(
             self._state,
             count,
@@ -160,7 +165,7 @@ class ClassCountScenario(BaseScenario):
         report["entry_count"] = counts["entry_count"]
         report["exit_count"] = counts["exit_count"]
 
-        matched_indices = self._match_tracks_to_detections(
+        matched_indices = self.match_tracks_to_detections(
             active_tracks,
             frame_context.detections
         )
@@ -187,7 +192,7 @@ class ClassCountScenario(BaseScenario):
             )
         ]
 
-    def _process_simple_counting(self, frame_context: ScenarioFrameContext) -> List[ScenarioEvent]:
+    def process_simple_counting(self, frame_context: ScenarioFrameContext) -> List[ScenarioEvent]:
         """Process simple per-frame counting (no zone)."""
         matched_count, matched_indices = count_class_detections(
             frame_context.detections,
@@ -225,7 +230,7 @@ class ClassCountScenario(BaseScenario):
             )
         ]
 
-    def _generate_line_count_label(self, counts: Dict[str, int]) -> str:
+    def generate_line_count_label(self, counts: Dict[str, int]) -> str:
         """Generate label for line-based counting."""
         custom_label = self.config_obj.custom_label
         direction = self.config_obj.zone_direction
@@ -249,7 +254,7 @@ class ClassCountScenario(BaseScenario):
             else:
                 return f"{exit_count} {target_class}(s) exited"
 
-    def _match_tracks_to_detections(self, tracks: List, detections) -> List[int]:
+    def match_tracks_to_detections(self, tracks: List, detections) -> List[int]:
         """Match active tracks to detection indices for visualization."""
         matched_indices = []
         boxes = detections.boxes
@@ -262,7 +267,7 @@ class ClassCountScenario(BaseScenario):
             best_idx = -1
             for idx, (det_box, det_class) in enumerate(zip(boxes, classes)):
                 if isinstance(det_class, str) and det_class.lower() == target_class:
-                    iou = self._calculate_iou(track_bbox, list(det_box))
+                    iou = calculate_iou(track_bbox, list(det_box))
                     if iou > best_iou and iou >= 0.3:
                         best_iou = iou
                         best_idx = idx
@@ -271,25 +276,7 @@ class ClassCountScenario(BaseScenario):
 
         return matched_indices
 
-    def _calculate_iou(self, box1: List[float], box2: List[float]) -> float:
-        """Calculate Intersection over Union between two boxes."""
-        x1_1, y1_1, x2_1, y2_1 = box1
-        x1_2, y1_2, x2_2, y2_2 = box2
-        overlap_left = max(x1_1, x1_2)
-        overlap_top = max(y1_1, y1_2)
-        overlap_right = min(x2_1, x2_2)
-        overlap_bottom = min(y2_1, y2_2)
-        if overlap_right < overlap_left or overlap_bottom < overlap_top:
-            return 0.0
-        intersection = (overlap_right - overlap_left) * (overlap_bottom - overlap_top)
-        area1 = (x2_1 - x1_1) * (y2_1 - y1_1)
-        area2 = (x2_2 - x1_2) * (y2_2 - y1_2)
-        union = area1 + area2 - intersection
-        if union == 0:
-            return 0.0
-        return intersection / union
-
-    def _initialize_report_session(self) -> None:
+    def initialize_report_session(self) -> None:
         """Initialize report session in MongoDB when agent starts."""
         if self._report_initialized:
             return
@@ -309,7 +296,7 @@ class ClassCountScenario(BaseScenario):
         except Exception as e:
             print(f"[CLASS_COUNT] ⚠️ Failed to initialize report session: {e}")
 
-    def _save_counting_event_to_db(
+    def save_counting_event_to_db(
         self,
         track_id: int,
         event_type: str,
@@ -344,7 +331,7 @@ class ClassCountScenario(BaseScenario):
         except Exception as e:
             print(f"[CLASS_COUNT] ⚠️ Failed to save counting event: {e}")
 
-    def _finalize_report_session(self) -> None:
+    def finalize_report_session(self) -> None:
         """Finalize report session in MongoDB when agent stops."""
         if not self._report_initialized:
             return
@@ -375,7 +362,7 @@ class ClassCountScenario(BaseScenario):
 
     def reset(self) -> None:
         """Reset scenario state."""
-        self._finalize_report_session()
+        self.finalize_report_session()
         self._state.clear()
         if self.tracker:
             self.tracker = SimpleTracker(

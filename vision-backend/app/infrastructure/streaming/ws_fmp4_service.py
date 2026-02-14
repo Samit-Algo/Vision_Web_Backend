@@ -7,6 +7,8 @@ from typing import Dict, Optional, Set
 
 from fastapi import WebSocket
 
+from .fmp4_common import try_extract_init_segment
+
 logger = logging.getLogger(__name__)
 
 
@@ -251,12 +253,17 @@ class WsFmp4Service:
                 continue
 
             # Capture MP4 init segment (ftyp + moov) so viewers joining later can decode.
-            # We parse MP4 boxes until we see moov.
             async with self._lock:
                 state = self._streams.get(camera_id)
                 if state and not state._init_ready:
                     state._mp4_parse_buf.extend(chunk)
-                    self._try_extract_init_segment(state)
+                    ready, init_segment = try_extract_init_segment(
+                        state._mp4_parse_buf, state._init_accum
+                    )
+                    if ready:
+                        state.init_segment = init_segment
+                        state._init_ready = True
+                        state._mp4_parse_buf.clear()
 
             if not viewers:
                 # Nobody is watching; yield to avoid hot loop until stop_grace triggers.
@@ -281,50 +288,3 @@ class WsFmp4Service:
                         for ws in to_remove:
                             state.viewers.discard(ws)
 
-    def _try_extract_init_segment(self, state: _CameraStreamState) -> None:
-        """
-        Parse MP4 boxes from the stream until we capture the init segment:
-        ftyp + moov (and ignore everything else). Store it in state.init_segment.
-        """
-        buf = state._mp4_parse_buf
-
-        def read_u32(b: bytes) -> int:
-            return int.from_bytes(b, "big", signed=False)
-
-        while True:
-            if len(buf) < 8:
-                return
-
-            size = read_u32(buf[0:4])
-            box_type = bytes(buf[4:8])
-
-            header_len = 8
-            if size == 1:
-                # 64-bit extended size
-                if len(buf) < 16:
-                    return
-                size = int.from_bytes(buf[8:16], "big", signed=False)
-                header_len = 16
-            elif size == 0:
-                # box extends to end of file/stream (not expected for live)
-                return
-
-            if size < header_len or size > 50_000_000:
-                # Guard against corruption; stop trying
-                return
-
-            if len(buf) < size:
-                return
-
-            box = bytes(buf[:size])
-            del buf[:size]
-
-            # Keep only ftyp + moov as init segment
-            if box_type in (b"ftyp", b"moov"):
-                state._init_accum.extend(box)
-                if box_type == b"moov":
-                    state.init_segment = bytes(state._init_accum)
-                    state._init_ready = True
-                    # Free memory we no longer need
-                    state._mp4_parse_buf.clear()
-                    return

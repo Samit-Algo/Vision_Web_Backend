@@ -1,9 +1,13 @@
 """
-Face detection scenario configuration
---------------------------------------
-Parses watch_names (persons to alert on), tolerance, and alert cooldown.
+Face detection configuration
+-----------------------------
+
+Parses watch_names (who to alert on), min_similarity/tolerance, cooldown, custom label.
 """
-from typing import Dict, Any, List
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
+from typing import Any, Dict, List
 
 
 class FaceDetectionConfig:

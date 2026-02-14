@@ -26,7 +26,7 @@ LEFT_HIP = 11
 RIGHT_HIP = 12
 
 
-def _get_keypoint(
+def get_keypoint(
     person_keypoints: List[List[float]],
     idx: int,
     confidence_threshold: float = 0.0,
@@ -45,7 +45,7 @@ def _get_keypoint(
     return float(kp[0]), float(kp[1])
 
 
-def _torso_angle_degrees(
+def torso_angle_degrees(
     left_shoulder: Tuple[float, float],
     right_shoulder: Tuple[float, float],
     left_hip: Tuple[float, float],
@@ -72,7 +72,7 @@ def _torso_angle_degrees(
     return angle_deg
 
 
-def _is_lying(
+def is_lying(
     keypoints: List[List[float]],
     torso_angle_lying_deg: float,
     kp_conf: float,
@@ -81,20 +81,20 @@ def _is_lying(
     True if torso is nearly horizontal (person lying down).
     Returns (is_lying, torso_angle_deg).
     """
-    ls = _get_keypoint(keypoints, LEFT_SHOULDER, kp_conf)
-    rs = _get_keypoint(keypoints, RIGHT_SHOULDER, kp_conf)
-    lh = _get_keypoint(keypoints, LEFT_HIP, kp_conf)
-    rh = _get_keypoint(keypoints, RIGHT_HIP, kp_conf)
+    ls = get_keypoint(keypoints, LEFT_SHOULDER, kp_conf)
+    rs = get_keypoint(keypoints, RIGHT_SHOULDER, kp_conf)
+    lh = get_keypoint(keypoints, LEFT_HIP, kp_conf)
+    rh = get_keypoint(keypoints, RIGHT_HIP, kp_conf)
     if ls is None or rs is None or lh is None or rh is None:
         return False, 0.0
-    angle = _torso_angle_degrees(ls, rs, lh, rh)
+    angle = torso_angle_degrees(ls, rs, lh, rh)
     # In our calc: 0 = horizontal (lying), 90 = vertical (standing).
     # So "lying" means torso angle from horizontal is small.
     is_lying = angle <= torso_angle_lying_deg
     return is_lying, angle
 
 
-def _head_down_angle_degrees(
+def head_down_angle_degrees(
     keypoints: List[List[float]],
     kp_conf: float,
 ) -> Optional[float]:
@@ -103,9 +103,9 @@ def _head_down_angle_degrees(
     Returns None if we can't compute; else angle in degrees (larger = more head down).
     Used for standing sleep: head tilted forward / chin down.
     """
-    nose = _get_keypoint(keypoints, NOSE, kp_conf)
-    ls = _get_keypoint(keypoints, LEFT_SHOULDER, kp_conf)
-    rs = _get_keypoint(keypoints, RIGHT_SHOULDER, kp_conf)
+    nose = get_keypoint(keypoints, NOSE, kp_conf)
+    ls = get_keypoint(keypoints, LEFT_SHOULDER, kp_conf)
+    rs = get_keypoint(keypoints, RIGHT_SHOULDER, kp_conf)
     if nose is None or ls is None or rs is None:
         return None
     shoulder_y = (ls[1] + rs[1]) / 2
@@ -118,7 +118,7 @@ def _head_down_angle_degrees(
     return math.degrees(angle_rad)
 
 
-def _nose_below_shoulder_px(
+def nose_below_shoulder_px(
     keypoints: List[List[float]],
     kp_conf: float,
 ) -> Optional[float]:
@@ -126,16 +126,16 @@ def _nose_below_shoulder_px(
     How many pixels the nose is below the shoulder line (positive = head forward/down).
     Used as alternative/supplement to angle for standing sleep (chin-down posture).
     """
-    nose = _get_keypoint(keypoints, NOSE, kp_conf)
-    ls = _get_keypoint(keypoints, LEFT_SHOULDER, kp_conf)
-    rs = _get_keypoint(keypoints, RIGHT_SHOULDER, kp_conf)
+    nose = get_keypoint(keypoints, NOSE, kp_conf)
+    ls = get_keypoint(keypoints, LEFT_SHOULDER, kp_conf)
+    rs = get_keypoint(keypoints, RIGHT_SHOULDER, kp_conf)
     if nose is None or ls is None or rs is None:
         return None
     shoulder_y = (ls[1] + rs[1]) / 2
     return float(nose[1] - shoulder_y)  # positive = nose below shoulder
 
 
-def _average_motion_px(
+def average_motion_px(
     pose_buffer: List[PoseFrame],
     person_index: int,
     kp_indices: List[int],
@@ -157,8 +157,8 @@ def _average_motion_px(
         kp_curr = curr.keypoints[person_index]
         kp_next = next_f.keypoints[person_index]
         for idx in kp_indices:
-            p1 = _get_keypoint(kp_curr, idx, kp_conf)
-            p2 = _get_keypoint(kp_next, idx, kp_conf)
+            p1 = get_keypoint(kp_curr, idx, kp_conf)
+            p2 = get_keypoint(kp_next, idx, kp_conf)
             if p1 is not None and p2 is not None:
                 total += math.hypot(p2[0] - p1[0], p2[1] - p1[1])
                 count += 1
@@ -174,7 +174,7 @@ def analyze_sleep_posture(
     head_down_angle_deg: float,
     motion_threshold_px: float,
     kp_confidence_threshold: float,
-    min_nose_below_shoulder_px: float = 0.0,
+    minnose_below_shoulder_px: float = 0.0,
     head_down_majority_ratio: float = 0.5,
 ) -> List[SleepAnalysis]:
     """
@@ -183,7 +183,7 @@ def analyze_sleep_posture(
     - Standing sleep: head forward/down (angle OR nose below shoulder px) and low motion.
 
     Head posture: we use (1) head-down angle (nose below shoulder line) and/or
-    (2) min_nose_below_shoulder_px so that "chin down / head forward" posture
+    (2) minnose_below_shoulder_px so that "chin down / head forward" posture
     (standing sleep) is detected even with moderate tilt.
     """
     if len(pose_buffer) < temporal_consistency_frames:
@@ -212,13 +212,13 @@ def analyze_sleep_posture(
             kp = pf.keypoints[person_idx]
 
             # Rule 1: Lying
-            is_lying, torso_angle = _is_lying(kp, torso_angle_lying_deg, kp_confidence_threshold)
+            is_lying, torso_angle = is_lying(kp, torso_angle_lying_deg, kp_confidence_threshold)
             if is_lying:
                 lying_count += 1
 
             # Rule 2: Head down/forward (angle OR nose below shoulder in pixels)
-            head_angle = _head_down_angle_degrees(kp, kp_confidence_threshold)
-            nose_below_px = _nose_below_shoulder_px(kp, kp_confidence_threshold)
+            head_angle = head_down_angle_degrees(kp, kp_confidence_threshold)
+            nose_below_px = nose_below_shoulder_px(kp, kp_confidence_threshold)
             if head_angle is not None:
                 head_angles_seen.append(head_angle)
             if nose_below_px is not None:
@@ -226,7 +226,7 @@ def analyze_sleep_posture(
             head_down_this_frame = False
             if head_angle is not None and head_angle >= head_down_angle_deg:
                 head_down_this_frame = True
-            if not head_down_this_frame and nose_below_px is not None and min_nose_below_shoulder_px > 0 and nose_below_px >= min_nose_below_shoulder_px:
+            if not head_down_this_frame and nose_below_px is not None and minnose_below_shoulder_px > 0 and nose_below_px >= minnose_below_shoulder_px:
                 head_down_this_frame = True
             if head_down_this_frame:
                 head_down_still_count += 1
@@ -235,7 +235,7 @@ def analyze_sleep_posture(
             if slight_tilt_this:
                 slight_tilt_count += 1
 
-        motion = _average_motion_px(
+        motion = average_motion_px(
             pose_buffer,
             person_idx,
             [NOSE, LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_HIP, RIGHT_HIP],

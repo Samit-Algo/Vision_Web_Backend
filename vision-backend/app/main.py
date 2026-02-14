@@ -45,7 +45,7 @@ from .api.v1.notifications_controller import set_websocket_manager
 # -----------------------------------------------------------------------------
 from .infrastructure.messaging import KafkaEventConsumer
 from .infrastructure.notifications import NotificationService, WebSocketManager
-from .infrastructure.streaming import WsFmp4Service
+from .infrastructure.streaming import ProcessedFrameStreamService, WsFmp4Service
 
 # -----------------------------------------------------------------------------
 # DI, processing, utils
@@ -113,7 +113,7 @@ async def lifespan(app: FastAPI):
         5. Vision runner in a background thread
 
     Shutdown (in order):
-        1. Stop all live WebSocket streams
+        1. Stop all live WebSocket streams (raw + agent processed)
         2. Stop event session manager
         3. Stop Kafka consumer
         (Runner thread is daemon; it exits with the process.)
@@ -190,12 +190,18 @@ async def lifespan(app: FastAPI):
 
     # ----- Shutdown -----
 
-    # 1. Stop all live WebSocket streams
+    # 1. Stop all live WebSocket streams (raw + agent processed)
     try:
         container = get_container()
         ws_service: WsFmp4Service = container.get(WsFmp4Service)
         await ws_service.cleanup_all_streams()
         logger.info("All live WebSocket streams stopped")
+
+        processed_service: ProcessedFrameStreamService = container.get(
+            ProcessedFrameStreamService
+        )
+        await processed_service.cleanup_all_streams()
+        logger.info("All agent processed streams stopped")
     except Exception as e:
         logger.error("Error stopping WebSocket streams: %s", e, exc_info=True)
 

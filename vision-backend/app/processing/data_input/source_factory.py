@@ -1,52 +1,56 @@
 """
-Source Factory
+Source factory
 --------------
 
-Factory to create frame source based on task config:
-- If source is video file (video_path / source_type video_file) -> VideoFileSource
-- Else if RTSP (camera_id) -> HubSource via shared memory
+Creates the correct frame source from task config:
+- video_path or source_type "video_file" → VideoFileSource
+- camera_id + shared_store → HubSource (RTSP via shared memory)
 """
 
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 from typing import Any, Dict, Optional, Protocol
 
+# -----------------------------------------------------------------------------
+# Local
+# -----------------------------------------------------------------------------
 from .data_models import FramePacket
 from .hub_source import HubSource
 from .video_file_source import VideoFileSource
 
+# -----------------------------------------------------------------------------
+# Source protocol (what all sources must implement)
+# -----------------------------------------------------------------------------
 
-# ============================================================================
-# SOURCE PROTOCOL
-# ============================================================================
 
 class Source(Protocol):
-    """
-    Protocol defining the interface that all sources must implement.
-
-    This allows the pipeline to work with any source type without knowing
-    the specific implementation.
-    """
+    """Interface for frame sources. Pipeline only needs read_frame() and is_available()."""
 
     def read_frame(self) -> Optional[FramePacket]:
-        """Read the next frame from the source."""
+        """Return the next frame, or None if not available / EOF."""
         ...
 
     def is_available(self) -> bool:
-        """Check if source is available."""
+        """Return True if the source can provide frames."""
         ...
 
 
-# ============================================================================
-# FACTORY
-# ============================================================================
+# -----------------------------------------------------------------------------
+# Factory
+# -----------------------------------------------------------------------------
+
 
 def create_source(
     task: Dict[str, Any],
-    shared_store: Optional[Dict[str, Any]] = None
+    shared_store: Optional[Dict[str, Any]] = None,
 ) -> Optional[Source]:
     """
-    Create frame source from task config.
-    - If task has video_path or source_type "video_file" -> VideoFileSource (no camera_id).
-    - Else if task has camera_id and shared_store -> HubSource (RTSP).
+    Create a frame source from task config.
+
+    - If task has video_path or source_type "video_file" → VideoFileSource.
+    - Else if task has camera_id and shared_store → HubSource (reads from CameraPublisher).
+    - Otherwise returns None (missing video_path or camera_id or shared_store).
     """
     video_path = (task.get("video_path") or "").strip()
     source_type = (task.get("source_type") or "").strip().lower()

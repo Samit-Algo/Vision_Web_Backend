@@ -1,35 +1,36 @@
 """
-Shared Memory Registry
-=====================
+Shared store registry
+--------------------
 
-Registry for cross-module access to shared memory store.
+Single place to get/set the multiprocessing shared memory store.
 
-FastAPI main.py creates the multiprocessing.Manager().dict() shared_store used by:
-- CameraPublisher (writes shared_store[camera_id])
-- Task workers (write shared_store[task_id] for annotated frames)
+- main.py creates Manager().dict() at startup and calls set_shared_store().
+- Pipeline workers write processed frames to shared_store[agent_id].
+- API/WebSocket endpoints read from get_shared_store() to stream frames.
 
-Other parts of the backend (e.g. API/WebSocket endpoints) need read access.
-We keep this tiny registry to avoid circular imports.
+This registry avoids passing the store through every layer and prevents circular imports.
 """
 
 from __future__ import annotations
 
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 from typing import Any, Optional
 
-
-# ============================================================================
-# REGISTRY
-# ============================================================================
+# -----------------------------------------------------------------------------
+# Registry (module-level store reference)
+# -----------------------------------------------------------------------------
 
 _shared_store: Optional[Any] = None
 
 
 def set_shared_store(store: Any) -> None:
-    """Set the shared memory store."""
+    """Set the shared memory store (called once at app startup from main.py)."""
     global _shared_store
     _shared_store = store
 
 
 def get_shared_store() -> Optional[Any]:
-    """Get the shared memory store."""
+    """Return the shared memory store, or None if not yet initialized."""
     return _shared_store

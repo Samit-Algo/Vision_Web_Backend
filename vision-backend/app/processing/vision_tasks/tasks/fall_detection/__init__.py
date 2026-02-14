@@ -1,4 +1,4 @@
-"""Fall detection scenario - detects human falls using pose keypoint analysis."""
+"""Fall detection: human fall from pose keypoints (hip drop, lying angle)."""
 
 from .scenario import FallDetectionScenario
 

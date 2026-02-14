@@ -1,24 +1,20 @@
 """
-Fall Detection Configuration
-----------------------------
+Fall detection configuration
+-----------------------------
 
-Handles configuration parsing for fall detection scenario.
+Parses target class (person), pose keypoint thresholds, hip drop, lying angle, confirm_frames, cooldown.
 """
 
-from typing import Optional, Dict, Any
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
+from typing import Any, Dict
 
 
 class FallDetectionConfig:
-    """Configuration for fall detection scenario."""
+    """Config for fall detection: person class, keypoint thresholds, confirm frames, cooldown."""
 
-    def __init__(self, config: Dict[str, Any], task: Dict[str, Any]):
-        """
-        Initialize configuration from config dict and task.
-
-        Args:
-            config: Configuration dictionary from rule/task
-            task: Full task dictionary
-        """
+    def __init__(self, config: Dict[str, Any], task: Dict[str, Any]) -> None:
         self.target_class = str(config.get("class") or "person").strip().lower()
         self.custom_label = config.get("label")
         self.alert_cooldown_seconds = float(config.get("alert_cooldown_seconds", 10))

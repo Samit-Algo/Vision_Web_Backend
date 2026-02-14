@@ -2,15 +2,20 @@
 Pipeline Runner and Stages
 --------------------------
 
-Orchestrates the processing pipeline and defines the individual stages.
-Manages the main processing loop, FPS pacing, and stage sequencing.
+Orchestrates the processing pipeline: acquire frame → inference → merge → evaluate rules → draw/publish.
+Manages the main loop (continuous or patrol), FPS pacing, and stage sequencing.
 """
 
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 import dataclasses
 import time
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+# -----------------------------------------------------------------------------
+# Processing (stages, context, data models, drawing)
+# -----------------------------------------------------------------------------
 from app.processing.processing_output.data_models import DetectionPacket
 from app.processing.models.data_models import Model
 from app.processing.pipeline.context import PipelineContext
@@ -25,23 +30,29 @@ from app.processing.drawing.frame_processor import (
     draw_bounding_boxes,
     draw_pose_keypoints,
     draw_box_count_annotations,
+    draw_zone_polygon,
+    draw_zone_line,
+    draw_boxes_in_zone_red,
 )
+# Trigger scenario registration (decorators run on import)
+from app.processing.vision_tasks import scenario_registry  # noqa: F401
+
+# -----------------------------------------------------------------------------
+# Utils (DB, datetime, events)
+# -----------------------------------------------------------------------------
 from app.utils.db import get_collection
 from app.utils.datetime_utils import utc_now, now
 from app.utils.event_session_manager import get_event_session_manager
 
-# Import scenarios module to trigger registration decorators
-from app.processing.vision_tasks import scenario_registry  # noqa: F401
-
-# ============================================================================
-# PIPELINE STAGES
-# ============================================================================
+# -----------------------------------------------------------------------------
+# Pipeline stages (Stage 1–4)
+# -----------------------------------------------------------------------------
 
 def acquire_frame_stage(source: Source) -> Optional[FramePacket]:
     """Stage 1: Acquire frame from source."""
     return source.read_frame()
 
-def _any_scenario_requires_yolo(context: PipelineContext) -> bool:
+def any_scenario_requires_yolo(context: PipelineContext) -> bool:
     """Check if any scenario in the rules requires YOLO detections."""
     if not context.rules:
         return False
@@ -78,7 +89,7 @@ def inference_stage(
     models: List[Model]
 ) -> List[DetectionPacket]:
     """Stage 2: Run model inference on frame."""
-    if not _any_scenario_requires_yolo(context):
+    if not any_scenario_requires_yolo(context):
         return []
 
     frame = frame_packet.frame
@@ -102,8 +113,11 @@ def merge_detections_stage(detection_packets: List[DetectionPacket]) -> Detectio
     return DetectionMerger.merge(detection_packets, now())
 
 
-def _overlay_data_to_dict_list(overlay_data: Any) -> List[Dict[str, Any]]:
-    """Normalize scenario overlay output for UI: each item has boxes, labels, colors arrays."""
+def overlay_data_to_dict_list(overlay_data: Any) -> List[Dict[str, Any]]:
+    """
+    Normalize scenario overlay output for UI.
+    Converts dataclass/dict from scenarios into a list of dicts with boxes, labels, colors.
+    """
     if isinstance(overlay_data, list):
         out = []
         for item in overlay_data:
@@ -238,12 +252,13 @@ def evaluate_rules_stage(
 
     return rule_match, all_matched_indices
 
-# ============================================================================
-# UTILITIES
-# ============================================================================
+# -----------------------------------------------------------------------------
+# Utilities (time format, FPS helper)
+# -----------------------------------------------------------------------------
+
 
 def format_video_time_ms(milliseconds: float) -> str:
-    """Convert milliseconds to H:MM:SS.mmm string."""
+    """Convert milliseconds to H:MM:SS.mmm string (for event timestamps)."""
     if milliseconds < 0:
         milliseconds = 0
     total_seconds, milliseconds_remainder = divmod(int(milliseconds), 1000)
@@ -251,16 +266,32 @@ def format_video_time_ms(milliseconds: float) -> str:
     minutes, seconds = divmod(remaining_seconds, 60)
     return f"{hours:d}:{minutes:02d}:{seconds:02d}.{milliseconds_remainder:03d}"
 
-# ============================================================================
-# PIPELINE RUNNER
-# ============================================================================
+
+# -----------------------------------------------------------------------------
+# FPS helper
+# -----------------------------------------------------------------------------
+
+def should_use_camera_fps(context: PipelineContext) -> bool:
+    """True if any rule is box_count or class_count (use camera FPS instead of configured FPS)."""
+    if not context.rules:
+        return False
+    for rule in context.rules:
+        rule_type = str(rule.get("type", "")).strip().lower()
+        if rule_type in ("box_count", "class_count"):
+            return True
+    return False
+
+# -----------------------------------------------------------------------------
+# Pipeline runner (main loop and helpers)
+# -----------------------------------------------------------------------------
+
 
 class PipelineRunner:
     """
     Orchestrates the processing pipeline.
-    
-    Manages the main loop, FPS pacing, and calls stages in sequence.
-    Handles both continuous and patrol modes.
+
+    Runs the main loop: acquire frame → inference → merge → evaluate rules → draw/publish.
+    Supports two modes: continuous (run at target FPS until stop) and patrol (sleep then process window).
     """
     
     def __init__(
@@ -284,20 +315,97 @@ class PipelineRunner:
         self.models = models
         self.shared_store = shared_store
         self.tasks_collection = get_collection()
-    
+
+    # -------------------------------------------------------------------------
+    # Private: process one frame (main loop logic)
+    # -------------------------------------------------------------------------
+
+    def process_one_frame(
+        self,
+        frame_packet: FramePacket,
+        fps: int,
+        min_interval: float,
+        next_tick: float,
+        last_status: float,
+        processed_in_window: int,
+        skipped_in_window: int,
+    ) -> Tuple[float, float, int, int]:
+        """
+        Run stages 2–4 on an acquired frame: inference → merge → evaluate → draw/publish → event → heartbeat.
+        Updates context (frame_index, last_seen_hub_index) and returns updated pacing counters.
+        """
+        # FPS pacing: wait until next_tick then advance
+        now_ts = time.time()
+        if now_ts < next_tick:
+            time.sleep(max(0.0, next_tick - now_ts))
+        next_tick = max(next_tick + min_interval, time.time())
+
+        # Update context (hub index, frame index, window counters)
+        hub_index = frame_packet.frame_index
+        if self.context.last_seen_hub_index is not None and hub_index > self.context.last_seen_hub_index + 1:
+            skipped_in_window += (hub_index - self.context.last_seen_hub_index - 1)
+        self.context.last_seen_hub_index = hub_index
+        self.context.frame_index += 1
+        processed_in_window += 1
+
+        # Status log once per second (then reset window counters)
+        if (time.time() - last_status) >= 1.0:
+            base_fps = frame_packet.fps if frame_packet.fps is not None else 0.0
+            hub_status = self.context.last_seen_hub_index or 0
+            print(
+                f"[worker {self.context.task_id}] ⏱️ sampling agent_fps={fps} base_fps={base_fps} "
+                f"processed={processed_in_window}/s skipped={skipped_in_window} hub_frame_index={hub_status} camera_id={self.context.camera_id}"
+            )
+            processed_in_window = 0
+            skipped_in_window = 0
+            last_status = time.time()
+
+        # Stage 2: Inference
+        detection_packets = inference_stage(self.context, frame_packet, self.models)
+        # Stage 3: Merge
+        merged_packet = merge_detections_stage(detection_packets)
+
+        # Debug: keypoints (pose) on first frame and every 30th
+        if self.context.frame_index == 1 or self.context.frame_index % 30 == 0:
+            if merged_packet.keypoints:
+                print(f"[worker {self.context.task_id}] ✅ Keypoints extracted: {len(merged_packet.keypoints)} person(s) with pose data")
+            else:
+                print(f"[worker {self.context.task_id}] ⚠️ No keypoints extracted! Check if model is a pose model (e.g., yolov8n-pose.pt)")
+
+        # Stage 4: Evaluate rules (scenario-based)
+        rule_match = None
+        all_matched_indices: List[int] = []
+        if self.context.rules:
+            rule_match, all_matched_indices = evaluate_rules_stage(
+                self.context, merged_packet, frame_packet
+            )
+
+        detections = merged_packet.to_dict()
+        processed_frame = self.draw_and_publish_frame(
+            frame_packet, merged_packet, detections, all_matched_indices, rule_match
+        )
+        if rule_match:
+            self.handle_event(rule_match, processed_frame, frame_packet, detections, fps)
+
+        # Heartbeat (so DB knows task is still running)
+        try:
+            from bson import ObjectId
+            self.tasks_collection.update_one(
+                {"_id": ObjectId(self.context.task_id)},
+                {"$set": {"updated_at": utc_now()}},
+            )
+        except Exception:
+            pass
+
+        return (next_tick, last_status, processed_in_window, skipped_in_window)
+
+    # -------------------------------------------------------------------------
+    # Public: run pipeline in continuous mode
+    # -------------------------------------------------------------------------
+
     def run_continuous(self) -> None:
         """Run pipeline in continuous mode (process frames indefinitely at target FPS)."""
-        # Check if any rules are counting rules (box_count or class_count)
-        # For counting rules, use camera FPS instead of configured FPS
-        use_camera_fps = False
-        if self.context.rules:
-            for rule in self.context.rules:
-                rule_type = str(rule.get("type", "")).strip().lower()
-                if rule_type in ['box_count', 'class_count']:
-                    use_camera_fps = True
-                    break
-        
-        # Default to configured FPS
+        use_camera_fps = should_use_camera_fps(self.context)
         fps = self.context.fps
         min_interval = 1.0 / max(1, fps)
         next_tick = time.time()
@@ -305,17 +413,17 @@ class PipelineRunner:
         last_status = time.time()
         processed_in_window = 0
         skipped_in_window = 0
-        
+
         while True:
-            # Check stop conditions
+            # 1. Check if we should stop (user cancelled, task deleted, end_time)
             stop_reason = self.context.get_stop_condition(self.tasks_collection)
             if stop_reason:
                 status = "cancelled" if stop_reason == "stop_requested" else "completed"
                 self.context.update_status(self.tasks_collection, status)
                 print(f"[worker {self.context.task_id}] ⏹️ Stopping (reason={stop_reason})")
                 return
-            
-            # Stage 1: Acquire frame
+
+            # 2. Stage 1: Acquire frame from source
             frame_packet = acquire_frame_stage(self.source)
             if frame_packet is None:
                 if self.context.is_video_file:
@@ -324,134 +432,55 @@ class PipelineRunner:
                     return
                 time.sleep(0.05)
                 continue
-            
-            # For counting rules, use camera FPS if available
+
+            # 3. For counting rules, use camera FPS when available
             if use_camera_fps and frame_packet.fps is not None and frame_packet.fps > 0:
-                fps = frame_packet.fps
+                fps = int(frame_packet.fps)
                 min_interval = 1.0 / max(1, fps)
-            
-            # FPS pacing
-            now_timestamp = time.time()
-            if now_timestamp < next_tick:
-                time.sleep(max(0.0, next_tick - now_timestamp))
-            next_tick = max(next_tick + min_interval, time.time())
-            
-            # Update context tracking
-            hub_index = frame_packet.frame_index
-            if self.context.last_seen_hub_index is not None and hub_index > self.context.last_seen_hub_index + 1:
-                skipped_in_window += (hub_index - self.context.last_seen_hub_index - 1)
-            self.context.last_seen_hub_index = hub_index
-            self.context.frame_index += 1
-            processed_in_window += 1
-            
-            # Status logging (once per second)
-            if (time.time() - last_status) >= 1.0:
-                base_fps = frame_packet.fps if frame_packet.fps is not None else 0.0
-                hub_index_status = self.context.last_seen_hub_index or 0
-                print(f"[worker {self.context.task_id}] ⏱️ sampling agent_fps={fps} base_fps={base_fps} processed={processed_in_window}/s skipped={skipped_in_window} hub_frame_index={hub_index_status} camera_id={self.context.camera_id}")
-                processed_in_window = 0
-                skipped_in_window = 0
-                last_status = time.time()
-            
-            # Stage 2: Inference
-            detection_packets = inference_stage(self.context, frame_packet, self.models)
-            
-            # Stage 3: Merge detections
-            merged_packet = merge_detections_stage(detection_packets)
-            
-            # Debug logging
-            if self.context.frame_index == 1 or self.context.frame_index % 30 == 0:
-                if merged_packet.keypoints:
-                    print(f"[worker {self.context.task_id}] ✅ Keypoints extracted: {len(merged_packet.keypoints)} person(s) with pose data")
-                else:
-                    print(f"[worker {self.context.task_id}] ⚠️ No keypoints extracted! Check if model is a pose model (e.g., yolov8n-pose.pt)")
-            
-            # Stage 4: Evaluate rules (uses rules field from database)
-            # Rules can use traditional handlers OR scenario implementations internally
-            rule_match = None
-            all_matched_indices = []
-            if self.context.rules:
-                rule_match, all_matched_indices = evaluate_rules_stage(
-                    self.context,
-                    merged_packet,
-                    frame_packet  # Pass frame for scenario-based rules
-                )
-            
-            # Convert detections to dict for drawing/events (backward compatibility)
-            detections = merged_packet.to_dict()
-            
-            # Draw and publish frame (if shared_store available)
-            processed_frame = self._draw_and_publish_frame(
-                frame_packet,
-                merged_packet,
-                detections,
-                all_matched_indices,
-                rule_match,
+
+            # 4. Run stages 2–4 and draw/publish/event/heartbeat (shared logic)
+            next_tick, last_status, processed_in_window, skipped_in_window = self.process_one_frame(
+                frame_packet, fps, min_interval, next_tick, last_status, processed_in_window, skipped_in_window
             )
-            
-            # Handle rule events (rules can use traditional handlers or scenario implementations)
-            if rule_match:
-                self._handle_event(rule_match, processed_frame, frame_packet, detections, fps)
-            
-            # Heartbeat
-            try:
-                from bson import ObjectId
-                self.tasks_collection.update_one(
-                    {"_id": ObjectId(self.context.task_id)},
-                    {"$set": {"updated_at": utc_now()}}
-                )
-            except Exception:
-                pass
-    
+
+    # -------------------------------------------------------------------------
+    # Public: run pipeline in patrol mode
+    # -------------------------------------------------------------------------
+
     def run_patrol(self) -> None:
-        """Run pipeline in patrol mode (sleep interval, then process window, repeat)."""
+        """Run pipeline in patrol mode: sleep N minutes, then process for M seconds, repeat."""
         interval_seconds = max(0, int(self.context.interval_minutes) * 60)
         window_seconds = max(1, int(self.context.check_duration_seconds))
-        
-        # Check if any rules are counting rules (box_count or class_count)
-        # For counting rules, use camera FPS instead of configured FPS
-        use_camera_fps = False
-        if self.context.rules:
-            for rule in self.context.rules:
-                rule_type = str(rule.get("type", "")).strip().lower()
-                if rule_type in ['box_count', 'class_count']:
-                    use_camera_fps = True
-                    break
-        
-        # Default to configured FPS
+        use_camera_fps = should_use_camera_fps(self.context)
         fps = self.context.fps
-        
+
         print(f"[worker {self.context.task_id}] 💤 Patrol mode | sleep={interval_seconds}s window={window_seconds}s fps={fps}")
-        
+
         while True:
-            # Sleep with heartbeat and stop checks
-            if self._sleep_with_heartbeat(interval_seconds):
+            # Sleep interval with heartbeat and stop checks
+            if self.sleep_with_heartbeat(interval_seconds):
                 return
-            
-            # Detection window
+
+            # Detection window: process frames for window_seconds
             window_end = time.time() + window_seconds
             min_interval = 1.0 / max(1, fps)
             next_tick = time.time()
-            print(f"[worker {self.context.task_id}] 🔎 Patrol window started ({window_seconds}s)")
-            
-            # Reset per-window state
             self.context.rule_state = {}
             self.context.frame_index = 0
             last_status = time.time()
             processed_in_window = 0
             skipped_in_window = 0
             self.context.last_seen_hub_index = None
-            
+            print(f"[worker {self.context.task_id}] 🔎 Patrol window started ({window_seconds}s)")
+
             while time.time() < window_end:
-                # Check stop conditions
                 stop_reason = self.context.get_stop_condition(self.tasks_collection)
                 if stop_reason:
                     status = "cancelled" if stop_reason == "stop_requested" else "completed"
                     self.context.update_status(self.tasks_collection, status)
                     print(f"[worker {self.context.task_id}] ⏹️ Stopping (reason={stop_reason})")
                     return
-                
-                # Stage 1: Acquire frame
+
                 frame_packet = acquire_frame_stage(self.source)
                 if frame_packet is None:
                     if self.context.is_video_file:
@@ -460,71 +489,23 @@ class PipelineRunner:
                         return
                     time.sleep(0.05)
                     continue
-                
-                # For counting rules, use camera FPS if available
+
                 if use_camera_fps and frame_packet.fps is not None and frame_packet.fps > 0:
-                    fps = frame_packet.fps
+                    fps = int(frame_packet.fps)
                     min_interval = 1.0 / max(1, fps)
-                
-                # FPS pacing
-                now_timestamp = time.time()
-                if now_timestamp < next_tick:
-                    time.sleep(max(0.0, next_tick - now_timestamp))
-                next_tick = max(next_tick + min_interval, time.time())
-                
-                # Update context tracking
-                hub_index = frame_packet.frame_index
-                if self.context.last_seen_hub_index is not None and hub_index > self.context.last_seen_hub_index + 1:
-                    skipped_in_window += (hub_index - self.context.last_seen_hub_index - 1)
-                self.context.last_seen_hub_index = hub_index
-                self.context.frame_index += 1
-                processed_in_window += 1
 
-                if (time.time() - last_status) >= 1.0:
-                    base_fps = frame_packet.fps if frame_packet.fps is not None else 0.0
-                    hub_index_status = self.context.last_seen_hub_index or 0
-                    print(f"[worker {self.context.task_id}] ⏱️ sampling(agent patrol) agent_fps={fps} base_fps={base_fps} processed={processed_in_window}/s skipped={skipped_in_window} hub_frame_index={hub_index_status} camera_id={self.context.camera_id}")
-                    processed_in_window = 0
-                    skipped_in_window = 0
-                    last_status = time.time()
-
-                detection_packets = inference_stage(self.context, frame_packet, self.models)
-                merged_packet = merge_detections_stage(detection_packets)
-
-                rule_match = None
-                all_matched_indices = []
-                if self.context.rules:
-                    rule_match, all_matched_indices = evaluate_rules_stage(
-                        self.context,
-                        merged_packet,
-                        frame_packet
-                    )
-
-                detections = merged_packet.to_dict()
-                processed_frame = self._draw_and_publish_frame(
-                    frame_packet,
-                    merged_packet,
-                    detections,
-                    all_matched_indices,
-                    rule_match,
+                next_tick, last_status, processed_in_window, skipped_in_window = self.process_one_frame(
+                    frame_packet, fps, min_interval, next_tick, last_status, processed_in_window, skipped_in_window
                 )
-
-                if rule_match:
-                    self._handle_event(rule_match, processed_frame, frame_packet, detections, fps)
-
-                try:
-                    from bson import ObjectId
-                    self.tasks_collection.update_one(
-                        {"_id": ObjectId(self.context.task_id)},
-                        {"$set": {"updated_at": utc_now()}}
-                    )
-                except Exception:
-                    pass
 
             print(f"[worker {self.context.task_id}] 💤 Patrol window ended; going back to sleep")
     
-    def _sleep_with_heartbeat(self, seconds: int) -> bool:
-        """Sleep with periodic heartbeat and stop checks. Returns True if should stop."""
+    # -------------------------------------------------------------------------
+    # Private: sleep with heartbeat (patrol mode)
+    # -------------------------------------------------------------------------
+
+    def sleep_with_heartbeat(self, seconds: int) -> bool:
+        """Sleep for given seconds with periodic heartbeat and stop checks. Returns True if should stop."""
         from bson import ObjectId
         
         end_time = time.time() + max(0, seconds)
@@ -548,8 +529,12 @@ class PipelineRunner:
             
             time.sleep(1)
         return False
-    
-    def _draw_and_publish_frame(
+
+    # -------------------------------------------------------------------------
+    # Private: draw annotations and publish frame to shared_store
+    # -------------------------------------------------------------------------
+
+    def draw_and_publish_frame(
         self,
         frame_packet: FramePacket,
         merged_packet: DetectionPacket,
@@ -578,6 +563,7 @@ class PipelineRunner:
             # Check scenario types
             is_restricted_zone = False
             restricted_zone_scenario = None  # Used to read in_zone_indices from state for per-box red coloring
+            restricted_zone_coordinates: Optional[List[List[float]]] = None  # Polygon for drawing on frame
             is_line_counting = False
             is_fire_detection = False
             fire_detected = False  # Whether fire is currently detected
@@ -599,6 +585,8 @@ class PipelineRunner:
                         restricted_zone_scenario = scenario_instance
                         if hasattr(scenario_instance, 'config_obj') and hasattr(scenario_instance.config_obj, 'target_class'):
                             target_class = scenario_instance.config_obj.target_class
+                        if hasattr(scenario_instance, 'config_obj') and hasattr(scenario_instance.config_obj, 'zone_coordinates'):
+                            restricted_zone_coordinates = getattr(scenario_instance.config_obj, 'zone_coordinates', None)
                         # Check if zone is violated
                         if hasattr(scenario_instance, '_state'):
                             state = scenario_instance._state
@@ -699,7 +687,7 @@ class PipelineRunner:
                                             det_class = merged_packet.classes[idx]
                                             if isinstance(det_class, str) and det_class.lower() == target_class:
                                                 # Calculate IoU
-                                                iou = self._calculate_iou(track_bbox, det_box)
+                                                iou = self.calculate_iou(track_bbox, det_box)
                                                 if iou >= 0.3:  # Match threshold
                                                     if idx not in line_crossed_indices:
                                                         line_crossed_indices.append(idx)
@@ -762,11 +750,9 @@ class PipelineRunner:
                             draw_class,
                             report.get("active_tracks", len(track_info_from_report)),
                         )
-            
-            # Convert to bytes
-            frame_bytes = processed_frame.tobytes()
+
             height, width = processed_frame.shape[0], processed_frame.shape[1]
-            
+
             # For restricted zone: indices into filtered detections that are inside the zone (for per-box red coloring)
             in_zone_indices: List[int] = []
             # Wall climb: red = fully above (stays red), orange = climbing
@@ -777,7 +763,7 @@ class PipelineRunner:
             keypoints_src = getattr(merged_packet, "keypoints", None) or []
             if is_restricted_zone and target_class:
                 # Show ALL detections of target class (e.g., all persons)
-                f_boxes, f_classes, f_scores, f_keypoints = self._filter_detections_by_class(
+                f_boxes, f_classes, f_scores, f_keypoints = self.filter_detections_by_class(
                     target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores,
                     keypoints_src,
                 )
@@ -797,7 +783,7 @@ class PipelineRunner:
                             filtered_idx += 1
             elif is_wall_climb_detection and target_class:
                 # Show ALL detections of target class (e.g., person); color by climbing / fully above
-                f_boxes, f_classes, f_scores, f_keypoints = self._filter_detections_by_class(
+                f_boxes, f_classes, f_scores, f_keypoints = self.filter_detections_by_class(
                     target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores,
                     keypoints_src,
                 )
@@ -820,19 +806,19 @@ class PipelineRunner:
                             filtered_idx += 1
             elif is_fire_detection and fire_classes:
                 # Show ALL fire-related detections (fire, flame, smoke)
-                f_boxes, f_classes, f_scores, f_keypoints = self._filter_detections_by_fire_classes(
+                f_boxes, f_classes, f_scores, f_keypoints = self.filter_detections_by_fire_classes(
                     fire_classes, merged_packet.boxes, merged_packet.classes, merged_packet.scores,
                     keypoints_src,
                 )
             elif is_weapon_detection or is_sleep_detection:
                 # Show ALL person detections with keypoints so UI can draw pose/skeleton
-                f_boxes, f_classes, f_scores, f_keypoints = self._filter_detections_by_class(
+                f_boxes, f_classes, f_scores, f_keypoints = self.filter_detections_by_class(
                     "person", merged_packet.boxes, merged_packet.classes, merged_packet.scores,
                     keypoints_src,
                 )
             elif is_line_counting and target_class:
                 # Show ALL detections of target class for line counting
-                f_boxes, f_classes, f_scores, f_keypoints = self._filter_detections_by_class(
+                f_boxes, f_classes, f_scores, f_keypoints = self.filter_detections_by_class(
                     target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores,
                     keypoints_src,
                 )
@@ -855,7 +841,7 @@ class PipelineRunner:
             elif all_matched_indices:
                 # Other scenarios (e.g. fall_detection): show only matched detections; include keypoints for pose
                 unique_indices = sorted(set(all_matched_indices))
-                f_boxes, f_classes, f_scores, f_keypoints = self._filter_detections_by_indices(
+                f_boxes, f_classes, f_scores, f_keypoints = self.filter_detections_by_indices(
                     unique_indices, merged_packet.boxes, merged_packet.classes, merged_packet.scores,
                     keypoints_src,
                 )
@@ -870,10 +856,16 @@ class PipelineRunner:
                     if not box or len(box) < 4:
                         continue
                     for eb in emitted.values():
-                        if self._calculate_iou(box, eb) >= 0.3:
+                        if self.calculate_iou(box, eb) >= 0.3:
                             sleep_confirmed_indices.append(i)
                             break
-            
+
+            # Draw restricted zone polygon, zone line, and red boxes for in-zone detections (on processed frame)
+            draw_zone_polygon(processed_frame, restricted_zone_coordinates, width, height)
+            draw_zone_line(processed_frame, line_zone, width, height)
+            draw_boxes_in_zone_red(processed_frame, f_boxes, f_classes, f_scores, in_zone_indices)
+            frame_bytes = processed_frame.tobytes()
+
             # Collect scenario overlays (e.g., loom ROI boxes with state labels)
             # Normalize to list of JSON-serializable dicts for WebSocket payload
             scenario_overlays = []
@@ -892,7 +884,7 @@ class PipelineRunner:
                     overlay_data = scenario_instance.get_overlay_data(frame_context)
                     if overlay_data:
                         scenario_overlays.extend(
-                            _overlay_data_to_dict_list(overlay_data)
+                            overlay_data_to_dict_list(overlay_data)
                         )
                         # Face detection: use same (smoothed) overlay for face_recognitions so UI gets boxes consistently
                         if scenario_type == "face_detection":
@@ -947,7 +939,7 @@ class PipelineRunner:
             print(f"[worker {self.context.task_id}] ⚠️  Error processing frame for stream: {exc}")
             return None
     
-    def _calculate_iou(self, box1: List[float], box2: List[float]) -> float:
+    def calculate_iou(self, box1: List[float], box2: List[float]) -> float:
         """Calculate Intersection over Union between two boxes."""
         x1_1, y1_1, x2_1, y2_1 = box1
         x1_2, y1_2, x2_2, y2_2 = box2
@@ -969,8 +961,12 @@ class PipelineRunner:
             return 0.0
         
         return intersection / union
-    
-    def _filter_detections_by_indices(
+
+    # -------------------------------------------------------------------------
+    # Private: filter detections by indices, class, or fire classes
+    # -------------------------------------------------------------------------
+
+    def filter_detections_by_indices(
         self,
         indices: List[int],
         boxes: List[List[float]],
@@ -1000,7 +996,7 @@ class PipelineRunner:
                         f_keypoints.append(kp_list[idx])
         return f_boxes, f_classes, f_scores, f_keypoints
     
-    def _filter_detections_by_class(
+    def filter_detections_by_class(
         self,
         target_class: str,
         boxes: List[List[float]],
@@ -1044,7 +1040,7 @@ class PipelineRunner:
         
         return f_boxes, f_classes, f_scores, f_keypoints
     
-    def _filter_detections_by_fire_classes(
+    def filter_detections_by_fire_classes(
         self,
         fire_classes: List[str],
         boxes: List[List[float]],
@@ -1082,8 +1078,12 @@ class PipelineRunner:
         if len(f_boxes) > 0:
             print(f"[worker {self.context.task_id}] 🔥 Found {len(f_boxes)} fire-related detections (confidence >= {confidence_threshold})")
         return f_boxes, f_classes, f_scores, f_keypoints
-    
-    def _handle_event(
+
+    # -------------------------------------------------------------------------
+    # Private: handle rule match event (session manager, notifications)
+    # -------------------------------------------------------------------------
+
+    def handle_event(
         self,
         rule_match: RuleMatch,
         processed_frame: Optional[Any],

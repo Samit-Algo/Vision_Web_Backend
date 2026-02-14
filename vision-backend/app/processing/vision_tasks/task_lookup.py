@@ -1,5 +1,5 @@
 """
-Scenario Registry
+Scenario registry
 -----------------
 
 Provides a simple registry + decorator for scenario classes.
@@ -19,9 +19,19 @@ Registered scenario types (imported in vision_tasks/__init__.py):
 - face_detection    : Person identification from reference photos; alert when watched person appears
 """
 
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 from typing import Dict, Type
 
+# -----------------------------------------------------------------------------
+# Local
+# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import BaseScenario
+
+# -----------------------------------------------------------------------------
+# Registry and decorator
+# -----------------------------------------------------------------------------
 
 scenario_registry: Dict[str, Type[BaseScenario]] = {}
 

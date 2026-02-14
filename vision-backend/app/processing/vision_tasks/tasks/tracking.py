@@ -18,7 +18,7 @@ class Track:
         self.bbox = bbox  # [x1, y1, x2, y2]
         self.score = score
         self.frame_id = frame_id  # Frame where this track was first seen
-        self.center = self._calculate_center()
+        self.center = self.calculate_center()
         self.history = [self.center]  # Movement history
         self.age = 1
         self.hit_streak = 1
@@ -27,14 +27,14 @@ class Track:
         # Velocity estimation (for motion prediction)
         self.velocity: Tuple[float, float] = (0.0, 0.0)
     
-    def _calculate_center(self) -> Tuple[float, float]:
+    def calculate_center(self) -> Tuple[float, float]:
         """Calculate center point of bounding box."""
         x1, y1, x2, y2 = self.bbox
         center_x = float(x1 + x2) / 2.0
         center_y = float(y1 + y2) / 2.0
         return (center_x, center_y)
     
-    def _update_velocity(self):
+    def update_velocity(self):
         """Update velocity based on recent movement."""
         if len(self.history) >= 2:
             # Use last 2 positions to estimate velocity
@@ -62,14 +62,14 @@ class Track:
         self.bbox = bbox
         self.score = score
         self.frame_id = frame_id
-        self.center = self._calculate_center()
+        self.center = self.calculate_center()
         self.history.append(self.center)
         self.age += 1
         self.hit_streak += 1
         self.time_since_update = 0  # Reset on successful match
         
         # Update velocity estimation
-        self._update_velocity()
+        self.update_velocity()
         
         # Keep only last 30 positions
         if len(self.history) > 30:
@@ -113,7 +113,7 @@ class SimpleTracker:
         # This allows matching even when IoU is 0 (box moved too far)
         self.max_distance_threshold = 150.0  # Increased for faster conveyor belts
     
-    def _iou(self, box1: List[float], box2: List[float]) -> float:
+    def iou(self, box1: List[float], box2: List[float]) -> float:
         """Calculate Intersection over Union between two boxes."""
         x1_1, y1_1, x2_1, y2_1 = box1
         x1_2, y1_2, x2_2, y2_2 = box2
@@ -134,7 +134,7 @@ class SimpleTracker:
         
         return intersection / union if union > 0 else 0.0
     
-    def _center_distance(self, box1: List[float], box2: List[float]) -> float:
+    def center_distance(self, box1: List[float], box2: List[float]) -> float:
         """Calculate Euclidean distance between centers of two boxes."""
         cx1 = (box1[0] + box1[2]) / 2
         cy1 = (box1[1] + box1[3]) / 2
@@ -142,15 +142,15 @@ class SimpleTracker:
         cy2 = (box2[1] + box2[3]) / 2
         return ((cx1 - cx2) ** 2 + (cy1 - cy2) ** 2) ** 0.5
     
-    def _point_distance(self, p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
+    def point_distance(self, p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
         """Calculate Euclidean distance between two points."""
         return ((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2) ** 0.5
     
-    def _get_detection_center(self, bbox: List[float]) -> Tuple[float, float]:
+    def get_detection_center(self, bbox: List[float]) -> Tuple[float, float]:
         """Get center point of a detection bbox."""
         return ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
     
-    def _match_detections_to_tracks(
+    def match_detections_to_tracks(
         self, 
         detections: List[Tuple[List[float], float]],
         tracks: List[Track],
@@ -188,19 +188,19 @@ class SimpleTracker:
         dist_predicted_matrix = np.zeros((num_dets, num_tracks))  # Distance to predicted position
         
         for d_idx, (d_bbox, _) in enumerate(detections):
-            det_center = self._get_detection_center(d_bbox)
+            det_center = self.get_detection_center(d_bbox)
             
             for t_idx, track in enumerate(tracks):
                 # Current position matching
-                iou_matrix[d_idx, t_idx] = self._iou(d_bbox, track.bbox)
-                dist_matrix[d_idx, t_idx] = self._center_distance(d_bbox, track.bbox)
+                iou_matrix[d_idx, t_idx] = self.iou(d_bbox, track.bbox)
+                dist_matrix[d_idx, t_idx] = self.center_distance(d_bbox, track.bbox)
                 
                 # Predicted position matching (for fast-moving boxes)
                 if use_prediction and len(track.history) >= 2:
                     predicted_bbox = track.get_predicted_bbox()
                     predicted_center = track.predict_position()
-                    iou_predicted_matrix[d_idx, t_idx] = self._iou(d_bbox, predicted_bbox)
-                    dist_predicted_matrix[d_idx, t_idx] = self._point_distance(det_center, predicted_center)
+                    iou_predicted_matrix[d_idx, t_idx] = self.iou(d_bbox, predicted_bbox)
+                    dist_predicted_matrix[d_idx, t_idx] = self.point_distance(det_center, predicted_center)
                 else:
                     iou_predicted_matrix[d_idx, t_idx] = iou_matrix[d_idx, t_idx]
                     dist_predicted_matrix[d_idx, t_idx] = dist_matrix[d_idx, t_idx]
@@ -267,7 +267,7 @@ class SimpleTracker:
         
         return matches, unmatched_detections, unmatched_track_indices
     
-    def _fallback_distance_matching(
+    def fallback_distance_matching(
         self,
         detections: List[Tuple[List[float], float]],
         tracks: List[Track]
@@ -288,12 +288,12 @@ class SimpleTracker:
         # Calculate distance from each detection to each track's predicted position
         distance_pairs = []
         for d_idx, (d_bbox, _) in enumerate(detections):
-            det_center = self._get_detection_center(d_bbox)
+            det_center = self.get_detection_center(d_bbox)
             
             for t_idx, track in enumerate(tracks):
                 # Use predicted position for matching
                 predicted_center = track.predict_position()
-                dist = self._point_distance(det_center, predicted_center)
+                dist = self.point_distance(det_center, predicted_center)
                 
                 if dist < self.max_distance_threshold:
                     distance_pairs.append((d_idx, t_idx, dist))
@@ -339,7 +339,7 @@ class SimpleTracker:
         unconfirmed_tracks = [t for t in self.tracks if t.hit_streak < self.min_hits]
         
         # STEP 1: Match detections to confirmed tracks (with velocity prediction)
-        matches, unmatched_dets, unmatched_confirmed_indices = self._match_detections_to_tracks(
+        matches, unmatched_dets, unmatched_confirmed_indices = self.match_detections_to_tracks(
             valid_detections, confirmed_tracks, use_prediction=True
         )
         
@@ -357,7 +357,7 @@ class SimpleTracker:
         remaining_unmatched_indices = set(unmatched_dets)
         
         if len(unmatched_detections) > 0 and len(unconfirmed_tracks) > 0:
-            matches_2, unmatched_dets_2, _ = self._match_detections_to_tracks(
+            matches_2, unmatched_dets_2, _ = self.match_detections_to_tracks(
                 unmatched_detections, unconfirmed_tracks, use_prediction=True
             )
             
@@ -375,7 +375,7 @@ class SimpleTracker:
                                    for idx in remaining_unmatched_indices]
             lost_tracks = [confirmed_tracks[idx] for idx in unmatched_confirmed_indices]
             
-            fallback_matches = self._fallback_distance_matching(remaining_detections, lost_tracks)
+            fallback_matches = self.fallback_distance_matching(remaining_detections, lost_tracks)
             
             remaining_list = list(remaining_unmatched_indices)
             for d_idx, t_idx in fallback_matches:
@@ -524,7 +524,7 @@ class LineCrossingCounter:
             self.line_end[1] - self.line_start[1]
         )
     
-    def _get_side(self, point: Tuple[float, float]) -> str:
+    def get_side(self, point: Tuple[float, float]) -> str:
         """
         Determine which side of line the point is on.
         
@@ -570,7 +570,7 @@ class LineCrossingCounter:
         # - negative cross = side2 (ABOVE for horizontal, RIGHT for vertical)
         return 'side1' if cross_product >= 0 else 'side2'
     
-    def _is_point_on_line(self, point: Tuple[float, float], threshold_pixels: float = 5.0) -> bool:
+    def is_point_on_line(self, point: Tuple[float, float], threshold_pixels: float = 5.0) -> bool:
         """
         Check if a point is on or near the line (within threshold distance).
         
@@ -721,8 +721,8 @@ class LineCrossingCounter:
         previous_position = track.history[-2]  # Previous frame position
         
         # Get sides for both positions (returns 'side1' or 'side2')
-        current_side = self._get_side(current_position)
-        previous_side = self._get_side(previous_position)
+        current_side = self.get_side(current_position)
+        previous_side = self.get_side(previous_position)
         
         # Initialize tracking for this track if needed
         if track.track_id not in self._touch_tracking:
@@ -796,7 +796,7 @@ class LineCrossingCounter:
         if self.line_start is None or self.line_vector is None:
             return False
         
-        is_touching = self._is_point_on_line(track.center, threshold_pixels=self.touch_threshold_pixels)
+        is_touching = self.is_point_on_line(track.center, threshold_pixels=self.touch_threshold_pixels)
         
         return is_touching
     

@@ -1,24 +1,19 @@
 """
-Sleep Detection Scenario
------------------------
+Sleep detection scenario
+-------------------------
 
-Orchestrates the full flow: pose → temporal buffer → "possibly sleeping" check → VLM confirmation → alert.
-
-Flow (simple, step by step):
-1. Extract pose from current frame (person + keypoints). If none, skip.
-2. Add this frame to a small buffer (we need at least 3 frames for before/suspicious/after).
-3. If we had deferred a VLM call from the previous frame, do it now: send 3 frames to VLM.
-   - If VLM says "sleeping", emit one event (and remember we emitted so we don’t repeat for a few seconds).
-4. If buffer is full enough, run sleep posture analysis (lying or head-down + still).
-   - For each person that looks "possibly sleeping", add to pending and defer VLM for the *next* frame.
-5. For each new "possibly sleeping" person, if we’re allowed to call VLM (throttle/cache), defer VLM:
-   - On the next frame we’ll have [N-1, N, N+1] and we call VLM with those 3 frames.
-6. Clean up old state so buffers don’t grow forever.
+Pose → buffer → posture analysis (lying/head-down) → VLM confirmation → alert. Uses pose + VLM.
 """
 
-from typing import List, Optional, Dict, Any
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 import os
+from typing import Any, Dict, List, Optional
 
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
     ScenarioFrameContext,
@@ -39,7 +34,7 @@ from app.processing.vision_tasks.tasks.sleep_detection.vlm_handler import (
 from app.infrastructure.external.groq_vlm_service import GroqVLMService
 
 
-def _box_iou(box_a: List[float], box_b: List[float]) -> float:
+def box_iou(box_a: List[float], box_b: List[float]) -> float:
     """Intersection-over-union of two boxes [x1, y1, x2, y2]. Returns 0 if no overlap."""
     if len(box_a) < 4 or len(box_b) < 4:
         return 0.0
@@ -72,7 +67,7 @@ class SleepDetectionScenario(BaseScenario):
         self._vlm_service: Optional[GroqVLMService] = None
         os.makedirs(self.config_obj.vlm_frames_dir, exist_ok=True)
 
-    def _get_vlm_service(self) -> GroqVLMService:
+    def get_vlm_service(self) -> GroqVLMService:
         """Create VLM service once (lazy)."""
         if self._vlm_service is None:
             self._vlm_service = GroqVLMService()
@@ -93,7 +88,7 @@ class SleepDetectionScenario(BaseScenario):
         self.state.add_pose_frame(pose_frame)
         print(f"[SleepDetection Scenario] 📦 Buffer size: {len(self.state.pose_buffer)} (frame_index={frame_context.frame_index})")
 
-        vlm_service = self._get_vlm_service()
+        vlm_service = self.get_vlm_service()
 
         # Step 3: Process deferred VLM calls (we deferred last frame; now we have 3 frames)
         to_remove = []
@@ -176,10 +171,10 @@ class SleepDetectionScenario(BaseScenario):
             for person_key in list(self.state.emitted_event_boxes.keys()):
                 emitted_box = self.state.emitted_event_boxes[person_key]
                 for curr_box in current_boxes:
-                    if _box_iou(emitted_box, curr_box) < 0.3:
+                    if box_iou(emitted_box, curr_box) < 0.3:
                         continue
                     # Same person (overlap). Is they in the "possibly sleeping" set?
-                    if not any(_box_iou(curr_box, b) >= 0.3 for b in possibly_sleeping_boxes):
+                    if not any(box_iou(curr_box, b) >= 0.3 for b in possibly_sleeping_boxes):
                         self.state.emitted_events.pop(person_key, None)
                         self.state.emitted_event_boxes.pop(person_key, None)
                     break
@@ -190,7 +185,7 @@ class SleepDetectionScenario(BaseScenario):
             # Same person (by box IoU)? Keep earliest timestamp
             found = False
             for key, (stable_ts, stable_box) in list(self.state.person_stable_since.items()):
-                if _box_iou(box, stable_box) >= 0.3:
+                if box_iou(box, stable_box) >= 0.3:
                     found = True
                     if key != person_key:
                         self.state.person_stable_since.pop(key, None)
@@ -201,7 +196,7 @@ class SleepDetectionScenario(BaseScenario):
         # Remove entries for persons no longer still+possibly_sleeping
         for key in list(self.state.person_stable_since.keys()):
             _, stable_box = self.state.person_stable_since[key]
-            if not any(_box_iou(stable_box, b) >= 0.3 for _, b, _ in still_and_possibly):
+            if not any(box_iou(stable_box, b) >= 0.3 for _, b, _ in still_and_possibly):
                 self.state.person_stable_since.pop(key, None)
 
         # Step 5: Defer VLM only after 5 seconds of no movement (possibly_sleeping + is_still)
@@ -217,7 +212,7 @@ class SleepDetectionScenario(BaseScenario):
             # Find this person's stable_since (by box overlap)
             stable_ts = None
             for key, (ts, box) in self.state.person_stable_since.items():
-                if _box_iou(analysis.box, box) >= 0.3:
+                if box_iou(analysis.box, box) >= 0.3:
                     stable_ts = ts
                     break
             if stable_ts is None:

@@ -1,17 +1,19 @@
 """
-Weapon Detection Scenario
--------------------------
+Weapon detection scenario
+--------------------------
 
-Main scenario class that orchestrates weapon detection using:
-1. Pose extraction
-2. Temporal buffering
-3. Arm posture analysis
-4. VLM confirmation
+Pose → temporal buffer → arm posture analysis → VLM confirmation → alert.
 """
 
-from typing import List, Optional, Dict, Any
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 import os
+from typing import Any, Dict, List, Optional
 
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
     ScenarioFrameContext,
@@ -59,7 +61,7 @@ class WeaponDetectionScenario(BaseScenario):
         # Create frames directory
         os.makedirs(self.config_obj.vlm_frames_dir, exist_ok=True)
     
-    def _get_vlm_service(self) -> GroqVLMService:
+    def get_vlm_service(self) -> GroqVLMService:
         """Get or create VLM service instance (lazy initialization)."""
         if self._vlm_service is None:
             self._vlm_service = GroqVLMService()
@@ -85,7 +87,7 @@ class WeaponDetectionScenario(BaseScenario):
         self.state.add_pose_frame(pose_frame)
         
         # Step 3: Process deferred VLM calls (now we have current frame = N+1, so we have [N-1, N, N+1])
-        vlm_service = self._get_vlm_service()
+        vlm_service = self.get_vlm_service()
         to_remove_deferred = []
         for analysis, suspicious_frame_index in list(self.state.deferred_vlm):
             if frame_context.frame_index != suspicious_frame_index + 1:

@@ -1,15 +1,19 @@
 """
-Restricted Zone Utilities
--------------------------
+Restricted zone utilities
+--------------------------
 
-Utilities for checking if detections are within restricted zones.
+Point-in-polygon and box-in-zone checks. Used by restricted_zone and fire_detection scenarios.
+Handles both normalized (0–1) and pixel coordinates.
 """
 
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 from typing import List, Tuple
 
 
 def point_in_polygon(point: Tuple[float, float], polygon: List[List[float]]) -> bool:
-    """Check if a point is inside a polygon using ray casting algorithm."""
+    """True if point (x, y) is inside polygon (ray-casting). Polygon needs at least 3 vertices."""
     x, y = point
     n = len(polygon)
     if n < 3:
@@ -30,7 +34,7 @@ def point_in_polygon(point: Tuple[float, float], polygon: List[List[float]]) -> 
 
 
 def get_box_center(box: List[float]) -> Tuple[float, float]:
-    """Get center point of a bounding box [x1, y1, x2, y2]."""
+    """Center (x, y) of box [x1, y1, x2, y2]."""
     x1, y1, x2, y2 = box
     return ((x1 + x2) / 2, (y1 + y2) / 2)
 
@@ -42,8 +46,8 @@ def is_box_in_zone(
     frame_height: float = None,
 ) -> bool:
     """
-    Check if a detection box is inside a polygon zone.
-    Uses the center point of the box. Handles both normalized (0-1) and pixel coordinates.
+    True if box center is inside the polygon zone.
+    Zone can be normalized (0–1) or pixel; if normalized, pass frame_width and frame_height.
     """
     if not box or len(box) < 4 or not zone_coordinates or len(zone_coordinates) < 3:
         return False
