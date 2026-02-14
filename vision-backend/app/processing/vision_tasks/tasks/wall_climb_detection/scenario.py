@@ -2,12 +2,14 @@
 Wall climb detection scenario
 ------------------------------
 
-User polygon = wall boundary. Orange = climbing (part above wall). Red = fully above (stays red).
+User polygon = wall boundary. When a person goes above the zone (detection box above wall line),
+we treat it as violation: red box + alert. No orange - only red.
 """
 
 # -----------------------------------------------------------------------------
 # Standard library
 # -----------------------------------------------------------------------------
+import logging
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -23,51 +25,30 @@ from app.processing.vision_tasks.task_lookup import register_scenario
 from .config import WallClimbConfig
 from .wall_zone_utils import is_box_climbing, is_box_fully_above_wall
 
+logger = logging.getLogger(__name__)
+
 
 @register_scenario("wall_climb_detection")
 class WallClimbScenario(BaseScenario):
     """
-    Detects when a person climbs or is fully above a wall boundary.
-    Orange = climbing (part above wall). Red = fully above (and stays red).
+    Detects when a person goes above the user-drawn wall zone.
+    Any person above the zone (box top or any part above wall line) = violation → red box + alert.
     """
 
     def __init__(self, config: Dict[str, Any], pipeline_context):
         super().__init__(config, pipeline_context)
         self.config_obj = WallClimbConfig(config, pipeline_context.task)
         self._state["last_alert_time"] = None
-        # Indices (into merged detections) that are climbing this frame -> orange
-        self._state["climbing_indices"] = []
-        # Indices that are fully above this frame
+        self._state["climbing_indices"] = []  # Unused; kept for pipeline compatibility (no orange)
         self._state["fully_above_indices"] = []
-        # Once a detection is fully above, we keep it red (persistent set of indices)
-        # We store by a simple key: we'll use (box center or box hash) - actually we just keep
-        # indices per frame; pipeline will map "ever fully above" by tracking over time.
-        # Simple approach: ever_fully_above_indices = set of indices that have ever been fully above.
-        # But indices change every frame (different detections). So we need to track "which boxes"
-        # have been fully above. Easiest: store the last known "fully_above_indices" and treat
-        # "ever red" as: if current frame this index is fully above, add to ever set; when we
-        # build red list for UI we send: red = ever_fully_above (current frame mapping).
-        # So we need to persist "ever fully above" by something stable. Option A: by index in
-        # filtered list we can't. Option B: by track_id if we had tracking. Option C: by position
-        # - if a box is fully above this frame, we add its index to a set that we pass as "red";
-        # next frame we don't have same index for same person. So we need to match "same person"
-        # across frames. Without tracking, simplest is: red = fully_above_indices this frame only;
-        # "once red stay red" = once we have emitted an event for "someone fully above", we
-        # keep showing red for any detection that is currently fully above. So we don't need
-        # persistent ever_fully_above per detection; we need: this frame, who is climbing (orange)
-        # and who is fully above (red). "Once red stay red" for THAT person: if we had tracking
-        # we'd mark that track_id as "ever red". Without tracking, we can approximate: keep a
-        # set of (normalized box center rounded) that have been fully above; if a detection's
-        # center is in that set, treat as red. So ever_fully_above_centers = set of (cx, cy) rounded.
-        # When we see a box fully above, add (round(cx), round(cy)) to ever set. When building
-        # red list: if box is fully above OR its center is in ever_fully_above_centers, red.
-        # Let me do that.
-        self._state["ever_fully_above_centers"] = set()  # set of (round(cx), round(cy)) in pixel
+        # Centers of persons who were ever above zone → keep them red across frames
+        self._state["ever_above_centers"] = set()
 
     def process(self, frame_context: ScenarioFrameContext) -> List[ScenarioEvent]:
         if not self.config_obj.target_class or not self.config_obj.zone_coordinates:
             self._state["climbing_indices"] = []
             self._state["fully_above_indices"] = []
+            self._state["red_indices"] = []
             return []
 
         frame = frame_context.frame
@@ -80,9 +61,9 @@ class WallClimbScenario(BaseScenario):
         target_class = self.config_obj.target_class.lower()
         conf_threshold = self.config_obj.confidence_threshold
 
-        climbing = []
-        fully_above = []
-        ever_centers = self._state.get("ever_fully_above_centers") or set()
+        # Above zone = climbing (box top above wall) OR fully above (box bottom above wall). Both → violation (red).
+        above_indices = []
+        ever_centers = self._state.get("ever_above_centers") or set()
         ever_centers = set(ever_centers)
 
         for i, (box, cls, score) in enumerate(zip(boxes, classes, scores)):
@@ -91,16 +72,17 @@ class WallClimbScenario(BaseScenario):
             if not box or len(box) < 4:
                 continue
 
-            fully = is_box_fully_above_wall(
-                box, self.config_obj.zone_coordinates, frame_width, frame_height
-            )
             climb = is_box_climbing(
                 box, self.config_obj.zone_coordinates, frame_width, frame_height
             )
+            fully = is_box_fully_above_wall(
+                box, self.config_obj.zone_coordinates, frame_width, frame_height
+            )
+            above = climb or fully
 
-            if fully:
-                fully_above.append(i)
-                # Remember this person's center so we keep them red (once red, stay red)
+            if above:
+                above_indices.append(i)
+                # Remember center so we keep this person red in following frames
                 x1, y1, x2, y2 = box[0], box[1], box[2], box[3]
                 max_b = max(x1, y1, x2, y2)
                 if max_b <= 1.0 and frame_width > 1 and frame_height > 1:
@@ -109,15 +91,12 @@ class WallClimbScenario(BaseScenario):
                 cx = (x1 + x2) / 2
                 cy = (y1 + y2) / 2
                 ever_centers.add((round(cx), round(cy)))
-            elif climb:
-                climbing.append(i)
 
-        # Cap memory: keep at most 100 centers so set doesn't grow forever
         if len(ever_centers) > 100:
             ever_centers = set()
 
-        # Also mark as red if this detection's center was ever fully above (same person, next frames)
-        red_indices = list(fully_above)
+        # Red = anyone above this frame OR anyone whose center was ever above (same person in next frames)
+        red_indices = list(above_indices)
         for i, (box, cls, score) in enumerate(zip(boxes, classes, scores)):
             if i in red_indices:
                 continue
@@ -134,21 +113,24 @@ class WallClimbScenario(BaseScenario):
             if (round(cx), round(cy)) in ever_centers:
                 red_indices.append(i)
 
-        self._state["ever_fully_above_centers"] = ever_centers
-        self._state["climbing_indices"] = climbing
-        self._state["fully_above_indices"] = fully_above
-        # For pipeline: we need "who gets red" = red_indices (fully above + ever fully above)
+        self._state["ever_above_centers"] = ever_centers
+        self._state["climbing_indices"] = []  # No orange: only red
+        self._state["fully_above_indices"] = above_indices
         self._state["red_indices"] = red_indices
 
-        # Emit event when someone is fully above (with cooldown)
+        # Alert when any person is above the zone (with cooldown)
         events = []
-        if fully_above:
+        if above_indices:
+            logger.info(
+                "[wall_climb_detection] Violation: person above user zone (count=%s, indices=%s)",
+                len(above_indices), above_indices,
+            )
             now = frame_context.timestamp
             last_alert = self._state.get("last_alert_time")
             if last_alert is None or not isinstance(last_alert, datetime) or \
                (now - last_alert).total_seconds() >= self.config_obj.alert_cooldown_seconds:
                 self._state["last_alert_time"] = now
-                label = self.generate_label(len(fully_above))
+                label = self.generate_label(len(above_indices))
                 events.append(
                     ScenarioEvent(
                         event_type="wall_climb_detection",
@@ -156,10 +138,10 @@ class WallClimbScenario(BaseScenario):
                         confidence=1.0,
                         metadata={
                             "target_class": self.config_obj.target_class,
-                            "fully_above_count": len(fully_above),
+                            "above_zone_count": len(above_indices),
                             "alert_cooldown_seconds": self.config_obj.alert_cooldown_seconds,
                         },
-                        detection_indices=fully_above,
+                        detection_indices=above_indices,
                         timestamp=frame_context.timestamp,
                         frame_index=frame_context.frame_index,
                     )
@@ -171,12 +153,12 @@ class WallClimbScenario(BaseScenario):
         if self.config_obj.custom_label and isinstance(self.config_obj.custom_label, str) and self.config_obj.custom_label.strip():
             return self.config_obj.custom_label.strip()
         if count == 1:
-            return "Person fully above wall"
-        return f"{count} persons fully above wall"
+            return "Person above wall zone"
+        return f"{count} persons above wall zone"
 
     def reset(self) -> None:
         self._state["last_alert_time"] = None
         self._state["climbing_indices"] = []
         self._state["fully_above_indices"] = []
         self._state["red_indices"] = []
-        self._state["ever_fully_above_centers"] = set()
+        self._state["ever_above_centers"] = set()

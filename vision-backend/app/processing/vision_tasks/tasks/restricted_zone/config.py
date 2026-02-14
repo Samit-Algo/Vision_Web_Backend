@@ -18,7 +18,7 @@ class RestrictedZoneConfig:
         self.target_class = str(config.get("class") or "").strip().lower()
         self.custom_label = config.get("label")
         self.alert_cooldown_seconds = float(config.get("alert_cooldown_seconds", 10))
-        self.confidence_threshold = float(config.get("confidence_threshold", 0.7))
+        self.confidence_threshold = float(config.get("confidence_threshold", 0.5))
         zone = config.get("zone") or task.get("zone")
         self.zone_coordinates: Optional[List[List[float]]] = None
         if zone and isinstance(zone, dict):

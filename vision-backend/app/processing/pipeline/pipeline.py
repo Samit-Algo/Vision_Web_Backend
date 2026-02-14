@@ -612,12 +612,14 @@ class PipelineRunner:
                     elif scenario_type == 'sleep_detection':
                         is_sleep_detection = True
                         sleep_detection_scenario = scenario_instance
-                    # Wall climb: orange = climbing, red = fully above (stays red)
+                    # Wall climb: orange = climbing, red = fully above (stays red). Reuse zone polygon for drawing.
                     elif scenario_type == 'wall_climb_detection':
                         is_wall_climb_detection = True
                         wall_climb_scenario = scenario_instance
                         if hasattr(scenario_instance, 'config_obj') and hasattr(scenario_instance.config_obj, 'target_class'):
                             target_class = scenario_instance.config_obj.target_class
+                        if hasattr(scenario_instance, 'config_obj') and hasattr(scenario_instance.config_obj, 'zone_coordinates'):
+                            restricted_zone_coordinates = getattr(scenario_instance.config_obj, 'zone_coordinates', None)
                         if hasattr(scenario_instance, '_state'):
                             state = scenario_instance._state
                             if state.get('red_indices') or state.get('climbing_indices'):
@@ -693,6 +695,17 @@ class PipelineRunner:
                                                         line_crossed_indices.append(idx)
                                                     break
             
+            # For restricted_zone and wall_climb: draw only target class. Wall climb uses confidence 0.5.
+            detections_for_draw = None
+            if (is_restricted_zone or is_wall_climb_detection) and target_class:
+                kp_src = getattr(merged_packet, "keypoints", None) or []
+                draw_conf = 0.5 if is_wall_climb_detection else 0.7
+                fd_boxes, fd_classes, fd_scores, _ = self.filter_detections_by_class(
+                    target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores,
+                    kp_src, confidence_threshold=draw_conf
+                )
+                detections_for_draw = {"boxes": fd_boxes, "classes": fd_classes, "scores": fd_scores}
+
             # Draw annotations based on scenario type
             # For line-based counting (box_count/class_count), frontend handles drawing
             # Backend only draws for pose keypoints or regular bounding boxes
@@ -702,7 +715,8 @@ class PipelineRunner:
                 # For line counting we draw below using track_info from state
                 processed_frame = frame.copy()
             else:
-                processed_frame = draw_bounding_boxes(frame, detections, self.context.rules)
+                draw_det = detections_for_draw if detections_for_draw else detections
+                processed_frame = draw_bounding_boxes(frame, draw_det, self.context.rules)
             
             # For line-based counting (class_count or box_count): draw track_info + ADD/OUT/TRACKING
             # Use track_info from state (like old code) so colors update properly when box crosses line
@@ -755,9 +769,9 @@ class PipelineRunner:
 
             # For restricted zone: indices into filtered detections that are inside the zone (for per-box red coloring)
             in_zone_indices: List[int] = []
-            # Wall climb: red = fully above (stays red), orange = climbing
+            # Wall climb: red when person is above user zone (no orange)
             wall_climb_red_indices: List[int] = []
-            wall_climb_orange_indices: List[int] = []
+            wall_climb_orange_indices: List[int] = []  # Unused; kept for payload compatibility
 
             # Filter detections based on scenario type (include keypoints for fall_detection/pose)
             keypoints_src = getattr(merged_packet, "keypoints", None) or []
@@ -782,18 +796,15 @@ class PipelineRunner:
                                 in_zone_indices.append(filtered_idx)
                             filtered_idx += 1
             elif is_wall_climb_detection and target_class:
-                # Show ALL detections of target class (e.g., person); color by climbing / fully above
+                # Show ALL detections of target class; anyone above zone = red only (no orange).
                 f_boxes, f_classes, f_scores, f_keypoints = self.filter_detections_by_class(
                     target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores,
-                    keypoints_src,
+                    keypoints_src, confidence_threshold=0.5
                 )
                 state_red = []
-                state_climbing = []
                 if wall_climb_scenario and hasattr(wall_climb_scenario, '_state'):
                     state_red = wall_climb_scenario._state.get("red_indices") or []
-                    state_climbing = wall_climb_scenario._state.get("climbing_indices") or []
                 orig_red = set(state_red)
-                orig_climbing = set(state_climbing)
                 filtered_idx = 0
                 for orig_idx in range(len(merged_packet.boxes)):
                     if orig_idx < len(merged_packet.classes):
@@ -801,8 +812,6 @@ class PipelineRunner:
                         if isinstance(det_class, str) and det_class.lower() == target_class:
                             if orig_idx in orig_red:
                                 wall_climb_red_indices.append(filtered_idx)
-                            elif orig_idx in orig_climbing:
-                                wall_climb_orange_indices.append(filtered_idx)
                             filtered_idx += 1
             elif is_fire_detection and fire_classes:
                 # Show ALL fire-related detections (fire, flame, smoke)
@@ -864,6 +873,12 @@ class PipelineRunner:
             draw_zone_polygon(processed_frame, restricted_zone_coordinates, width, height)
             draw_zone_line(processed_frame, line_zone, width, height)
             draw_boxes_in_zone_red(processed_frame, f_boxes, f_classes, f_scores, in_zone_indices)
+            # Wall climb: only red when person is above user zone (no orange)
+            if is_wall_climb_detection and wall_climb_red_indices:
+                draw_boxes_in_zone_red(
+                    processed_frame, f_boxes, f_classes, f_scores,
+                    wall_climb_red_indices, color_in_zone=(0, 0, 255)
+                )
             frame_bytes = processed_frame.tobytes()
 
             # Collect scenario overlays (e.g., loom ROI boxes with state labels)
@@ -901,6 +916,11 @@ class PipelineRunner:
                                         "name": item.get("label", item.get("name", "Unknown")) or "Unknown",
                                     })
             
+            # Zone for UI overlay (restricted_zone and wall_climb both use polygon)
+            zone_for_payload = None
+            if restricted_zone_coordinates and len(restricted_zone_coordinates) >= 3:
+                zone_for_payload = {"type": "polygon", "coordinates": restricted_zone_coordinates}
+
             # Publish to shared_store
             self.shared_store[self.context.agent_id] = {
                 "shape": (height, width, 3),
@@ -921,6 +941,7 @@ class PipelineRunner:
                 "scenario_overlays": scenario_overlays,  # Add scenario overlays
                 "rules": self.context.rules,
                 "camera_id": self.context.camera_id,
+                "zone": zone_for_payload,  # Polygon zone for UI (restricted_zone / wall_climb)
                 "zone_violated": zone_violated,  # Zone violation status
                 "line_zone": line_zone,  # Line zone data for visualization
                 "line_crossed": len(line_crossed_indices) > 0,  # Whether any object crossed the line
@@ -929,8 +950,8 @@ class PipelineRunner:
                 "fire_detected": fire_detected,  # Fire detection status (for red bounding boxes)
                 "in_zone_indices": in_zone_indices,  # Restricted zone: indices of filtered detections inside zone (red box only these)
                 "sleep_confirmed_indices": sleep_confirmed_indices,  # Sleep: same person box, red when VLM confirmed
-                "wall_climb_red_indices": wall_climb_red_indices,  # Wall climb: fully above (stays red)
-                "wall_climb_orange_indices": wall_climb_orange_indices,  # Wall climb: climbing (orange)
+                "wall_climb_red_indices": wall_climb_red_indices,  # Wall climb: person above zone (red only)
+                "wall_climb_orange_indices": wall_climb_orange_indices,  # Unused; kept for UI compatibility
                 "face_recognitions": face_recognitions,  # Face detection: [{ "box": [x1,y1,x2,y2], "name": "..." }]
             }
             
@@ -1003,15 +1024,17 @@ class PipelineRunner:
         classes: List[str],
         scores: List[float],
         keypoints: Optional[List[List[List[float]]]] = None,
+        confidence_threshold: Optional[float] = None,
     ) -> tuple[List[List[float]], List[str], List[float], List[List[List[float]]]]:
-        """Filter detections to only those matching target class (e.g., 'person') with confidence >= 0.7.
-        When keypoints is provided (e.g. for fall_detection/pose), returns aligned f_keypoints."""
+        """Filter detections to only those matching target class (e.g., 'person') with confidence >= threshold.
+        When keypoints is provided (e.g. for fall_detection/pose), returns aligned f_keypoints.
+        confidence_threshold: default 0.7; use 0.5 for wall_climb_detection."""
         f_boxes: List[List[float]] = []
         f_classes: List[str] = []
         f_scores: List[float] = []
         f_keypoints: List[List[List[float]]] = []
         target_lower = target_class.lower()
-        confidence_threshold = 0.7  # Minimum confidence level
+        conf = 0.7 if confidence_threshold is None else float(confidence_threshold)
         kp_list = keypoints if keypoints else []
 
         # Debug: Log all detected classes
@@ -1023,7 +1046,7 @@ class PipelineRunner:
         for idx, (box, cls, score) in enumerate(zip(boxes, classes, scores)):
             if isinstance(cls, str) and cls.lower() == target_lower:
                 # Apply confidence threshold
-                if score >= confidence_threshold:
+                if score >= conf:
                     f_boxes.append(box)
                     f_classes.append(cls)
                     f_scores.append(score)
@@ -1034,9 +1057,9 @@ class PipelineRunner:
         
         # Debug: Log filtering results
         if len(f_boxes) > 0:
-            print(f"[worker {self.context.task_id}] ✅ Found {len(f_boxes)} '{target_class}' detections (confidence >= {confidence_threshold})")
+            print(f"[worker {self.context.task_id}] ✅ Found {len(f_boxes)} '{target_class}' detections (confidence >= {conf})")
         if filtered_count > 0:
-            print(f"[worker {self.context.task_id}] 🔽 Filtered out {filtered_count} low-confidence '{target_class}' detections (< {confidence_threshold})")
+            print(f"[worker {self.context.task_id}] 🔽 Filtered out {filtered_count} low-confidence '{target_class}' detections (< {conf})")
         
         return f_boxes, f_classes, f_scores, f_keypoints
     
