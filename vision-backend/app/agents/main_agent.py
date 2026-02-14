@@ -440,6 +440,9 @@ def create_tool_wrappers(current_session_id: str, current_user_id: Optional[str]
         FunctionTool(list_cameras_wrapper),
         FunctionTool(resolve_camera_wrapper),
     ]
+    return tools
+
+
 # ============================================================================
 # MAIN AGENT CREATION
 # ============================================================================
