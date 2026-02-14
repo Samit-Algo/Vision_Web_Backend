@@ -28,6 +28,7 @@ from app.processing.data_input.data_models import FramePacket
 from app.processing.data_input.source_factory import Source
 from app.processing.drawing.frame_processor import (
     draw_bounding_boxes,
+    draw_face_recognitions,
     draw_pose_keypoints,
     draw_box_count_annotations,
     draw_zone_polygon,
@@ -879,10 +880,8 @@ class PipelineRunner:
                     processed_frame, f_boxes, f_classes, f_scores,
                     wall_climb_red_indices, color_in_zone=(0, 0, 255)
                 )
-            frame_bytes = processed_frame.tobytes()
 
-            # Collect scenario overlays (e.g., loom ROI boxes with state labels)
-            # Normalize to list of JSON-serializable dicts for WebSocket payload
+            # Collect scenario overlays (e.g., face boxes, loom ROI) before encoding so we can draw them on the frame
             scenario_overlays = []
             if hasattr(self.context, '_scenario_instances'):
                 frame_timestamp = utc_now()
@@ -901,7 +900,7 @@ class PipelineRunner:
                         scenario_overlays.extend(
                             overlay_data_to_dict_list(overlay_data)
                         )
-                        # Face detection: use same (smoothed) overlay for face_recognitions so UI gets boxes consistently
+                        # Face detection: use same overlay for face_recognitions so UI and stream both get boxes
                         if scenario_type == "face_detection":
                             face_recognitions = []
                             for item in overlay_data:
@@ -915,14 +914,18 @@ class PipelineRunner:
                                         "box": item["box"],
                                         "name": item.get("label", item.get("name", "Unknown")) or "Unknown",
                                     })
-            
+            # Draw face recognition boxes on the frame so they appear in the agent stream (JPEG)
+            draw_face_recognitions(processed_frame, face_recognitions)
+            frame_bytes = processed_frame.tobytes()
+
             # Zone for UI overlay (restricted_zone and wall_climb both use polygon)
             zone_for_payload = None
             if restricted_zone_coordinates and len(restricted_zone_coordinates) >= 3:
                 zone_for_payload = {"type": "polygon", "coordinates": restricted_zone_coordinates}
 
-            # Publish to shared_store
-            self.shared_store[self.context.agent_id] = {
+            # Publish to shared_store (key must be string so overlay/ws can read by agent_id from URL)
+            store_key = str(self.context.agent_id)
+            self.shared_store[store_key] = {
                 "shape": (height, width, 3),
                 "dtype": "uint8",
                 "frame_index": frame_packet.frame_index,

@@ -116,6 +116,37 @@ def draw_bounding_boxes(
     return out
 
 
+def draw_face_recognitions(
+    frame: np.ndarray,
+    face_recognitions: List[Dict[str, Any]],
+    color: Tuple[int, int, int] = (0, 255, 102),  # BGR green
+    thickness: int = 2,
+) -> None:
+    """
+    Draw face recognition boxes and names on the frame in-place.
+    face_recognitions: list of {"box": [x1,y1,x2,y2], "name": "..."}.
+    """
+    ensure_cv2()
+    if not face_recognitions:
+        return
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.55
+    font_thickness = 1
+    for item in face_recognitions:
+        box = item.get("box")
+        name = (item.get("name") or "Unknown").strip() or "Unknown"
+        if not box or len(box) < 4:
+            continue
+        x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
+        (tw, th), _ = cv2.getTextSize(name, font, font_scale, font_thickness)
+        cv2.rectangle(frame, (x1, y1 - th - 4), (x1 + tw, y1), color, -1)
+        cv2.putText(
+            frame, name, (x1, y1 - 2),
+            font, font_scale, (0, 0, 0), font_thickness, cv2.LINE_AA
+        )
+
+
 # -----------------------------------------------------------------------------
 # zone drawing functions
 # -----------------------------------------------------------------------------
