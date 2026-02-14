@@ -1,54 +1,34 @@
 """
-Fire Detection Scenario
------------------------
+Fire detection scenario
+------------------------
 
-Detects fire/flames in camera feed using a fine-tuned YOLO model.
-Triggers critical alerts when fire is detected.
+Detects fire/flame/smoke anywhere in the frame. No zone: any fire in the feed triggers
+the rule. Alert is raised based on user settings: confirm_frames, confidence_threshold,
+alert_cooldown_seconds, and optional custom label.
 """
 
-from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 from collections import defaultdict
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
-    ScenarioFrameContext,
     ScenarioEvent,
+    ScenarioFrameContext,
 )
 from app.processing.vision_tasks.task_lookup import register_scenario
+
 from .config import FireDetectionConfig
 
-
-def _is_point_in_polygon(point: Tuple[float, float], polygon: List[List[float]]) -> bool:
-    x, y = point
-    n = len(polygon)
-    inside = False
-    p1x, p1y = polygon[0]
-    for i in range(1, n + 1):
-        p2x, p2y = polygon[i % n]
-        if y > min(p1y, p2y) and y <= max(p1y, p2y) and x <= max(p1x, p2x):
-            if p1y != p2y:
-                xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
-            else:
-                xinters = p1x
-            if p1x == p2x or x <= xinters:
-                inside = not inside
-        p1x, p1y = p2x, p2y
-    return inside
-
-
-def _is_box_in_zone(
-    box: List[float],
-    zone_coords: List[List[float]],
-    frame_width: int,
-    frame_height: int,
-) -> bool:
-    x1, y1, x2, y2 = box
-    center_x = (x1 + x2) / 2
-    center_y = (y1 + y2) / 2
-    center_x_norm = center_x / frame_width
-    center_y_norm = center_y / frame_height
-    return _is_point_in_polygon((center_x_norm, center_y_norm), zone_coords)
+# -----------------------------------------------------------------------------
+# Scenario
+# -----------------------------------------------------------------------------
 
 
 @register_scenario("fire_detection")
@@ -69,13 +49,16 @@ class FireDetectionScenario(BaseScenario):
         self._state["detection_counts"] = defaultdict(int)
 
     def process(self, frame_context: ScenarioFrameContext) -> List[ScenarioEvent]:
-        fire_detections = self._find_fire_detections(frame_context)
+        # Step 1: Find fire-related detections (fire, flame, smoke) above confidence threshold
+        fire_detections = self.find_fire_detections(frame_context)
         if not fire_detections:
+            # No fire this frame: decay consecutive counter, clear fire_detected when zero
             if self._state["consecutive_fire_frames"] > 0:
                 self._state["consecutive_fire_frames"] -= 1
             if self._state["consecutive_fire_frames"] == 0:
                 self._state["fire_detected"] = False
             return []
+        # Step 2: Update state (consecutive frames, total count, fire_detected)
         self._state["consecutive_fire_frames"] += 1
         self._state["total_fire_detections"] += 1
         matched_indices, matched_classes, matched_scores = fire_detections
@@ -84,6 +67,7 @@ class FireDetectionScenario(BaseScenario):
         self._state["fire_detected"] = True
         now = frame_context.timestamp
         is_confirmed = self._state["consecutive_fire_frames"] >= self.config_obj.confirm_frames
+        # Step 3: Decide if we should emit an alert (confirmed + not in cooldown)
         is_alert = False
         if is_confirmed:
             last_alert_time = self._state.get("last_alert_time")
@@ -105,8 +89,9 @@ class FireDetectionScenario(BaseScenario):
                 })
                 if len(self._state["fire_detection_history"]) > 100:
                     self._state["fire_detection_history"] = self._state["fire_detection_history"][-100:]
+        # Step 4: Build label and event (critical if alert, else detection/warning/info)
         if is_alert:
-            label = self._generate_label(len(matched_indices), matched_classes)
+            label = self.generate_label(len(matched_indices), matched_classes)
             alert_type = "critical"
             severity = "critical"
         else:
@@ -130,7 +115,6 @@ class FireDetectionScenario(BaseScenario):
                     "max_confidence": max_confidence,
                     "consecutive_frames": self._state["consecutive_fire_frames"],
                     "total_detections": self._state["total_fire_detections"],
-                    "zone_applied": self.config_obj.zone_applied,
                     "alert_cooldown_seconds": self.config_obj.alert_cooldown_seconds,
                 },
                 detection_indices=matched_indices,
@@ -139,32 +123,25 @@ class FireDetectionScenario(BaseScenario):
             )
         ]
 
-    def _find_fire_detections(
+    def find_fire_detections(
         self, frame_context: ScenarioFrameContext
     ) -> Optional[Tuple[List[int], List[str], List[float]]]:
+        """Return (matched_indices, matched_classes, matched_scores) for fire-like classes anywhere in frame, or None."""
         detections = frame_context.detections
-        boxes = detections.boxes
         classes = detections.classes
         scores = detections.scores
-        frame = frame_context.frame
-        frame_height, frame_width = frame.shape[:2]
         matched_indices = []
         matched_classes = []
         matched_scores = []
         target_classes = [c.lower() for c in self.config_obj.target_classes]
         confidence_threshold = self.config_obj.confidence_threshold
-        for i, (box, cls, score) in enumerate(zip(boxes, classes, scores)):
+        for i, (cls, score) in enumerate(zip(classes, scores)):
             if isinstance(cls, str):
                 cls_lower = cls.lower()
                 is_fire_class = any(
                     target in cls_lower or cls_lower in target for target in target_classes
                 )
                 if is_fire_class and score >= confidence_threshold:
-                    if self.config_obj.zone_applied and self.config_obj.zone_coordinates:
-                        if not _is_box_in_zone(
-                            box, self.config_obj.zone_coordinates, frame_width, frame_height
-                        ):
-                            continue
                     matched_indices.append(i)
                     matched_classes.append(cls)
                     matched_scores.append(float(score))
@@ -172,7 +149,8 @@ class FireDetectionScenario(BaseScenario):
             return matched_indices, matched_classes, matched_scores
         return None
 
-    def _generate_label(self, count: int, classes: List[str]) -> str:
+    def generate_label(self, count: int, classes: List[str]) -> str:
+        """Build alert label: custom if set, else fire/smoke text by detected classes."""
         custom_label = self.config_obj.custom_label
         if custom_label and isinstance(custom_label, str) and custom_label.strip():
             return custom_label.strip()
@@ -186,6 +164,7 @@ class FireDetectionScenario(BaseScenario):
         return f"FIRE DETECTED - {count} fire sources!"
 
     def reset(self) -> None:
+        """Clear all fire-detection state."""
         self._state["last_alert_time"] = None
         self._state["fire_detected"] = False
         self._state["consecutive_fire_frames"] = 0

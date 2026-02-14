@@ -1,25 +1,32 @@
 """
-Frame Processor
----------------
+Frame Processor (Drawing)
+-------------------------
 
-Drawing utilities for bounding boxes and pose keypoints on frames.
-Used by the pipeline runner and executor for visualization and event frames.
+Drawing utilities for bounding boxes, pose keypoints, zones, and count annotations.
+Used by the pipeline to draw on frames before publishing to the shared store (WebSocket/UI).
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
+from typing import Any, Dict, List, Optional, Tuple
+
+# -----------------------------------------------------------------------------
+# Third-party
+# -----------------------------------------------------------------------------
+import numpy as np
 
 try:
     import cv2  # type: ignore
 except ImportError:
     cv2 = None  # type: ignore[assignment]
 
-import numpy as np
-
-
-# COCO pose keypoint skeleton (YOLO pose uses same indices)
-# Each tuple: (start_idx, end_idx) for drawing lines between keypoints
+# -----------------------------------------------------------------------------
+# Constants (pose skeleton for drawing lines between keypoints)
+# -----------------------------------------------------------------------------
+# COCO pose keypoint indices (YOLO pose uses same). Each tuple = (start_idx, end_idx).
 POSE_SKELETON = [
     (0, 1), (0, 2), (1, 3), (2, 4),   # face
     (5, 6),                             # shoulders
@@ -30,10 +37,34 @@ POSE_SKELETON = [
     (12, 14), (14, 16),                 # right leg
 ]
 
+# -----------------------------------------------------------------------------
+# Internal helpers
+# -----------------------------------------------------------------------------
 
-def _ensure_cv2() -> None:
+
+def ensure_cv2() -> None:
+    """Raise if OpenCV is not installed (required for all drawing)."""
     if cv2 is None:
         raise RuntimeError("OpenCV (cv2) is required for frame drawing. Install opencv-python.")
+
+
+def scale_coords(
+    coords: List[List[float]], width: int, height: int
+) -> List[Tuple[int, int]]:
+    """
+    Convert zone/line coordinates to pixel values.
+    If max coordinate <= 1, treats as normalized (0–1); otherwise as pixels.
+    """
+    if not coords or width <= 0 or height <= 0:
+        return []
+    max_val = max(max(p[0], p[1]) for p in coords)
+    if max_val <= 1.0:
+        return [(int(p[0] * width), int(p[1] * height)) for p in coords]
+    return [(int(p[0]), int(p[1])) for p in coords]
+
+# -----------------------------------------------------------------------------
+# Drawing API (used by pipeline)
+# -----------------------------------------------------------------------------
 
 
 def draw_bounding_boxes(
@@ -42,17 +73,17 @@ def draw_bounding_boxes(
     rules: List[Dict[str, Any]],
 ) -> np.ndarray:
     """
-    Draw bounding boxes, class labels, and scores on a frame.
+    Draw bounding boxes, class labels, and confidence scores on a frame.
 
     Args:
-        frame: BGR image (numpy array, HxWx3)
+        frame: BGR image (HxWx3 numpy array)
         detections: Dict with "boxes", "classes", "scores" (lists)
-        rules: List of rule config dicts (reserved for future use)
+        rules: Rule configs (reserved for future use)
 
     Returns:
-        New BGR image with boxes drawn (frame is copied; original unchanged).
+        New BGR image with boxes drawn (original unchanged).
     """
-    _ensure_cv2()
+    ensure_cv2()
     out = frame.copy()
 
     boxes = detections.get("boxes") or []
@@ -85,26 +116,133 @@ def draw_bounding_boxes(
     return out
 
 
+# -----------------------------------------------------------------------------
+# zone drawing functions
+# -----------------------------------------------------------------------------
+
+def draw_zone_polygon(
+    frame: np.ndarray,
+    zone_coordinates: Optional[List[List[float]]],
+    width: int,
+    height: int,
+    color: Tuple[int, int, int] = (0, 0, 255),  # BGR red (outline)
+    thickness: int = 2,
+    fill_color: Optional[Tuple[int, int, int]] = (0, 0, 255),  # BGR red for fill
+    fill_alpha: float = 0.25,  # 0–1: light red tint over the zone
+) -> None:
+    """
+    Draw restricted zone polygon on frame (in-place): light red fill + red outline.
+    zone_coordinates: list of [x,y] (normalized 0–1 or pixel).
+    """
+    ensure_cv2()
+    if not zone_coordinates or len(zone_coordinates) < 3:
+        return
+    pts = scale_coords(zone_coordinates, width, height)
+    if len(pts) < 3:
+        return
+    pts_arr = np.array(pts, dtype=np.int32)
+    # Light red fill: blend a red overlay over the zone
+    if fill_color is not None and fill_alpha > 0:
+        overlay = np.zeros_like(frame)
+        cv2.fillPoly(overlay, [pts_arr], fill_color)
+        cv2.addWeighted(overlay, fill_alpha, frame, 1.0 - fill_alpha, 0, frame)
+    # Red outline so the zone boundary is clear
+    cv2.polylines(frame, [pts_arr], isClosed=True, color=color, thickness=thickness)
+
+
+# -----------------------------------------------------------------------------
+# line drawing functions
+# -----------------------------------------------------------------------------
+
+def draw_zone_line(
+    frame: np.ndarray,
+    line_zone: Optional[Dict[str, Any]],
+    width: int,
+    height: int,
+    color: Tuple[int, int, int] = (0, 255, 255),  # BGR yellow
+    thickness: int = 2,
+) -> None:
+    """
+    Draw a line zone on frame (in-place).
+    line_zone: {"type": "line", "coordinates": [[x1,y1], [x2,y2]]} (normalized or pixel).
+    """
+    ensure_cv2()
+    if not line_zone or line_zone.get("type") != "line":
+        return
+    coords = line_zone.get("coordinates")
+    if not coords or len(coords) != 2:
+        return
+    pts = scale_coords(coords, width, height)
+    if len(pts) != 2:
+        return
+    cv2.line(frame, tuple(pts[0]), tuple(pts[1]), color, thickness)
+
+
+# -----------------------------------------------------------------------------
+# boxes in zone red drawing function
+# -----------------------------------------------------------------------------
+
+def draw_boxes_in_zone_red(
+    frame: np.ndarray,
+    boxes: List[List[float]],
+    classes: List[Any],
+    scores: List[float],
+    in_zone_indices: List[int],
+    color_in_zone: Tuple[int, int, int] = (0, 0, 255),  # BGR red
+) -> None:
+    """
+    Overlay red bounding boxes only for indices in in_zone_indices (in-place).
+    Call after draw_bounding_boxes so normal boxes stay green and in-zone ones get red overlay.
+    """
+    ensure_cv2()
+    in_zone_set = set(in_zone_indices or [])
+    if not in_zone_set:
+        return
+    thickness = 2
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.5
+    font_thickness = 1
+    for i in in_zone_set:
+        if i >= len(boxes) or len(boxes[i]) < 4:
+            continue
+        box = boxes[i]
+        x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+        cls_name = str(classes[i]) if i < len(classes) else ""
+        score = float(scores[i]) if i < len(scores) else 0.0
+        label = f"{cls_name} {score:.2f}" if cls_name else f"{score:.2f}"
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color_in_zone, thickness)
+        (tw, th), _ = cv2.getTextSize(label, font, font_scale, font_thickness)
+        cv2.rectangle(frame, (x1, y1 - th - 4), (x1 + tw, y1), color_in_zone, -1)
+        cv2.putText(
+            frame, label, (x1, y1 - 2),
+            font, font_scale, (0, 0, 0), font_thickness, cv2.LINE_AA
+        )
+
+
+# -----------------------------------------------------------------------------
+# pose keypoints drawing function
+# -----------------------------------------------------------------------------
+
 def draw_pose_keypoints(
     frame: np.ndarray,
     detections: Dict[str, Any],
     rules: List[Dict[str, Any]],
 ) -> np.ndarray:
     """
-    Draw pose keypoints and skeleton on a frame.
+    Draw pose keypoints and skeleton on a frame (COCO 17 keypoints).
 
     Expects detections["keypoints"] as list of persons; each person is
-    a list of [x, y] or [x, y, confidence] per keypoint (COCO 17 format).
+    a list of [x, y] or [x, y, confidence] per keypoint.
 
     Args:
-        frame: BGR image (numpy array, HxWx3)
+        frame: BGR image (HxWx3)
         detections: Dict with "keypoints" (list of list of [x,y] or [x,y,c])
-        rules: List of rule config dicts (reserved for future use)
+        rules: Rule configs (reserved for future use)
 
     Returns:
         New BGR image with keypoints and skeleton drawn.
     """
-    _ensure_cv2()
+    ensure_cv2()
     out = frame.copy()
 
     keypoints_list = detections.get("keypoints") or []
@@ -146,47 +284,45 @@ def draw_pose_keypoints(
     return out
 
 
+# -----------------------------------------------------------------------------
+# box count annotations drawing function
+# -----------------------------------------------------------------------------
+
 def draw_box_count_annotations(
     frame: np.ndarray,
     track_info: List[Dict[str, Any]],
     line_zone: Optional[Dict[str, Any]],
     counts: Optional[Dict[str, int]],
     target_class: str,
-    active_tracks_count: int = 0
+    active_tracks_count: int = 0,
 ) -> np.ndarray:
     """
-    Draw box counting annotations with side-transition based colors.
+    Draw box/class counting annotations with direction-based colors.
 
-    Color Logic (based on crossing direction):
-    - GREEN (0, 255, 0):  Not crossed yet - object still on initial side
-    - ORANGE (0, 165, 255): Crossed Side 2 → Side 1 (ENTRY/ADD direction)
-    - YELLOW (0, 255, 255): Crossed Side 1 → Side 2 (EXIT/OUT direction)
+    Color logic:
+    - GREEN: Not crossed yet (object on initial side)
+    - ORANGE: Crossed Side 2 → Side 1 (ENTRY/ADD)
+    - YELLOW: Crossed Side 1 → Side 2 (EXIT/OUT)
 
-    Draws:
-    - Bounding boxes (color based on crossing direction)
-    - Center points (filled circle, same color as box)
-    - Track ID labels
-    - "ADD!" or "OUT!" text when crossed
-    - Count text at top
+    Draws: boxes, center points, track ID labels, "ADD!"/"OUT!" text, and count text at top.
 
     Args:
-        frame: BGR image (numpy array, HxWx3)
-        track_info: List of track info dicts with keys: track_id, center, bbox, counted, direction
-        line_zone: Line zone dict (not used for drawing, kept for compatibility)
-        counts: Counts dict with entry_count, exit_count, boxes_counted, etc.
-        target_class: Target class name (e.g., "box")
-        active_tracks_count: Number of active tracks being tracked
+        frame: BGR image (HxWx3)
+        track_info: List of dicts with track_id, center, bbox, counted, direction
+        line_zone: Line zone (kept for compatibility; not used for drawing)
+        counts: Dict with entry_count, exit_count, etc.
+        target_class: Class name (e.g. "box")
+        active_tracks_count: Number of active tracks
 
     Returns:
-        New BGR image with annotations drawn (frame is copied; original unchanged).
+        New BGR image with annotations drawn (original unchanged).
     """
-    _ensure_cv2()
+    ensure_cv2()
     out = frame.copy()
 
     if not track_info and not counts:
         return out
 
-    # Color definitions (BGR format)
     COLOR_GREEN = (0, 255, 0)      # Not crossed yet
     COLOR_ORANGE = (0, 165, 255)   # Side 2 → Side 1 (ENTRY/ADD)
     COLOR_YELLOW = (0, 255, 255)   # Side 1 → Side 2 (EXIT/OUT)
@@ -223,16 +359,11 @@ def draw_box_count_annotations(
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
 
         if counted and direction:
-            if direction == "entry":
-                direction_text = "ADD!"
-                text_color = COLOR_ORANGE
-            else:
-                direction_text = "OUT!"
-                text_color = COLOR_YELLOW
+            direction_text = "ADD!" if direction == "entry" else "OUT!"
+            text_color = COLOR_ORANGE if direction == "entry" else COLOR_YELLOW
             cv2.putText(out, direction_text, (x1, y1 - 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, text_color, 2)
 
-    # Draw count at top
     if counts:
         entry_count = counts.get("entry_count", 0)
         exit_count = counts.get("exit_count", 0)

@@ -1,4 +1,4 @@
-"""Fire detection scenario - detects fire/flames in camera feed."""
+"""Fire detection scenario: detects fire/flame/smoke in the feed."""
 
 from .scenario import FireDetectionScenario
 

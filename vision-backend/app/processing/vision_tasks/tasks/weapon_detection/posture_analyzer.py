@@ -27,7 +27,7 @@ LEFT_WRIST = 9
 RIGHT_WRIST = 10
 
 
-def _get_keypoint(
+def get_keypoint(
     person_keypoints: List[List[float]],
     idx: int,
     confidence_threshold: float = 0.0
@@ -57,7 +57,7 @@ def _get_keypoint(
     return float(kp[0]), float(kp[1])
 
 
-def _wrist_or_elbow_at_shoulder_height(
+def wrist_or_elbow_at_shoulder_height(
     shoulder: Tuple[float, float],
     elbow: Optional[Tuple[float, float]],
     wrist: Tuple[float, float],
@@ -101,9 +101,9 @@ def check_single_arm(
     Returns:
         Tuple of (is_raised, angle)
     """
-    shoulder = _get_keypoint(keypoints, shoulder_idx, kp_confidence_threshold)
-    elbow = _get_keypoint(keypoints, elbow_idx, kp_confidence_threshold)
-    wrist = _get_keypoint(keypoints, wrist_idx, kp_confidence_threshold)
+    shoulder = get_keypoint(keypoints, shoulder_idx, kp_confidence_threshold)
+    elbow = get_keypoint(keypoints, elbow_idx, kp_confidence_threshold)
+    wrist = get_keypoint(keypoints, wrist_idx, kp_confidence_threshold)
     
     if shoulder is None or wrist is None:
         return False, 0.0
@@ -124,7 +124,7 @@ def check_single_arm(
         return False, angle_deg
 
     # Option A: also require wrist or elbow at or above shoulder height
-    if require_shoulder_height and not _wrist_or_elbow_at_shoulder_height(shoulder, elbow, wrist):
+    if require_shoulder_height and not wrist_or_elbow_at_shoulder_height(shoulder, elbow, wrist):
         return False, angle_deg
 
     return True, angle_deg

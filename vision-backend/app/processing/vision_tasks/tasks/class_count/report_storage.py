@@ -1,22 +1,22 @@
 """
-Report Storage Utility
-----------------------
+Report storage
+--------------
 
-This module handles storing counting reports to MongoDB.
-Used by both class_count and box_count scenarios.
-
-What it does:
-- Stores entry/exit events to MongoDB in real-time
-- Tracks agent details, counts, and track IDs
-- Simple and beginner-friendly implementation
+Saves counting events and session summary to MongoDB (counting_reports).
+Used by class_count and box_count for entry/exit line counting.
 """
 
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
+
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
 from app.utils.db import get_collection
 
-
-# Collection name for reports in MongoDB
 REPORTS_COLLECTION = "counting_reports"
 
 

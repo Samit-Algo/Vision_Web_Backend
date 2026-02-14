@@ -1,39 +1,35 @@
 """
-Fall Detection Scenario
------------------------
+Fall detection scenario
+------------------------
 
-Detects human falls using pose keypoint analysis.
-
-Algorithm:
-1. Monitors hip position for sudden downward movement
-2. Tracks body height collapse
-3. Detects lying posture using body angle
-4. Confirms fall after N consecutive frames
-
-Designed for:
-- YOLOv8 Pose models
-- Live stream / RTSP
-- FPS >= 5
+Uses pose keypoints to detect human falls: hip drop, height collapse, lying angle.
+Confirms after N consecutive frames; alert cooldown limits repeats. Needs YOLO pose model.
 """
 
-from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 import math
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
-    ScenarioFrameContext,
     ScenarioEvent,
+    ScenarioFrameContext,
 )
 from app.processing.vision_tasks.task_lookup import register_scenario
+
 from .config import FallDetectionConfig
 
+# -----------------------------------------------------------------------------
+# Keypoint helpers (shoulder, hip, angle, height)
+# -----------------------------------------------------------------------------
 
-# =============================
-# KEYPOINT HELPERS
-# =============================
-
-def _get_keypoint(
+def get_keypoint(
     person_keypoints: List[List[float]],
     idx: int,
     confidence_threshold: float = 0.3,
@@ -48,11 +44,11 @@ def _get_keypoint(
     return float(kp[0]), float(kp[1])
 
 
-def _midpoint(p1: Tuple[float, float], p2: Tuple[float, float]) -> Tuple[float, float]:
+def midpoint(p1: Tuple[float, float], p2: Tuple[float, float]) -> Tuple[float, float]:
     return ((p1[0] + p2[0]) * 0.5, (p1[1] + p2[1]) * 0.5)
 
 
-def _angle_from_vertical(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
+def angle_from_vertical(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
     dx = p2[0] - p1[0]
     dy = p2[1] - p1[1]
     if dx == 0 and dy == 0:
@@ -61,30 +57,30 @@ def _angle_from_vertical(p1: Tuple[float, float], p2: Tuple[float, float]) -> fl
     return math.degrees(angle_rad)
 
 
-def _calculate_bbox_height(person_keypoints: List[List[float]]) -> float:
+def calculate_bbox_height(person_keypoints: List[List[float]]) -> float:
     valid_ys = [kp[1] for kp in person_keypoints if kp and len(kp) >= 2]
     if not valid_ys:
         return 0.0
     return max(valid_ys) - min(valid_ys)
 
 
-def _analyze_person_fall(
+def analyze_person_fall(
     person_keypoints: List[List[float]],
     prev_metrics: Optional[Dict[str, Any]] = None,
     config: Optional[FallDetectionConfig] = None,
 ) -> Tuple[bool, bool, Optional[Dict[str, Any]]]:
     if config is None:
         return False, False, None
-    left_shoulder = _get_keypoint(person_keypoints, 5, config.kp_confidence_threshold)
-    right_shoulder = _get_keypoint(person_keypoints, 6, config.kp_confidence_threshold)
-    left_hip = _get_keypoint(person_keypoints, 11, config.kp_confidence_threshold)
-    right_hip = _get_keypoint(person_keypoints, 12, config.kp_confidence_threshold)
+    left_shoulder = get_keypoint(person_keypoints, 5, config.kp_confidence_threshold)
+    right_shoulder = get_keypoint(person_keypoints, 6, config.kp_confidence_threshold)
+    left_hip = get_keypoint(person_keypoints, 11, config.kp_confidence_threshold)
+    right_hip = get_keypoint(person_keypoints, 12, config.kp_confidence_threshold)
     if not (left_shoulder and right_shoulder and left_hip and right_hip):
         return False, False, None
-    shoulder_mid = _midpoint(left_shoulder, right_shoulder)
-    hip_mid = _midpoint(left_hip, right_hip)
-    height = _calculate_bbox_height(person_keypoints)
-    angle = _angle_from_vertical(shoulder_mid, hip_mid)
+    shoulder_mid = midpoint(left_shoulder, right_shoulder)
+    hip_mid = midpoint(left_hip, right_hip)
+    height = calculate_bbox_height(person_keypoints)
+    angle = angle_from_vertical(shoulder_mid, hip_mid)
     lying = (
         angle > config.lying_angle_threshold
         or height < config.min_height_for_standing
@@ -114,9 +110,10 @@ def _analyze_person_fall(
     return falling, lying, metrics
 
 
-# =============================
-# SCENARIO CLASS
-# =============================
+# -----------------------------------------------------------------------------
+# Scenario
+# -----------------------------------------------------------------------------
+
 
 @register_scenario("fall_detection")
 class FallDetectionScenario(BaseScenario):
@@ -137,6 +134,7 @@ class FallDetectionScenario(BaseScenario):
         self._state["last_alert_time"] = None
 
     def process(self, frame_context: ScenarioFrameContext) -> List[ScenarioEvent]:
+        # Step 1: Must be enabled with target class (person)
         if not self.config_obj.enabled or not self.config_obj.target_class:
             return []
         detections = frame_context.detections
@@ -155,6 +153,7 @@ class FallDetectionScenario(BaseScenario):
         keypoints = detections.keypoints
         if not keypoints:
             return []
+        # Step 2: For each matched person, analyze pose (falling/lying) and update counters
         fallen_person_indices = []
         history = self._state["history"]
         fall_counter = self._state["fall_counter"]
@@ -165,7 +164,7 @@ class FallDetectionScenario(BaseScenario):
             if not person_keypoints:
                 continue
             prev_metrics = history.get(person_idx)
-            falling, lying, metrics = _analyze_person_fall(
+            falling, lying, metrics = analyze_person_fall(
                 person_keypoints, prev_metrics, self.config_obj
             )
             if metrics:
@@ -181,10 +180,11 @@ class FallDetectionScenario(BaseScenario):
                 fallen_person_indices.append(person_idx)
         if not fallen_person_indices:
             return []
+        # Step 3: Cooldown check, then emit event
         if last_alert_time and isinstance(last_alert_time, datetime):
             if (now - last_alert_time).total_seconds() < self.config_obj.alert_cooldown_seconds:
                 return []
-        label = self._generate_label(len(fallen_person_indices))
+        label = self.generate_label(len(fallen_person_indices))
         self._state["last_alert_time"] = now
         return [
             ScenarioEvent(
@@ -204,7 +204,7 @@ class FallDetectionScenario(BaseScenario):
             )
         ]
 
-    def _generate_label(self, count: int) -> str:
+    def generate_label(self, count: int) -> str:
         custom_label = self.config_obj.custom_label
         if custom_label and isinstance(custom_label, str) and custom_label.strip():
             return custom_label.strip()

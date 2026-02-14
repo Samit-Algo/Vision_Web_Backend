@@ -1,30 +1,42 @@
 """
-Source Data Contracts
+Frame data contracts
 --------------------
 
-Defines the data structures used by sources to pass frame data through the pipeline.
+Defines the packet passed from sources to the pipeline (Stage 1 → Stage 2).
 """
 
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 from dataclasses import dataclass
 from typing import Optional
+
+# -----------------------------------------------------------------------------
+# Third-party
+# -----------------------------------------------------------------------------
 import numpy as np
+
+# -----------------------------------------------------------------------------
+# Data contracts
+# -----------------------------------------------------------------------------
 
 
 @dataclass
 class FramePacket:
     """
-    Standardized frame data packet passed between pipeline stages.
-    
-    Contains the frame image and associated metadata needed for processing.
+    One frame plus metadata, passed from source to pipeline.
+
+    Pipeline uses frame for inference and frame_index/timestamp/fps for logging and rules.
     """
-    frame: np.ndarray
-    frame_index: int
-    timestamp: float  # Monotonic timestamp
-    fps: Optional[float] = None  # Source FPS (if available)
-    source_id: Optional[str] = None  # Camera ID or file path identifier
-    
-    def __post_init__(self):
-        """Validate frame packet data."""
+
+    frame: np.ndarray          # BGR image (H, W, 3)
+    frame_index: int           # Sequential index from source
+    timestamp: float            # Monotonic time (seconds)
+    fps: Optional[float] = None       # Source FPS when available
+    source_id: Optional[str] = None   # camera_id or video path
+
+    def __post_init__(self) -> None:
+        """Validate shape and type of frame."""
         if self.frame is None:
             raise ValueError("Frame cannot be None")
         if not isinstance(self.frame, np.ndarray):

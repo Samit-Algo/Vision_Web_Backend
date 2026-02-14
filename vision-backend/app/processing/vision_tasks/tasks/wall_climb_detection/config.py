@@ -1,11 +1,14 @@
 """
-Wall Climb Detection - Configuration
--------------------------------------
+Wall climb configuration
+-------------------------
 
-Reads zone (polygon), target class, and alert settings from the task config.
+Parses zone polygon (wall boundary), target class, confidence, cooldown.
 """
 
-from typing import Optional, Dict, Any, List
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
+from typing import Any, Dict, List, Optional
 
 
 class WallClimbConfig:

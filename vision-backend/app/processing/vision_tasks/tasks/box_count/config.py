@@ -1,12 +1,14 @@
 """
-Box Count Configuration
------------------------
+Box count configuration
+------------------------
 
-Handles configuration parsing for box count scenario.
-Same as class_count but defaults to "box" class.
+Same as class_count but default target class is "box". Line zone + tracker settings.
 """
 
-from typing import Optional, Dict, Any, List
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
+from typing import Any, Dict, List, Optional
 
 
 class BoxCountConfig:

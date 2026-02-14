@@ -34,6 +34,34 @@ from .dependencies import get_current_user
 # -----------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 
+# Optional: for agent frame-by-frame streaming (JPEG push)
+try:
+    import numpy as np
+    import cv2  # type: ignore
+    _FRAME_ENCODE_AVAILABLE = True
+except ImportError:
+    np = None  # type: ignore
+    cv2 = None  # type: ignore
+    _FRAME_ENCODE_AVAILABLE = False
+
+
+def _entry_to_jpeg_bytes(entry: Any) -> Optional[bytes]:
+    """Encode shared_store frame entry to JPEG bytes. Returns None if invalid or cv2/numpy missing."""
+    if not _FRAME_ENCODE_AVAILABLE or not entry or not isinstance(entry, dict):
+        return None
+    try:
+        buf = entry.get("bytes")
+        shape = entry.get("shape")
+        dtype_str = entry.get("dtype", "uint8")
+        if not buf or not shape or len(shape) < 3:
+            return None
+        arr = np.frombuffer(buf, dtype=np.dtype(dtype_str))
+        arr = arr.reshape(tuple(int(x) for x in shape))
+        _, jpeg = cv2.imencode(".jpg", arr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        return jpeg.tobytes()
+    except Exception:
+        return None
+
 
 router = APIRouter(tags=["streaming"])
 
@@ -238,10 +266,16 @@ async def websocket_live_stream(websocket: WebSocket, camera_id: str) -> None:
 
     try:
         # Keep the connection open; we don't require client messages.
+        # After client disconnect, receive() can raise RuntimeError if called again — so check message type and break.
         while True:
-            await websocket.receive()
+            msg = await websocket.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
     except WebSocketDisconnect:
         pass
+    except RuntimeError as e:
+        if "disconnect" not in str(e).lower():
+            logger.error("WebSocket error for camera %s: %s", camera_id, e, exc_info=True)
     except Exception as e:
         logger.error("WebSocket error for camera %s: %s", camera_id, e, exc_info=True)
     finally:
@@ -249,13 +283,15 @@ async def websocket_live_stream(websocket: WebSocket, camera_id: str) -> None:
 
 
 @router.websocket("/agents/{agent_id}/overlay/ws")
-async def websocket_agent_overlay(websocket: WebSocket, agent_id: str) -> None:
+async def websocket_agent_processed_stream(
+    websocket: WebSocket,
+    agent_id: str,
+) -> None:
     """
-    Agent overlay websocket endpoint (Option A):
-    - Keep camera video stream unchanged (fMP4)
-    - Stream only detection metadata for the selected agent
+    Agent processed-frame stream (fMP4 over WebSocket).
 
-    Client draws overlays (boxes/labels) over the camera video element.
+    Streams video with detections already drawn (same fMP4 format as raw live stream).
+    Auth: pass JWT as query param ?token=...
     """
     token = websocket.query_params.get("token")
     if not token:
@@ -284,136 +320,136 @@ async def websocket_agent_overlay(websocket: WebSocket, agent_id: str) -> None:
 
     await websocket.accept()
 
-    last_frame_index = None
+    processed_service: ProcessedFrameStreamService = container.get(
+        ProcessedFrameStreamService
+    )
+    await processed_service.add_viewer(
+        agent_id=agent_id,
+        websocket=websocket,
+        shared_store=shared_store,
+    )
+
     try:
+        # After client disconnect, receive() can raise RuntimeError if called again — check message type and break.
         while True:
-            entry = None
-            try:
-                entry = shared_store.get(agent_id, None)
-            except Exception:
-                entry = None
-
-            if not isinstance(entry, dict):
-                # No agent output yet (agent not running / no frames) - heartbeat
-                await websocket.send_json({"agent_id": agent_id, "status": "no_data"})
-                await asyncio.sleep(0.25)
-                continue
-
-            frame_index = entry.get("frame_index")
-            if frame_index is None or frame_index == last_frame_index:
-                await asyncio.sleep(0.03)
-                continue
-            last_frame_index = frame_index
-
-            shape = entry.get("shape") or ()
-            try:
-                height = int(shape[0])
-                width = int(shape[1])
-            except Exception:
-                height = None
-                width = None
-
-            det = entry.get("detections") or {}
-            boxes = det.get("boxes") or []
-            classes = det.get("classes") or []
-            scores = det.get("scores") or []
-            keypoints = det.get("keypoints") or []  # For fall_detection/pose (skeleton overlay)
-            
-            # Get scenario overlays (e.g., loom ROI boxes with state labels)
-            # Ensure JSON-serializable (pipeline stores dicts; convert any dataclass leftovers)
-            raw_overlays = entry.get("scenario_overlays") or []
-            scenario_overlays: List[Any] = []
-            for item in raw_overlays:
-                if dataclasses.is_dataclass(item) and not isinstance(item, type):
-                    scenario_overlays.append(dataclasses.asdict(item))
-                elif isinstance(item, dict):
-                    scenario_overlays.append(item)
-                else:
-                    scenario_overlays.append(item)
-
-            # Collect zones from agent configuration and rules
-            zones = []
-            
-            # Add agent-level zone if exists
-            if agent and hasattr(agent, "zone") and agent.zone:
-                zones.append(agent.zone)
-            
-            # Add zones from rules (including line zones for class_count/box_count)
-            rules = entry.get("rules", [])
-            if rules:
-                for rule in rules:
-                    rule_zone = rule.get("zone")
-                    if rule_zone:
-                        zones.append(rule_zone)
-            
-            # Also check for line_zone in entry (from scenario)
-            line_zone = entry.get("line_zone")
-            if line_zone and line_zone not in zones:
-                zones.append(line_zone)
-            
-            # Face detection: raw list of {box, name} for UI to draw face boxes/labels
-            face_recognitions = entry.get("face_recognitions") or []
-
-            # Get zone violation status from entry
-            zone_violated = entry.get("zone_violated", False)
-            
-            # Get fire detection status (for red bounding boxes on overlay)
-            fire_detected = entry.get("fire_detected", False)
-            
-            # Get line crossing/touch status
-            line_crossed = entry.get("line_crossed", False)
-            line_crossed_indices = entry.get("line_crossed_indices", [])
-            track_info = entry.get("track_info", [])  # Track information with center points and touch status
-            in_zone_indices = entry.get("in_zone_indices", [])  # Restricted zone: only these detection indices get red box
-            sleep_confirmed_indices = entry.get("sleep_confirmed_indices", [])  # Sleep: same person box, red when VLM confirmed
-            wall_climb_red_indices = entry.get("wall_climb_red_indices", [])  # Wall climb: fully above (stays red)
-            wall_climb_orange_indices = entry.get("wall_climb_orange_indices", [])  # Wall climb: climbing (orange)
-
-            # Build detection colors based on touch status
-            # Yellow for boxes touching the line, default color for others
-            detection_colors = []
-            for idx, track_item in enumerate(track_info):
-                if track_item.get("touching_line", False):
-                    detection_colors.append("yellow")  # Yellow when touching line
-                else:
-                    detection_colors.append("green")  # Default green for normal boxes
-            
-            payload = {
-                "type": "agent_overlay",
-                "agent_id": agent_id,
-                "camera_id": getattr(agent, "camera_id", None),
-                "frame_index": frame_index,
-                "ts_monotonic": entry.get("ts_monotonic"),  # Timestamp for staleness check
-                "width": width,
-                "height": height,
-                "detections": {
-                    "boxes": boxes,
-                    "classes": classes,
-                    "scores": scores,
-                    "colors": detection_colors,  # Box colors: yellow when touching, green otherwise
-                    "keypoints": keypoints,  # For fall_detection/pose UI (skeleton overlay)
-                },
-                "scenario_overlays": scenario_overlays,
-                "face_recognitions": face_recognitions,
-                "zones": zones,
-                "zone": zones[0] if zones else None,
-                "zone_violated": zone_violated,
-                "fire_detected": fire_detected,
-                "line_crossed": line_crossed,
-                "line_crossed_indices": line_crossed_indices,
-                "track_info": track_info,
-                "in_zone_indices": in_zone_indices,
-                "sleep_confirmed_indices": sleep_confirmed_indices,
-                "wall_climb_red_indices": wall_climb_red_indices,
-                "wall_climb_orange_indices": wall_climb_orange_indices,
-            }
-            await websocket.send_json(payload)
+            msg = await websocket.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
     except WebSocketDisconnect:
-        return
+        pass
+    except RuntimeError as e:
+        if "disconnect" not in str(e).lower():
+            logger.error(
+                "WebSocket error for agent processed stream %s: %s",
+                agent_id,
+                e,
+                exc_info=True,
+            )
     except Exception as e:
-        logger.error("WebSocket overlay error for agent %s: %s", agent_id, e, exc_info=True)
+        logger.error(
+            "WebSocket error for agent processed stream %s: %s",
+            agent_id,
+            e,
+            exc_info=True,
+        )
+    finally:
+        await processed_service.remove_viewer(agent_id=agent_id, websocket=websocket)
+
+
+@router.websocket("/agents/{agent_id}/overlay/frames/ws")
+async def websocket_agent_processed_frames(
+    websocket: WebSocket,
+    agent_id: str,
+) -> None:
+    """
+    Agent processed frames as JPEG over WebSocket (one message per frame).
+
+    Sends frames directly to the UI so the stream does not depend on fMP4/chunk pipeline
+    and does not break when encoding or buffering stalls. Auth: ?token=...
+    """
+    if not _FRAME_ENCODE_AVAILABLE:
+        await websocket.close(code=1011, reason="Frame encoding (numpy/cv2) not available")
+        return
+
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=1008, reason="Authentication token required")
+        return
+
+    try:
+        class MockCredentials:
+            credentials = token
+        current_user = await get_current_user(MockCredentials())
+    except Exception:
+        await websocket.close(code=1008, reason="Invalid or expired token")
+        return
+
+    container = get_container()
+    agent_repo: AgentRepository = container.get(AgentRepository)
+    agent = await agent_repo.find_by_id(agent_id)
+    if not agent or not agent.owner_user_id or str(agent.owner_user_id) != str(current_user.id):
+        await websocket.close(code=1008, reason="Agent not found or access denied")
+        return
+
+    shared_store = get_shared_store()
+    if shared_store is None:
+        await websocket.close(code=1011, reason="Shared store not initialized")
+        return
+
+    await websocket.accept()
+
+    _frame_push_done = asyncio.Event()
+    _frame_push_task: Optional[asyncio.Task] = None
+
+    async def frame_push_loop() -> None:
+        max_fps = 15.0
+        interval = 1.0 / max_fps
+        last_jpeg: Optional[bytes] = None
         try:
-            await websocket.close(code=1011, reason="Overlay stream error")
-        except Exception:
+            while not _frame_push_done.is_set():
+                entry = None
+                try:
+                    entry = shared_store.get(agent_id)
+                except Exception:
+                    pass
+                jpeg = _entry_to_jpeg_bytes(entry) if entry else None
+                if jpeg:
+                    last_jpeg = jpeg
+                if last_jpeg:
+                    try:
+                        await asyncio.wait_for(
+                            websocket.send_bytes(last_jpeg),
+                            timeout=2.0,
+                        )
+                    except asyncio.TimeoutError:
+                        pass
+                    except Exception:
+                        break
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
             pass
+        finally:
+            _frame_push_done.set()
+
+    try:
+        _frame_push_task = asyncio.create_task(frame_push_loop())
+        while True:
+            msg = await websocket.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+    except WebSocketDisconnect:
+        pass
+    except RuntimeError as e:
+        if "disconnect" not in str(e).lower():
+            logger.error("WebSocket error for agent frames %s: %s", agent_id, e, exc_info=True)
+    except Exception as e:
+        logger.error("WebSocket error for agent frames %s: %s", agent_id, e, exc_info=True)
+    finally:
+        _frame_push_done.set()
+        if _frame_push_task and not _frame_push_task.done():
+            _frame_push_task.cancel()
+            try:
+                await _frame_push_task
+            except asyncio.CancelledError:
+                pass
 

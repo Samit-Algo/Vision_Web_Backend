@@ -84,9 +84,9 @@ class LoomMachineStateManager:
 
         target_state = "RUNNING" if motion_ratio >= motion_threshold_ratio else "STOPPED"
 
-        return self._handle_state_transition(loom_id, target_state, analysis.timestamp)
+        return self.handle_state_transition(loom_id, target_state, analysis.timestamp)
 
-    def _handle_state_transition(
+    def handle_state_transition(
         self,
         loom_id: str,
         target_state: str,
