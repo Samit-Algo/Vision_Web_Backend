@@ -1,17 +1,20 @@
 """
-Restricted Zone Configuration
------------------------------
+Restricted zone configuration
+------------------------------
 
-Handles configuration parsing for restricted zone scenario.
+Parses target class, confidence, alert cooldown, and polygon zone coordinates.
 """
 
-from typing import Optional, Dict, Any, List
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
+from typing import Any, Dict, List, Optional
 
 
 class RestrictedZoneConfig:
-    """Configuration for restricted zone scenario."""
+    """Config for restricted zone: target class, zone polygon, cooldown."""
 
-    def __init__(self, config: Dict[str, Any], task: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], task: Dict[str, Any]) -> None:
         self.target_class = str(config.get("class") or "").strip().lower()
         self.custom_label = config.get("label")
         self.alert_cooldown_seconds = float(config.get("alert_cooldown_seconds", 10))

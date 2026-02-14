@@ -1,16 +1,15 @@
 """
-Class Presence Detector
------------------------
+Class presence detector
+------------------------
 
-Detects if specified classes are present in detections.
+Helpers: normalize class names, match by mode (any/all), find indices, generate label.
 """
 
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 from typing import List, Tuple
 
-
-# ============================================================================
-# UTILITIES
-# ============================================================================
 
 def normalize_classes(classes: List[str]) -> List[str]:
     """Normalize class names to lowercase."""

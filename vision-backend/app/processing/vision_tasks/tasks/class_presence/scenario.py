@@ -1,19 +1,19 @@
 """
-Class Presence Scenario
------------------------
+Class presence scenario
+------------------------
 
-Detects if specified class(es) are present in the frame.
-This is NOT zone-based - it detects objects across the entire frame.
-
-Behavior:
-- Filters detections to only show user-specified class(es)
-- Triggers alert when specified class(es) are detected
-- Shows bounding boxes only for the filtered class(es)
+Detects if target class(es) are present in the frame (no zone). Match mode: any or all.
 """
 
-from typing import List, Dict, Any, Optional, Tuple
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
     ScenarioFrameContext,
@@ -61,7 +61,7 @@ class ClassPresenceScenario(BaseScenario):
             return []
 
         # Find detections matching the target class(es)
-        matched_indices, matched_classes, matched_scores = self._find_matching_detections(
+        matched_indices, matched_classes, matched_scores = self.find_matching_detections(
             frame_context
         )
 
@@ -87,7 +87,7 @@ class ClassPresenceScenario(BaseScenario):
                 return [
                     ScenarioEvent(
                         event_type="class_presence",
-                        label=self._generate_label(matched_classes),
+                        label=self.generate_label(matched_classes),
                         confidence=max(matched_scores) if matched_scores else 0.0,
                         metadata={
                             "target_classes": self.config_obj.target_classes,
@@ -114,7 +114,7 @@ class ClassPresenceScenario(BaseScenario):
         return [
             ScenarioEvent(
                 event_type="class_presence",
-                label=self._generate_label(matched_classes),
+                label=self.generate_label(matched_classes),
                 confidence=max_confidence,
                 metadata={
                     "target_classes": self.config_obj.target_classes,
@@ -133,7 +133,7 @@ class ClassPresenceScenario(BaseScenario):
             )
         ]
 
-    def _find_matching_detections(
+    def find_matching_detections(
         self, frame_context: ScenarioFrameContext
     ) -> Tuple[List[int], List[str], List[float]]:
         """
@@ -179,7 +179,7 @@ class ClassPresenceScenario(BaseScenario):
 
         return matched_indices, matched_classes, matched_scores
 
-    def _generate_label(self, matched_classes: List[str]) -> str:
+    def generate_label(self, matched_classes: List[str]) -> str:
         """Generate event label."""
         return generate_label(
             matched_classes,

@@ -1,11 +1,14 @@
 """
-Class Count Configuration
---------------------------
+Class count configuration
+-------------------------
 
-Handles configuration parsing for class count scenario.
+Parses target class, zone (line only), direction, tracker settings. Used by class_count scenario.
 """
 
-from typing import Optional, Dict, Any, List
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
+from typing import Any, Dict, List, Optional
 
 
 class ClassCountConfig:

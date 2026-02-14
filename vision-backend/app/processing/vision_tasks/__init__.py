@@ -1,18 +1,15 @@
 """
-Scenarios Module
-----------------
+Vision tasks (scenarios)
+------------------------
 
-Handles semantic event processing through stateful scenario processors.
-
-Scenarios are stateful processors that:
-- Receive per-frame context (detections, rule matches, frames)
-- Buffer and reason over time
-- Call additional models (VLM, face recognition) when needed
-- Emit semantic events when ready (delayed decisions)
-
-Each scenario defines its own internal DTOs and flow.
+Stateful scenario processors: receive per-frame context, buffer, optionally call VLM/face,
+emit events when ready. Each scenario type is registered via @register_scenario and
+loaded by the pipeline from rule type (e.g. fall_detection, restricted_zone).
 """
 
+# -----------------------------------------------------------------------------
+# Data models and engine
+# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
     ScenarioEvent,
@@ -25,7 +22,7 @@ from app.processing.vision_tasks.task_lookup import (
     scenario_registry,
 )
 
-# Import all scenarios to trigger registration decorators
+# Import scenarios so @register_scenario decorators run
 from app.processing.vision_tasks.tasks.weapon_detection import scenario as weapon_detection_scenario  # noqa: F401
 from app.processing.vision_tasks.tasks.sleep_detection import scenario as sleep_detection_scenario  # noqa: F401
 from app.processing.vision_tasks.tasks.class_count import scenario as class_count_scenario  # noqa: F401

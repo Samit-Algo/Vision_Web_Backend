@@ -1,24 +1,27 @@
 """
-Restricted Zone Scenario
-------------------------
+Restricted zone scenario
+-------------------------
 
-Monitors a restricted zone for object presence and triggers alerts.
-
-Behavior:
-- Triggers alert when an object of specified class is INSIDE the zone
-- Uses bounding box center point to determine if object is in zone
-- Alert cooldown prevents rapid-fire duplicate alerts
+Alerts when an object of the given class is inside the polygon zone (center point).
+Stores in_zone_indices in state so the pipeline can draw only those boxes in red. Cooldown limits alerts.
 """
 
-from typing import List, Dict, Any
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 from datetime import datetime
+from typing import Any, Dict, List
 
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
-    ScenarioFrameContext,
     ScenarioEvent,
+    ScenarioFrameContext,
 )
 from app.processing.vision_tasks.task_lookup import register_scenario
+
 from .config import RestrictedZoneConfig
 from .zone_utils import is_box_in_zone
 
@@ -38,23 +41,25 @@ class RestrictedZoneScenario(BaseScenario):
         self._state["in_zone_indices"] = []  # Merged-packet indices of detections inside zone (for per-box red overlay)
 
     def process(self, frame_context: ScenarioFrameContext) -> List[ScenarioEvent]:
+        # Step 1: Need target class and zone polygon
         if not self.config_obj.target_class or not self.config_obj.zone_coordinates:
             self._state["in_zone_indices"] = []
             return []
-        matched_indices, matched_classes = self._find_objects_in_zone(frame_context)
-        # Always store who is in zone so pipeline can color only those boxes red (even during alert cooldown)
-        self._state["in_zone_indices"] = list(matched_indices)
+        # Step 2: Find detections of target class whose center is inside the zone
+        matched_indices, matched_classes = self.find_objects_in_zone(frame_context)
+        self._state["in_zone_indices"] = list(matched_indices)  # For pipeline red-box overlay
         if not matched_indices:
             self._state["last_alert_time"] = None
             self._state["objects_in_zone"] = False
             return []
         self._state["objects_in_zone"] = True
+        # Step 3: Emit alert only if not in cooldown
         now = frame_context.timestamp
         last_alert_time = self._state.get("last_alert_time")
         if last_alert_time and isinstance(last_alert_time, datetime):
             if (now - last_alert_time).total_seconds() < self.config_obj.alert_cooldown_seconds:
                 return []
-        label = self._generate_label(len(matched_indices))
+        label = self.generate_label(len(matched_indices))
         detections = frame_context.detections
         scores = detections.scores
         matched_scores = [scores[i] for i in matched_indices if i < len(scores)]
@@ -77,7 +82,8 @@ class RestrictedZoneScenario(BaseScenario):
             )
         ]
 
-    def _find_objects_in_zone(self, frame_context: ScenarioFrameContext) -> tuple:
+    def find_objects_in_zone(self, frame_context: ScenarioFrameContext) -> tuple:
+        """Return (matched_indices, matched_classes) for target class with center inside zone."""
         detections = frame_context.detections
         boxes = detections.boxes
         classes = detections.classes
@@ -95,7 +101,7 @@ class RestrictedZoneScenario(BaseScenario):
                     matched_classes.append(cls)
         return matched_indices, matched_classes
 
-    def _generate_label(self, count: int) -> str:
+    def generate_label(self, count: int) -> str:
         custom_label = self.config_obj.custom_label
         if custom_label and isinstance(custom_label, str) and custom_label.strip():
             return custom_label.strip()
@@ -105,6 +111,7 @@ class RestrictedZoneScenario(BaseScenario):
         return f"{count} {target_class}(s) detected in restricted zone"
 
     def reset(self) -> None:
+        """Clear zone state."""
         self._state["last_alert_time"] = None
         self._state["objects_in_zone"] = False
         self._state["in_zone_indices"] = []

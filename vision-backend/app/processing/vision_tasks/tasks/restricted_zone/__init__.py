@@ -1,4 +1,4 @@
-"""Restricted zone scenario - monitors zone for object presence."""
+"""Restricted zone: alert when target class is inside the polygon zone."""
 
 from .scenario import RestrictedZoneScenario
 

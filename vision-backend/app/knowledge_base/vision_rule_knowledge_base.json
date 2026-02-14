@@ -11,7 +11,7 @@
           "Tell me if someone enters"
         ],
       
-        "model": "yolov8x.pt",
+        "model": "yolov8m.pt",
       
         "detectable_classes": [
           "person",
@@ -63,7 +63,7 @@
         ],
       
         "defaults": {
-          "fps": 1,
+          "fps": 5,
           "confidence": 0.7,
           "run_mode": "continuous"
         }
@@ -260,7 +260,7 @@
         ],
       
         "defaults": {
-          "fps": 1,
+          "fps": 3,
           "run_mode": "continuous",
           "buffer_size": 5,
           "arm_angle_threshold": 45,
@@ -341,7 +341,7 @@
         ],
 
         "defaults": {
-          "fps": 1,
+          "fps": 3,
           "run_mode": "continuous",
           "buffer_size": 5,
           "temporal_consistency_frames": 4,
@@ -376,7 +376,7 @@
           "count the workers"
         ],
       
-        "model": "yolov8l.pt",
+        "model": "yolov8m.pt",
       
         "detectable_classes": [
           "person",
@@ -435,7 +435,7 @@
         ],
       
         "defaults": {
-          "fps": 1,
+          "fps": 10,
           "confidence": 0.7,
           "run_mode": "continuous"
         }
@@ -514,7 +514,7 @@
         ],
       
         "defaults": {
-          "fps": 1,
+          "fps": 10,
           "confidence": 0.7,
           "run_mode": "continuous"
         }
@@ -592,7 +592,7 @@
         ],
       
         "defaults": {
-          "fps": 2,
+          "fps": 10,
           "confidence": 0.7,
           "run_mode": "continuous",
           "alert_cooldown_seconds": 10
@@ -675,7 +675,7 @@
         ],
       
         "defaults": {
-          "fps": 2,
+          "fps": 10,
           "confidence": 0.7,
           "run_mode": "continuous",
           "alert_cooldown_seconds": 10
@@ -753,7 +753,7 @@
         ],
       
         "defaults": {
-          "fps": 5,
+          "fps": 6,
           "confidence": 0.5,
           "run_mode": "continuous",
           "class": "person",
@@ -771,8 +771,8 @@
       {
         "rule_id": "fire_detection",
         "rule_name": "Fire Detection",
-        "description": "Detects fire and smoke in the camera view using a fine-tuned YOLO model. Triggers critical alerts when fire is detected. Uses consecutive frame confirmation to reduce false positives from flickering lights or reflections.",
-      
+        "description": "Detects fire, flame, or smoke anywhere in the camera view (no zone). Uses a fine-tuned YOLO model. Triggers critical alerts when fire is detected, based on user settings: confidence_threshold, confirm_frames, and alert_cooldown_seconds. Consecutive frame confirmation reduces false positives from flickering lights or reflections. Zone is not used; the entire frame is always monitored.",
+
         "intent_examples": [
           "Alert me if any fire detected",
           "If any fire detected alert me",
@@ -791,33 +791,28 @@
           "Watch for fire",
           "Fire monitoring"
         ],
-      
+
         "model": "fire_detection.pt",
-      
+
         "detectable_classes": [
           "fire",
           "flame",
           "smoke"
         ],
-      
+
         "required_fields_from_user": [],
-      
+
         "time_window": {
           "supported": true,
           "required": true
         },
-      
+
         "zone_support": {
-          "supported": true,
+          "supported": false,
           "required": false,
-          "zone_type": "polygon",
-          "min_points": 3,
-          "max_points": null,
-          "supports_polygon": true,
-          "supports_line": false,
-          "description": "Optional polygon zone to monitor specific areas for fire. User can draw MINIMUM 3 POINTS to define the monitoring zone. If no zone is specified, the entire camera view is monitored for fire."
+          "description": "This rule does not use a zone. Fire, flame, or smoke is detected anywhere in the full camera view. Zone fields are ignored."
         },
-      
+
         "execution_modes": {
           "continuous": {
             "description": "Continuously monitors for fire detection. Recommended for safety-critical applications.",
@@ -828,7 +823,7 @@
             ],
             "zone_required": false
           },
-      
+
           "patrol": {
             "description": "Checks periodically for fire detection",
             "required_fields": [
@@ -838,7 +833,7 @@
             "zone_required": false
           }
         },
-      
+
         "rules_config_fields": [
           "classes",
           "label",
@@ -846,7 +841,7 @@
           "confidence_threshold",
           "confirm_frames"
         ],
-      
+
         "defaults": {
           "fps": 5,
           "confidence": 0.5,
@@ -887,7 +882,7 @@
         },
         "rules_config_fields": ["watch_names", "label", "alert_cooldown_seconds", "tolerance", "min_similarity", "similarity_threshold"],
         "defaults": {
-          "fps": 2,
+          "fps": 5,
           "run_mode": "continuous",
           "alert_cooldown_seconds": 10,
           "tolerance": 0.55

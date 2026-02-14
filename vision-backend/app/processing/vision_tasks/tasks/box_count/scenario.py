@@ -1,15 +1,20 @@
 """
-Box Count Scenario
+Box count scenario
 ------------------
 
-Counts boxes (or specified class) with two modes:
-1. Simple per-frame counting (no zone)
-2. Line-based counting with tracking (boxes crossing a line)
+Counts target class (default "box"): simple per-frame or line-based with tracking.
+Reuses class_count counter, reporter, report_storage and calculate_iou.
 """
 
-from typing import List, Dict, Any, Optional
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 from datetime import datetime
+from typing import Any, Dict, List, Optional
 
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
     ScenarioFrameContext,
@@ -22,6 +27,7 @@ from app.processing.vision_tasks.tasks.class_count.counter import (
     count_class_detections,
     generate_count_label,
     filter_detections_by_class,
+    calculate_iou,
 )
 from app.processing.vision_tasks.tasks.class_count.reporter import generate_report
 from app.processing.vision_tasks.tasks.class_count.report_storage import (
@@ -61,10 +67,10 @@ class BoxCountScenario(BaseScenario):
         if not self.config_obj.target_class:
             return []
         if self.config_obj.zone_type == "line" and self.tracker and self.line_counter:
-            return self._process_line_counting(frame_context)
-        return self._process_simple_counting(frame_context)
+            return self.process_line_counting(frame_context)
+        return self.process_simple_counting(frame_context)
 
-    def _process_line_counting(self, frame_context: ScenarioFrameContext) -> List[ScenarioEvent]:
+    def process_line_counting(self, frame_context: ScenarioFrameContext) -> List[ScenarioEvent]:
         frame_height, frame_width = frame_context.frame.shape[:2]
         self.line_counter.update_frame_dimensions(frame_width, frame_height)
         class_detections = filter_detections_by_class(
@@ -83,7 +89,7 @@ class BoxCountScenario(BaseScenario):
                     "timestamp": frame_context.timestamp.isoformat(),
                     "frame_index": frame_context.frame_index,
                 })
-                self._save_counting_event_to_db(
+                self.save_counting_event_to_db(
                     track_id=track.track_id,
                     event_type=touch_result,
                     timestamp=frame_context.timestamp,
@@ -113,7 +119,7 @@ class BoxCountScenario(BaseScenario):
                 count = counts["exit_count"]
             else:
                 count = counts["net_count"]
-        label = self._generate_line_count_label(counts)
+        label = self.generate_line_count_label(counts)
         report = generate_report(
             self._state, count, frame_context.timestamp, self.config_obj.zone_applied
         )
@@ -122,7 +128,7 @@ class BoxCountScenario(BaseScenario):
         report["track_info"] = track_info
         report["entry_count"] = counts.get("entry_count", 0)
         report["exit_count"] = counts.get("exit_count", 0)
-        matched_indices = self._match_tracks_to_detections(active_tracks, frame_context.detections)
+        matched_indices = self.match_tracks_to_detections(active_tracks, frame_context.detections)
         if not self._report_initialized and self.pipeline_context:
             ctx = self.pipeline_context
             initialize_report_session(
@@ -156,7 +162,7 @@ class BoxCountScenario(BaseScenario):
             )
         ]
 
-    def _process_simple_counting(self, frame_context: ScenarioFrameContext) -> List[ScenarioEvent]:
+    def process_simple_counting(self, frame_context: ScenarioFrameContext) -> List[ScenarioEvent]:
         matched_count, matched_indices = count_class_detections(
             frame_context.detections,
             self.config_obj.target_class,
@@ -185,7 +191,7 @@ class BoxCountScenario(BaseScenario):
             )
         ]
 
-    def _generate_line_count_label(self, counts: Dict[str, int]) -> str:
+    def generate_line_count_label(self, counts: Dict[str, int]) -> str:
         if self.line_counter and self.line_counter.count_mode == "single":
             boxes_counted = counts.get("boxes_counted", 0)
             if self.config_obj.custom_label and isinstance(self.config_obj.custom_label, str) and self.config_obj.custom_label.strip():
@@ -210,7 +216,7 @@ class BoxCountScenario(BaseScenario):
         else:
             return f"{exit_count} {target_class}(s) crossed out"
 
-    def _match_tracks_to_detections(self, tracks: List, detections) -> List[int]:
+    def match_tracks_to_detections(self, tracks: List, detections) -> List[int]:
         matched_indices = []
         boxes = detections.boxes
         classes = detections.classes
@@ -221,7 +227,7 @@ class BoxCountScenario(BaseScenario):
             best_idx = -1
             for idx, (det_box, det_class) in enumerate(zip(boxes, classes)):
                 if isinstance(det_class, str) and det_class.lower() == target_class:
-                    iou = self._calculate_iou(track_bbox, list(det_box))
+                    iou = calculate_iou(track_bbox, list(det_box))
                     if iou > best_iou and iou >= 0.3:
                         best_iou = iou
                         best_idx = idx
@@ -229,22 +235,7 @@ class BoxCountScenario(BaseScenario):
                 matched_indices.append(best_idx)
         return matched_indices
 
-    def _calculate_iou(self, box1: List[float], box2: List[float]) -> float:
-        x1_1, y1_1, x2_1, y2_1 = box1
-        x1_2, y1_2, x2_2, y2_2 = box2
-        overlap_left = max(x1_1, x1_2)
-        overlap_top = max(y1_1, y1_2)
-        overlap_right = min(x2_1, x2_2)
-        overlap_bottom = min(y2_1, y2_2)
-        if overlap_right < overlap_left or overlap_bottom < overlap_top:
-            return 0.0
-        intersection = (overlap_right - overlap_left) * (overlap_bottom - overlap_top)
-        area1 = (x2_1 - x1_1) * (y2_1 - y1_1)
-        area2 = (x2_2 - x1_2) * (y2_2 - y1_2)
-        union = area1 + area2 - intersection
-        return (intersection / union) if union else 0.0
-
-    def _save_counting_event_to_db(
+    def save_counting_event_to_db(
         self, track_id: int, event_type: str, timestamp: datetime, active_tracks: int
     ) -> None:
         try:

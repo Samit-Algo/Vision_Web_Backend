@@ -18,8 +18,8 @@ from app.processing.processing_output.data_models import DetectionPacket
 
 def convert_from_yolo_result(result, timestamp: datetime) -> DetectionPacket:
     """Extract detections from a YOLO result object."""
-    boxes, classes, scores = _extract_detections(result)
-    keypoints = _extract_keypoints(result)
+    boxes, classes, scores = extract_detections(result)
+    keypoints = extract_keypoints(result)
 
     return DetectionPacket(
         classes=classes,
@@ -30,7 +30,7 @@ def convert_from_yolo_result(result, timestamp: datetime) -> DetectionPacket:
     )
 
 
-def _extract_detections(result) -> Tuple[List[List[float]], List[str], List[float]]:
+def extract_detections(result) -> Tuple[List[List[float]], List[str], List[float]]:
         """Extract boxes, classes, and scores from YOLO result."""
         boxes: List[List[float]] = []
         classes: List[str] = []
@@ -58,7 +58,7 @@ def _extract_detections(result) -> Tuple[List[List[float]], List[str], List[floa
 
         return boxes, classes, scores
 
-def _extract_keypoints(result) -> List[List[List[float]]]:
+def extract_keypoints(result) -> List[List[List[float]]]:
         """Extract keypoints from YOLO result (for pose models)."""
         keypoints_list: List[List[List[float]]] = []
 

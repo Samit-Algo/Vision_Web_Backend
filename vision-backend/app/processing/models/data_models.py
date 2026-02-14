@@ -1,61 +1,42 @@
 """
-Model Data Contracts
---------------------
+Model contracts (protocols)
+---------------------------
 
-Defines the interfaces and contracts for model providers and model results.
-These contracts are frozen - they define the stable API between models and the pipeline.
+Defines what a "model" and a "provider" look like. Pipeline calls model(frame);
+ModelLoader uses providers to load models by ID.
 """
 
-from typing import Protocol, Any, Optional
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
+from typing import Any, Optional, Protocol
+
+# -----------------------------------------------------------------------------
+# Third-party
+# -----------------------------------------------------------------------------
 import numpy as np
+
+# -----------------------------------------------------------------------------
+# Protocols
+# -----------------------------------------------------------------------------
 
 
 class Model(Protocol):
-    """
-    Protocol defining what a loaded model instance looks like.
-    
-    Models must support inference via callable interface: model(frame) -> results
-    """
-    
+    """What a loaded model looks like: callable with (frame, verbose) → results."""
+
     def __call__(self, frame: np.ndarray, verbose: bool = False) -> Any:
-        """
-        Run inference on a frame.
-        
-        Args:
-            frame: Input frame as numpy array (BGR format)
-            verbose: Whether to print verbose output
-        
-        Returns:
-            Model results (format depends on model type, e.g., ultralytics Results object)
-        """
+        """Run inference on a BGR frame. Returns model-specific results (e.g. ultralytics Results)."""
         ...
 
 
 class ModelResult(Protocol):
-    """
-    Protocol defining the structure of model inference results.
-    
-    This is intentionally minimal - we preserve the original model output format
-    (e.g., ultralytics Results object) to maintain compatibility.
-    """
+    """Minimal shape for inference results; we keep original format (e.g. ultralytics) for compatibility."""
     pass
 
 
 class Provider(Protocol):
-    """
-    Protocol defining the interface that model providers must implement.
-    
-    Providers are responsible for loading specific model types.
-    """
-    
+    """A provider loads one model by ID (e.g. YOLODetectorProvider loads yolov8n.pt)."""
+
     def load(self, model_id: str) -> Optional[Model]:
-        """
-        Load a model instance.
-        
-        Args:
-            model_id: Model identifier (path or name)
-        
-        Returns:
-            Loaded model instance or None if loading failed
-        """
+        """Load and return a model, or None if loading fails."""
         ...

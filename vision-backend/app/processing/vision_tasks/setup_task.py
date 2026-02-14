@@ -1,14 +1,19 @@
 """
-Scenario Engine
+Scenario engine
 ---------------
 
-Manages scenario instances and orchestrates per-frame processing.
-
-Creates scenario instances from configuration and calls process() each frame.
+Creates scenario instances from task config and runs process() per frame.
+Used when scenarios are configured under task["scenarios"] (optional alternative to rule-based).
 """
 
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 from typing import Any, Dict, List
 
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
 from app.processing.pipeline.context import PipelineContext
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
@@ -17,10 +22,10 @@ from app.processing.vision_tasks.data_models import (
 )
 from app.processing.vision_tasks.task_lookup import get_scenario_class
 
+# -----------------------------------------------------------------------------
+# Engine
+# -----------------------------------------------------------------------------
 
-# ============================================================================
-# SCENARIO ENGINE
-# ============================================================================
 
 class ScenarioEngine:
     """
@@ -33,9 +38,9 @@ class ScenarioEngine:
         """Initialize scenario engine."""
         self.pipeline_context = pipeline_context
         self.scenarios: List[BaseScenario] = []
-        self._initialize_scenarios()
+        self.initialize_scenarios()
 
-    def _initialize_scenarios(self) -> None:
+    def initialize_scenarios(self) -> None:
         """Create scenario instances from task configuration."""
         scenario_configs = self.pipeline_context.task.get("scenarios", [])
 

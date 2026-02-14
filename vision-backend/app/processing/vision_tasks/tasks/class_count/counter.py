@@ -1,14 +1,47 @@
 """
-Class Counter
--------------
+Class counter (shared helpers)
+------------------------------
 
-Counts detections of a specified class (simple per-frame counting).
-Line-based counting is handled by tracking (see scenario.py).
+- count_class_detections: simple per-frame count of target class.
+- filter_detections_by_class: (bbox, score) list for tracker.
+- generate_count_label: label string for events.
+- calculate_iou: Intersection over Union of two boxes (shared by class_count and box_count).
 """
 
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 from typing import List, Tuple
 
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
 from app.processing.processing_output.data_models import DetectionPacket
+
+# -----------------------------------------------------------------------------
+# Shared: IoU (used by class_count and box_count for track–detection matching)
+# -----------------------------------------------------------------------------
+
+
+def calculate_iou(box1: List[float], box2: List[float]) -> float:
+    """Intersection over Union of two boxes [x1, y1, x2, y2]. Returns 0 if no overlap."""
+    x1_1, y1_1, x2_1, y2_1 = box1
+    x1_2, y1_2, x2_2, y2_2 = box2
+    overlap_left = max(x1_1, x1_2)
+    overlap_top = max(y1_1, y1_2)
+    overlap_right = min(x2_1, x2_2)
+    overlap_bottom = min(y2_1, y2_2)
+    if overlap_right < overlap_left or overlap_bottom < overlap_top:
+        return 0.0
+    intersection = (overlap_right - overlap_left) * (overlap_bottom - overlap_top)
+    area1 = (x2_1 - x1_1) * (y2_1 - y1_1)
+    area2 = (x2_2 - x1_2) * (y2_2 - y1_2)
+    union = area1 + area2 - intersection
+    return (intersection / union) if union else 0.0
+
+# -----------------------------------------------------------------------------
+# Counting helpers
+# -----------------------------------------------------------------------------
 
 
 def count_class_detections(

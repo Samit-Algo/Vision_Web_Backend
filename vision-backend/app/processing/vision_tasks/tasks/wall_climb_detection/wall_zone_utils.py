@@ -11,7 +11,7 @@ We also require the box to overlap the wall horizontally (so we don't alert for 
 from typing import List, Tuple, Optional
 
 
-def _wall_top_and_x_range(
+def wall_top_and_x_range(
     zone_coordinates: List[List[float]],
     frame_width: float,
     frame_height: float,
@@ -41,7 +41,7 @@ def _wall_top_and_x_range(
     return wall_top_y, wall_x_min, wall_x_max
 
 
-def _box_to_pixel(
+def box_to_pixel(
     box: List[float],
     frame_width: float,
     frame_height: float,
@@ -55,7 +55,7 @@ def _box_to_pixel(
     return x1, y1, x2, y2
 
 
-def _box_overlaps_wall_x(
+def box_overlaps_wall_x(
     x1: float, x2: float,
     wall_x_min: float, wall_x_max: float,
 ) -> bool:
@@ -76,12 +76,12 @@ def is_box_climbing(
     if not box or len(box) < 4 or not zone_coordinates or len(zone_coordinates) < 3:
         return False
 
-    wall_top_y, wall_x_min, wall_x_max = _wall_top_and_x_range(
+    wall_top_y, wall_x_min, wall_x_max = wall_top_and_x_range(
         zone_coordinates, frame_width, frame_height
     )
-    x1, y1, x2, y2 = _box_to_pixel(box, frame_width, frame_height)
+    x1, y1, x2, y2 = box_to_pixel(box, frame_width, frame_height)
 
-    if not _box_overlaps_wall_x(x1, x2, wall_x_min, wall_x_max):
+    if not box_overlaps_wall_x(x1, x2, wall_x_min, wall_x_max):
         return False
 
     # In image coords, smaller y = higher on screen. So "above wall" = y < wall_top_y.
@@ -102,12 +102,12 @@ def is_box_fully_above_wall(
     if not box or len(box) < 4 or not zone_coordinates or len(zone_coordinates) < 3:
         return False
 
-    wall_top_y, wall_x_min, wall_x_max = _wall_top_and_x_range(
+    wall_top_y, wall_x_min, wall_x_max = wall_top_and_x_range(
         zone_coordinates, frame_width, frame_height
     )
-    x1, y1, x2, y2 = _box_to_pixel(box, frame_width, frame_height)
+    x1, y1, x2, y2 = box_to_pixel(box, frame_width, frame_height)
 
-    if not _box_overlaps_wall_x(x1, x2, wall_x_min, wall_x_max):
+    if not box_overlaps_wall_x(x1, x2, wall_x_min, wall_x_max):
         return False
 
     # Fully above = bottom of person (y2) is above the wall line.

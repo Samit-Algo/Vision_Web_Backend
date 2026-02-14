@@ -1,11 +1,14 @@
 """
-Class Presence Configuration
-----------------------------
+Class presence configuration
+-----------------------------
 
-Handles configuration parsing for class presence scenario.
+Parses target class(es), match_mode (any/all), confidence, cooldown. No zone.
 """
 
-from typing import Optional, Dict, Any, List
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
+from typing import Any, Dict, List
 
 
 class ClassPresenceConfig:

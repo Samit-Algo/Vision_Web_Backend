@@ -1,14 +1,20 @@
 """
-Loom Machine State Scenario
----------------------------
+Loom machine state scenario
+----------------------------
 
-Main scenario class that determines RUNNING/STOPPED state per loom
-using motion-based analysis on per-loom ROIs.
+Determines RUNNING/STOPPED per loom using motion on per-loom ROIs. No YOLO; raw frames only.
 """
 
-from typing import List, Optional, Dict, Any
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
+from typing import Any, Dict, List, Optional
+
 import numpy as np
 
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
     ScenarioFrameContext,
@@ -205,11 +211,11 @@ class LoomMachineStateScenario(BaseScenario):
         self.state_manager.cleanup_old_data(timestamp)
         
         # Store state in scenario's internal state (for other scenarios to access)
-        self._update_internal_state()
+        self.update_internal_state()
         
         return events
     
-    def _update_internal_state(self) -> None:
+    def update_internal_state(self) -> None:
         """Update scenario's internal state dictionary."""
         all_states = self.state_manager.get_all_states()
         
