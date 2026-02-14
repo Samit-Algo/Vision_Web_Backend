@@ -24,7 +24,7 @@ from ...application.dto.user_dto import UserResponse
 from ...application.use_cases.camera.get_camera import GetCameraUseCase
 from ...domain.repositories.agent_repository import AgentRepository
 from ...di.container import get_container
-from ...infrastructure.streaming import WsFmp4Service
+from ...infrastructure.streaming import ProcessedFrameStreamService, WsFmp4Service
 from ...processing.helpers import get_shared_store
 
 from .dependencies import get_current_user
