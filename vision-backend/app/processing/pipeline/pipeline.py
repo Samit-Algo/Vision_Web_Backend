@@ -228,7 +228,8 @@ def evaluate_rules_stage(
                 rule_result = {
                     "label": scenario_event.label,
                     "matched_detection_indices": scenario_event.detection_indices,
-                    "report": report
+                    "report": report,
+                    "event_type": getattr(scenario_event, "event_type", None) or "",
                 }
 
                 if rule_result:
@@ -248,7 +249,8 @@ def evaluate_rules_stage(
             label=str(event["label"]).strip(),
             rule_index=event.get("rule_index", 0),
             matched_detection_indices=event.get("matched_detection_indices", []),
-            report=event.get("report")
+            report=event.get("report"),
+            event_type=event.get("event_type") or "",
         )
 
     return rule_match, all_matched_indices
@@ -574,6 +576,7 @@ class PipelineRunner:
             sleep_detection_scenario = None  # For per-box red when sleep confirmed (same box, change color)
             is_wall_climb_detection = False  # Orange = climbing, red = fully above (stays red)
             wall_climb_scenario = None
+            is_fall_detection = False  # Red boxes/alert when person fall detected
             face_recognitions: List[Dict[str, Any]] = []  # Face detection: [{ "box": [...], "name": "..." }]
             
             if hasattr(self.context, '_scenario_instances'):
@@ -629,6 +632,9 @@ class PipelineRunner:
                     elif scenario_type == 'face_detection':
                         if hasattr(scenario_instance, '_state'):
                             face_recognitions = list(scenario_instance._state.get("recognized_faces") or [])
+                    # Fall detection: show red boxes/alert when person fall detected
+                    elif scenario_type == 'fall_detection':
+                        is_fall_detection = True
                     
                     # Check if this is a line-based counting scenario (class_count or box_count)
                     elif scenario_type in ['class_count', 'box_count']:
@@ -870,6 +876,11 @@ class PipelineRunner:
                             sleep_confirmed_indices.append(i)
                             break
 
+            # Fall detection: when event is fall, draw all matched (fallen) person boxes in red
+            fall_red_indices: List[int] = []
+            if is_fall_detection and rule_match and getattr(rule_match, "event_type", None) == "fall_detected" and f_boxes:
+                fall_red_indices = list(range(len(f_boxes)))
+
             # Draw restricted zone polygon, zone line, and red boxes for in-zone detections (on processed frame)
             draw_zone_polygon(processed_frame, restricted_zone_coordinates, width, height)
             draw_zone_line(processed_frame, line_zone, width, height)
@@ -879,6 +890,12 @@ class PipelineRunner:
                 draw_boxes_in_zone_red(
                     processed_frame, f_boxes, f_classes, f_scores,
                     wall_climb_red_indices, color_in_zone=(0, 0, 255)
+                )
+            # Fall detection: red boxes for fallen persons + optional alert overlay
+            if is_fall_detection and fall_red_indices:
+                draw_boxes_in_zone_red(
+                    processed_frame, f_boxes, f_classes, f_scores,
+                    fall_red_indices, color_in_zone=(0, 0, 255)
                 )
 
             # Collect scenario overlays (e.g., face boxes, loom ROI) before encoding so we can draw them on the frame
@@ -955,6 +972,8 @@ class PipelineRunner:
                 "sleep_confirmed_indices": sleep_confirmed_indices,  # Sleep: same person box, red when VLM confirmed
                 "wall_climb_red_indices": wall_climb_red_indices,  # Wall climb: person above zone (red only)
                 "wall_climb_orange_indices": wall_climb_orange_indices,  # Unused; kept for UI compatibility
+                "fall_detected": bool(is_fall_detection and fall_red_indices),  # Fall: show red alert on UI
+                "fall_red_indices": fall_red_indices,  # Fall: indices of fallen persons (red boxes)
                 "face_recognitions": face_recognitions,  # Face detection: [{ "box": [x1,y1,x2,y2], "name": "..." }]
             }
             
@@ -1130,6 +1149,7 @@ class PipelineRunner:
             detections["rule_report"] = rule_match.report
         
         # Handle event through session manager
+        event_type = getattr(rule_match, "event_type", None) or ""
         if processed_frame is not None:
             try:
                 session_manager = get_event_session_manager()
@@ -1142,7 +1162,8 @@ class PipelineRunner:
                     agent_name=self.context.agent_name,
                     detections=detections,
                     video_timestamp=video_ts,
-                    fps=fps
+                    fps=fps,
+                    event_type=event_type,
                 )
             except Exception as exc:  # noqa: BLE001
                 print(f"[worker {self.context.task_id}] ⚠️  Error handling event frame: {exc}")
@@ -1169,7 +1190,8 @@ class PipelineRunner:
                     agent_name=self.context.agent_name,
                     detections=detections,
                     video_timestamp=video_ts,
-                    fps=fps
+                    fps=fps,
+                    event_type=event_type,
                 )
             except Exception as exc:  # noqa: BLE001
                 print(f"[worker {self.context.task_id}] ⚠️  Error creating/handling event frame: {exc}")

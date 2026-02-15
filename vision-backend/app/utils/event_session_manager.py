@@ -47,6 +47,7 @@ class EventSession:
     event_label: str
     camera_id: Optional[str]
     agent_name: str
+    event_type: str = ""  # e.g. "fall_detected" for UI to show red alert
     
     # State management
     state: SessionState = SessionState.ACTIVE
@@ -199,7 +200,8 @@ class EventSessionManager:
         agent_name: Optional[str] = None,
         detections: Optional[Dict[str, Any]] = None,
         video_timestamp: Optional[str] = None,
-        fps: Optional[int] = None
+        fps: Optional[int] = None,
+        event_type: Optional[str] = None,
     ) -> None:
         """
         Handle an event frame from an agent.
@@ -216,6 +218,7 @@ class EventSessionManager:
             detections: Detection details
             video_timestamp: Video timestamp string
             fps: Agent FPS (for video encoding)
+            event_type: Event type (e.g. "fall_detected") for UI alerts (red for fall).
         """
         session_key = f"{agent_id}_{rule_index}"
         current_time = now()
@@ -233,6 +236,7 @@ class EventSessionManager:
                     event_label=event_label,
                     camera_id=camera_id,
                     agent_name=agent_name or agent_id,
+                    event_type=(event_type or "").strip(),
                     fps=fps or self.video_fps,
                     chunk_duration_seconds=self.chunk_duration_seconds,
                     detections_snapshot=detections,
@@ -298,6 +302,7 @@ class EventSessionManager:
             event = {
                 "label": session.event_label,
                 "rule_index": session.rule_index,
+                "event_type": session.event_type or "",
             }
             
             # Send event notification (dual write: DB + Kafka)

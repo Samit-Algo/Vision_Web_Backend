@@ -28,7 +28,8 @@ class RuleMatch:
 
     When a scenario matches (e.g. fall detected, person in zone), the pipeline
     creates a RuleMatch with label, rule index, matched detection indices, and
-    optional report (e.g. VLM description, counts).
+    optional report (e.g. VLM description, counts). event_type (e.g. fall_detected)
+    is used by the UI to show severity-specific alerts (e.g. red for fall).
     """
 
     def __init__(
@@ -37,11 +38,13 @@ class RuleMatch:
         rule_index: int,
         matched_detection_indices: list[int],
         report: Optional[Dict[str, Any]] = None,
+        event_type: Optional[str] = None,
     ):
         self.label = label
         self.rule_index = rule_index
         self.matched_detection_indices = matched_detection_indices
         self.report = report
+        self.event_type = event_type or ""
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary (for event payloads and backward compatibility)."""
@@ -52,4 +55,6 @@ class RuleMatch:
         }
         if self.report is not None:
             result["report"] = self.report
+        if self.event_type:
+            result["event_type"] = self.event_type
         return result

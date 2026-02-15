@@ -279,9 +279,10 @@ def send_event_to_backend_sync(
             storage_key = camera_id if camera_id else "video"
             image_path = _save_frame_to_file(annotated_frame, storage_key, agent_id)
         
-        # Infer severity
+        # Infer severity (fall_detected always critical for red UI alert)
         label = event.get("label", "Unknown")
-        severity = _infer_severity(label)
+        event_type = event.get("event_type") or ""
+        severity = "critical" if event_type == "fall_detected" else _infer_severity(label)
         
         # Extract report from detections if present (class_count rule includes report in detections)
         report = None
@@ -293,6 +294,7 @@ def send_event_to_backend_sync(
             "video_timestamp": video_timestamp,
             "detections": _serialize_for_json(detections) if detections else None,
             "session_id": session_id,
+            "event_type": event_type,
         }
         
         # Include report in metadata if present (for class_count and similar reporting rules)
@@ -336,10 +338,11 @@ def send_event_to_backend_sync(
                 # Encode frame to base64 for Kafka
                 frame_base64 = encode_frame_to_base64(annotated_frame)
                 
-                # Build Kafka payload (same structure as original)
+                # Build Kafka payload (same structure as original); event_type for UI (e.g. red alert for fall_detected)
                 payload = {
                     "event": {
                         "label": label,
+                        "event_type": event_type,
                         "rule_index": event.get("rule_index"),
                         "timestamp": now_iso(),
                     },
