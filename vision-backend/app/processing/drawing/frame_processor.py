@@ -280,15 +280,35 @@ def draw_pose_keypoints(
     if not keypoints_list:
         return out
 
-    point_color = (0, 255, 255)  # BGR yellow
-    skeleton_color = (0, 255, 0)  # BGR green
+    # Fall detection: orange = suspected, red = confirmed (indices = detection index in merged_packet)
+    # Note: indices must match the order in keypoints_list (which comes from merged_packet, all detections)
+    fall_confirmed_indices = detections.get("fall_confirmed_indices") or []
+    fall_suspected_indices = detections.get("fall_suspected_indices") or []
+    # Filter to only valid indices (within keypoints_list range)
+    max_idx = len(keypoints_list) - 1
+    fall_confirmed_set = set(i for i in fall_confirmed_indices if 0 <= i <= max_idx)
+    fall_suspected_set = set(i for i in fall_suspected_indices if 0 <= i <= max_idx)
+
     point_radius = 3
     skeleton_thickness = 2
     min_conf = 0.25
 
-    for person_kps in keypoints_list:
+    for person_idx, person_kps in enumerate(keypoints_list):
         if not person_kps:
             continue
+        # Check confirmed first (highest priority) - red keypoints
+        if person_idx in fall_confirmed_set:
+            point_color = (0, 0, 255)  # BGR red – confirmed fall
+            skeleton_color = (0, 0, 255)
+        # Then check suspected - orange keypoints
+        elif person_idx in fall_suspected_set:
+            point_color = (0, 165, 255)  # BGR orange – fall suspected
+            skeleton_color = (0, 165, 255)
+        # Normal - yellow/green keypoints
+        else:
+            point_color = (0, 255, 255)  # BGR yellow – normal
+            skeleton_color = (0, 255, 0)  # BGR green
+
         kps = []
         for pt in person_kps:
             if pt is None or len(pt) < 2:

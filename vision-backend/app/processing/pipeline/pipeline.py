@@ -576,7 +576,10 @@ class PipelineRunner:
             sleep_detection_scenario = None  # For per-box red when sleep confirmed (same box, change color)
             is_wall_climb_detection = False  # Orange = climbing, red = fully above (stays red)
             wall_climb_scenario = None
-            is_fall_detection = False  # Red boxes/alert when person fall detected
+            is_fall_detection = False  # Red boxes/alert when person fall detected; orange = suspected, red = confirmed
+            fall_detection_scenario = None  # For fall_suspected_indices / fall_confirmed_indices and keypoint colors
+            fall_red_indices: List[int] = []  # Confirmed fall (red keypoints/boxes); set in fall_detection branch
+            fall_suspected_indices: List[int] = []  # Suspected fall (orange keypoints); set in fall_detection branch
             face_recognitions: List[Dict[str, Any]] = []  # Face detection: [{ "box": [...], "name": "..." }]
             
             if hasattr(self.context, '_scenario_instances'):
@@ -632,9 +635,12 @@ class PipelineRunner:
                     elif scenario_type == 'face_detection':
                         if hasattr(scenario_instance, '_state'):
                             face_recognitions = list(scenario_instance._state.get("recognized_faces") or [])
-                    # Fall detection: show red boxes/alert when person fall detected
+                    # Fall detection: show all persons; orange keypoints = suspected, red = confirmed
                     elif scenario_type == 'fall_detection':
                         is_fall_detection = True
+                        fall_detection_scenario = scenario_instance
+                        if hasattr(scenario_instance, 'config_obj') and hasattr(scenario_instance.config_obj, 'target_class'):
+                            target_class = scenario_instance.config_obj.target_class
                     
                     # Check if this is a line-based counting scenario (class_count or box_count)
                     elif scenario_type in ['class_count', 'box_count']:
@@ -713,6 +719,18 @@ class PipelineRunner:
                 )
                 detections_for_draw = {"boxes": fd_boxes, "classes": fd_classes, "scores": fd_scores}
 
+            # Fall detection: pass suspected/confirmed indices so keypoints can be drawn orange/red
+            # Use original indices from scenario state (they match merged_packet keypoints order)
+            if is_fall_detection and fall_detection_scenario and hasattr(fall_detection_scenario, "_state"):
+                fall_suspected_orig_for_draw = fall_detection_scenario._state.get("fall_suspected_indices") or []
+                fall_confirmed_orig_for_draw = fall_detection_scenario._state.get("fall_confirmed_indices") or []
+                # Ensure indices are valid (within keypoints range)
+                keypoints_count = len(getattr(merged_packet, "keypoints", []) or [])
+                if keypoints_count > 0:
+                    fall_suspected_orig_for_draw = [i for i in fall_suspected_orig_for_draw if 0 <= i < keypoints_count]
+                    fall_confirmed_orig_for_draw = [i for i in fall_confirmed_orig_for_draw if 0 <= i < keypoints_count]
+                detections["fall_suspected_indices"] = fall_suspected_orig_for_draw
+                detections["fall_confirmed_indices"] = fall_confirmed_orig_for_draw
             # Draw annotations based on scenario type
             # For line-based counting (box_count/class_count), frontend handles drawing
             # Backend only draws for pose keypoints or regular bounding boxes
@@ -832,6 +850,23 @@ class PipelineRunner:
                     "person", merged_packet.boxes, merged_packet.classes, merged_packet.scores,
                     keypoints_src,
                 )
+            elif is_fall_detection and target_class:
+                # Show ALL person detections; map scenario state (original indices) to filtered indices for payload
+                f_boxes, f_classes, f_scores, f_keypoints = self.filter_detections_by_class(
+                    target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores,
+                    keypoints_src,
+                )
+                # Same order as filter_detections_by_class (default confidence 0.7)
+                person_original_indices = []
+                for idx, (cls, score) in enumerate(zip(merged_packet.classes, merged_packet.scores)):
+                    if isinstance(cls, str) and cls.strip().lower() == target_class and score >= 0.7:
+                        person_original_indices.append(idx)
+                fall_suspected_orig = (fall_detection_scenario._state.get("fall_suspected_indices") or []) if fall_detection_scenario and hasattr(fall_detection_scenario, "_state") else []
+                fall_confirmed_orig = (fall_detection_scenario._state.get("fall_confirmed_indices") or []) if fall_detection_scenario and hasattr(fall_detection_scenario, "_state") else []
+                fall_suspected_filtered = [i for i, o in enumerate(person_original_indices) if o in fall_suspected_orig]
+                fall_confirmed_filtered = [i for i, o in enumerate(person_original_indices) if o in fall_confirmed_orig]
+                fall_suspected_indices = fall_suspected_filtered
+                fall_red_indices = fall_confirmed_filtered
             elif is_line_counting and target_class:
                 # Show ALL detections of target class for line counting
                 f_boxes, f_classes, f_scores, f_keypoints = self.filter_detections_by_class(
@@ -876,9 +911,8 @@ class PipelineRunner:
                             sleep_confirmed_indices.append(i)
                             break
 
-            # Fall detection: when event is fall, draw all matched (fallen) person boxes in red
-            fall_red_indices: List[int] = []
-            if is_fall_detection and rule_match and getattr(rule_match, "event_type", None) == "fall_detected" and f_boxes:
+            # Fall detection: red = confirmed fall (per-person); set above in fall_detection branch; legacy fallback below
+            if is_fall_detection and rule_match and getattr(rule_match, "event_type", None) == "fall_detected" and f_boxes and not fall_red_indices:
                 fall_red_indices = list(range(len(f_boxes)))
 
             # Draw restricted zone polygon, zone line, and red boxes for in-zone detections (on processed frame)
@@ -891,12 +925,8 @@ class PipelineRunner:
                     processed_frame, f_boxes, f_classes, f_scores,
                     wall_climb_red_indices, color_in_zone=(0, 0, 255)
                 )
-            # Fall detection: red boxes for fallen persons + optional alert overlay
-            if is_fall_detection and fall_red_indices:
-                draw_boxes_in_zone_red(
-                    processed_frame, f_boxes, f_classes, f_scores,
-                    fall_red_indices, color_in_zone=(0, 0, 255)
-                )
+            # Fall detection: NO bounding boxes - only keypoints are drawn (orange/red)
+            # Bounding boxes removed for fall detection as per requirement
 
             # Collect scenario overlays (e.g., face boxes, loom ROI) before encoding so we can draw them on the frame
             scenario_overlays = []
@@ -973,7 +1003,8 @@ class PipelineRunner:
                 "wall_climb_red_indices": wall_climb_red_indices,  # Wall climb: person above zone (red only)
                 "wall_climb_orange_indices": wall_climb_orange_indices,  # Unused; kept for UI compatibility
                 "fall_detected": bool(is_fall_detection and fall_red_indices),  # Fall: show red alert on UI
-                "fall_red_indices": fall_red_indices,  # Fall: indices of fallen persons (red boxes)
+                "fall_red_indices": fall_red_indices,  # Fall: confirmed fall (red keypoints/boxes)
+                "fall_suspected_indices": fall_suspected_indices,  # Fall: suspected fall (orange keypoints)
                 "face_recognitions": face_recognitions,  # Face detection: [{ "box": [x1,y1,x2,y2], "name": "..." }]
             }
             
