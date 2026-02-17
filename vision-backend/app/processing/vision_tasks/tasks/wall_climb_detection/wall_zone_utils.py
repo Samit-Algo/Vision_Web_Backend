@@ -2,13 +2,39 @@
 Wall Climb Detection - Zone helpers
 -----------------------------------
 
-We treat the user-drawn polygon as the wall. Its TOP edge is the "wall line".
-- Climbing: part of the person is above the wall (box TOP is above wall line).
-- Fully above: whole person is above the wall (box BOTTOM is above wall line).
-We also require the box to overlap the wall horizontally (so we don't alert for someone far to the side).
+User-drawn polygon = wall. Its TOP edge is the "wall line".
+- Keypoint-based: person "above" when head/shoulders (COCO 0, 5, 6) are above wall line (primary).
+- Box-based fallback: when keypoints missing, use box top above wall line (is_box_climbing).
 """
 
 from typing import List, Tuple, Optional
+
+# COCO pose indices (YOLO Pose same): 
+# 0=nose (head), 5=left_shoulder, 6=right_shoulder, 9=left_wrist, 10=right_wrist
+UPPER_BODY_KEYPOINT_INDICES = (0, 5, 6)  # Legacy: nose and shoulders
+# Keypoints to monitor for climbing detection: head, shoulders, wrists
+CLIMBING_KEYPOINT_INDICES = (0, 5, 6, 9, 10)  # nose, left_shoulder, right_shoulder, left_wrist, right_wrist
+
+
+def _get_keypoint_xy(
+    person_keypoints: List[List[float]],
+    idx: int,
+    frame_width: float,
+    frame_height: float,
+    confidence_threshold: float = 0.25,
+) -> Optional[Tuple[float, float]]:
+    """Return (x, y) in pixel coords for keypoint at idx, or None if missing/low conf."""
+    if not person_keypoints or idx >= len(person_keypoints):
+        return None
+    kp = person_keypoints[idx]
+    if not kp or len(kp) < 2:
+        return None
+    if len(kp) >= 3 and float(kp[2]) < confidence_threshold:
+        return None
+    x, y = float(kp[0]), float(kp[1])
+    if frame_width > 1 and frame_height > 1 and max(x, y) <= 1.0:
+        x, y = x * frame_width, y * frame_height
+    return (x, y)
 
 
 def wall_top_and_x_range(
@@ -39,6 +65,72 @@ def wall_top_and_x_range(
     wall_x_min = min(xs)
     wall_x_max = max(xs)
     return wall_top_y, wall_x_min, wall_x_max
+
+
+def is_person_above_wall_by_keypoints(
+    person_keypoints: List[List[float]],
+    zone_coordinates: List[List[float]],
+    frame_width: float,
+    frame_height: float,
+    kp_confidence_threshold: float = 0.25,
+) -> bool:
+    """
+    True if person is "above" the wall line using upper-body keypoints (nose, shoulders).
+    Catches 10-20% body crossing (head/shoulders over wall). Requires at least one
+    keypoint above the line and within wall horizontal range.
+    """
+    if not person_keypoints or not zone_coordinates or len(zone_coordinates) < 3:
+        return False
+    wall_top_y, wall_x_min, wall_x_max = wall_top_and_x_range(
+        zone_coordinates, frame_width, frame_height
+    )
+    for idx in UPPER_BODY_KEYPOINT_INDICES:
+        pt = _get_keypoint_xy(
+            person_keypoints, idx, frame_width, frame_height, kp_confidence_threshold
+        )
+        if pt is None:
+            continue
+        x, y = pt
+        if y < wall_top_y and wall_x_min <= x <= wall_x_max:
+            return True
+    return False
+
+
+def check_climbing_keypoints_above_zone(
+    person_keypoints: List[List[float]],
+    zone_coordinates: List[List[float]],
+    frame_width: float,
+    frame_height: float,
+    kp_confidence_threshold: float = 0.25,
+) -> Tuple[bool, List[int]]:
+    """
+    Check if any climbing-related keypoints (head, shoulders, wrists) are above the wall zone.
+    
+    Returns:
+        (is_above, detected_keypoint_indices): 
+        - is_above: True if any keypoint is above zone
+        - detected_keypoint_indices: List of keypoint indices that are above zone
+    """
+    if not person_keypoints or not zone_coordinates or len(zone_coordinates) < 3:
+        return False, []
+    
+    wall_top_y, wall_x_min, wall_x_max = wall_top_and_x_range(
+        zone_coordinates, frame_width, frame_height
+    )
+    
+    detected_indices = []
+    for idx in CLIMBING_KEYPOINT_INDICES:
+        pt = _get_keypoint_xy(
+            person_keypoints, idx, frame_width, frame_height, kp_confidence_threshold
+        )
+        if pt is None:
+            continue
+        x, y = pt
+        # Check if keypoint is above wall line and within horizontal range
+        if y < wall_top_y and wall_x_min <= x <= wall_x_max:
+            detected_indices.append(idx)
+    
+    return len(detected_indices) > 0, detected_indices
 
 
 def box_to_pixel(
@@ -87,28 +179,3 @@ def is_box_climbing(
     # In image coords, smaller y = higher on screen. So "above wall" = y < wall_top_y.
     # Climbing = top of person (y1) is above the wall line.
     return y1 < wall_top_y
-
-
-def is_box_fully_above_wall(
-    box: List[float],
-    zone_coordinates: List[List[float]],
-    frame_width: float,
-    frame_height: float,
-) -> bool:
-    """
-    True if the whole person is above the wall: BOTTOM of box is above wall line.
-    Once this is true we keep the box RED (no going back to orange).
-    """
-    if not box or len(box) < 4 or not zone_coordinates or len(zone_coordinates) < 3:
-        return False
-
-    wall_top_y, wall_x_min, wall_x_max = wall_top_and_x_range(
-        zone_coordinates, frame_width, frame_height
-    )
-    x1, y1, x2, y2 = box_to_pixel(box, frame_width, frame_height)
-
-    if not box_overlaps_wall_x(x1, x2, wall_x_min, wall_x_max):
-        return False
-
-    # Fully above = bottom of person (y2) is above the wall line.
-    return y2 < wall_top_y

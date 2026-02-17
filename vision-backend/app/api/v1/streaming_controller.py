@@ -405,11 +405,12 @@ async def websocket_agent_processed_frames(
         max_fps = 15.0
         interval = 1.0 / max_fps
         last_jpeg: Optional[bytes] = None
+        store_key = str(agent_id)
         try:
             while not _frame_push_done.is_set():
                 entry = None
                 try:
-                    entry = shared_store.get(agent_id)
+                    entry = shared_store.get(store_key)
                 except Exception:
                     pass
                 jpeg = _entry_to_jpeg_bytes(entry) if entry else None

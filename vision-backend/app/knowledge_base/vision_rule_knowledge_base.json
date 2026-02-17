@@ -621,7 +621,7 @@
           "Monitor for people climbing the boundary"
         ],
       
-        "model": "yolov8l.pt",
+        "model": "yolov8l-pose.pt",
       
         "detectable_classes": [
           "person"
@@ -863,7 +863,7 @@
           "Tell me when sachin is seen",
           "Alert me if sachin appears"
         ],
-        "model": "yolov8l.pt",
+        "model": "yolov8m.pt",
         "required_fields_from_user": ["watch_names"],
         "time_window": { "supported": true, "required": true },
         "zone_support": { "supported": false, "required": false },

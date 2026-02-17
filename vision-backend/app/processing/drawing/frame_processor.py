@@ -116,6 +116,37 @@ def draw_bounding_boxes(
     return out
 
 
+def draw_face_recognitions(
+    frame: np.ndarray,
+    face_recognitions: List[Dict[str, Any]],
+    color: Tuple[int, int, int] = (0, 255, 102),  # BGR green
+    thickness: int = 2,
+) -> None:
+    """
+    Draw face recognition boxes and names on the frame in-place.
+    face_recognitions: list of {"box": [x1,y1,x2,y2], "name": "..."}.
+    """
+    ensure_cv2()
+    if not face_recognitions:
+        return
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.55
+    font_thickness = 1
+    for item in face_recognitions:
+        box = item.get("box")
+        name = (item.get("name") or "Unknown").strip() or "Unknown"
+        if not box or len(box) < 4:
+            continue
+        x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
+        (tw, th), _ = cv2.getTextSize(name, font, font_scale, font_thickness)
+        cv2.rectangle(frame, (x1, y1 - th - 4), (x1 + tw, y1), color, -1)
+        cv2.putText(
+            frame, name, (x1, y1 - 2),
+            font, font_scale, (0, 0, 0), font_thickness, cv2.LINE_AA
+        )
+
+
 # -----------------------------------------------------------------------------
 # zone drawing functions
 # -----------------------------------------------------------------------------
@@ -249,15 +280,42 @@ def draw_pose_keypoints(
     if not keypoints_list:
         return out
 
-    point_color = (0, 255, 255)  # BGR yellow
-    skeleton_color = (0, 255, 0)  # BGR green
+    # Fall detection: orange = suspected, red = confirmed (indices = detection index in merged_packet)
+    # Wall climb detection: red = VLM-confirmed climbing (indices = detection index in merged_packet)
+    # Note: indices must match the order in keypoints_list (which comes from merged_packet, all detections)
+    fall_confirmed_indices = detections.get("fall_confirmed_indices") or []
+    fall_suspected_indices = detections.get("fall_suspected_indices") or []
+    wall_climb_confirmed_indices = detections.get("wall_climb_confirmed_indices") or []
+    # Filter to only valid indices (within keypoints_list range)
+    max_idx = len(keypoints_list) - 1
+    fall_confirmed_set = set(i for i in fall_confirmed_indices if 0 <= i <= max_idx)
+    fall_suspected_set = set(i for i in fall_suspected_indices if 0 <= i <= max_idx)
+    wall_climb_confirmed_set = set(i for i in wall_climb_confirmed_indices if 0 <= i <= max_idx)
+
     point_radius = 3
     skeleton_thickness = 2
     min_conf = 0.25
 
-    for person_kps in keypoints_list:
+    for person_idx, person_kps in enumerate(keypoints_list):
         if not person_kps:
             continue
+        # Check confirmed first (highest priority) - red keypoints
+        # Wall climb confirmed takes priority (VLM-confirmed climbing)
+        if person_idx in wall_climb_confirmed_set:
+            point_color = (0, 0, 255)  # BGR red – VLM-confirmed wall climb
+            skeleton_color = (0, 0, 255)
+        elif person_idx in fall_confirmed_set:
+            point_color = (0, 0, 255)  # BGR red – confirmed fall
+            skeleton_color = (0, 0, 255)
+        # Then check suspected - orange keypoints
+        elif person_idx in fall_suspected_set:
+            point_color = (0, 165, 255)  # BGR orange – fall suspected
+            skeleton_color = (0, 165, 255)
+        # Normal - yellow/green keypoints
+        else:
+            point_color = (0, 255, 255)  # BGR yellow – normal
+            skeleton_color = (0, 255, 0)  # BGR green
+
         kps = []
         for pt in person_kps:
             if pt is None or len(pt) < 2:

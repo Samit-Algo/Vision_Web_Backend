@@ -46,7 +46,9 @@ class PipelineContext:
 
         # ----- Agent and source -----
         self.agent_name = task.get("name") or task.get("task_name") or f"agent-{task_id}"
-        self.agent_id = task.get("id") or task.get("agent_id") or task_id
+        # Always string so shared_store key matches API (agent_id from URL)
+        raw_id = task.get("id") or task.get("agent_id") or task_id
+        self.agent_id = str(raw_id) if raw_id is not None else str(task_id)
         self.camera_id = (task.get("camera_id") or "").strip()
         self.video_path = (task.get("video_path") or "").strip()
         source_type = (task.get("source_type") or "").strip().lower()
