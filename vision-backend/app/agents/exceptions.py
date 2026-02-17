@@ -180,3 +180,17 @@ class RuleNotFoundError(KnowledgeBaseError):
             details={"rule_id": rule_id},
         )
         self.rule_id = rule_id
+
+
+# -----------------------------------------------------------------------------
+# Safe user-facing message
+# -----------------------------------------------------------------------------
+
+def get_user_message(exc: BaseException) -> str:
+    """
+    Return a safe, user-facing message for any exception.
+    Use this at API/use-case boundaries so internal details are never exposed.
+    """
+    if isinstance(exc, VisionAgentError) and getattr(exc, "user_message", None):
+        return exc.user_message
+    return "Something went wrong. Please try again."

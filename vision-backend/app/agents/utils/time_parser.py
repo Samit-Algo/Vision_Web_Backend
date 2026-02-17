@@ -19,6 +19,7 @@ from typing import Optional
 # -----------------------------------------------------------------------------
 import parsedatetime
 from pytz import UTC, timezone
+from pytz.exceptions import UnknownTimeZoneError
 
 # -----------------------------------------------------------------------------
 # Application (relative from agents.utils)
@@ -41,12 +42,15 @@ def get_app_tz_pytz():
     """Return application timezone as pytz timezone for parsedatetime."""
     app_tz = _get_app_timezone()
     if hasattr(app_tz, "key"):
-        return timezone(app_tz.key)
+        try:
+            return timezone(app_tz.key)
+        except UnknownTimeZoneError:
+            return UTC
     if app_tz == timezone("UTC"):
         return UTC
     try:
         return timezone(str(app_tz))
-    except Exception:
+    except UnknownTimeZoneError:
         return UTC
 
 
@@ -123,8 +127,8 @@ def parse_time_input(
 
     except ValueError:
         raise
-    except Exception as e:
-        raise ValueError(f"Error parsing time expression '{time_expression}': {e}") from e
+    except Exception:
+        raise ValueError("Could not parse time expression.") from None
 
 
 def format_time_for_display(iso_time: str) -> str:
@@ -157,5 +161,5 @@ def format_time_for_display(iso_time: str) -> str:
             return f"Tomorrow at {dt_app.strftime('%H:%M')} {app_tz_name}"
         return dt_app.strftime(f"%B %d, %Y at %H:%M {app_tz_name}")
 
-    except Exception:
+    except (ValueError, TypeError):
         return iso_time

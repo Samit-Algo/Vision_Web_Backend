@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
 from typing import Dict, Optional
 
+from ..exceptions import VisionAgentError
 from ..session_state.agent_state import get_agent_state, reset_agent_state
 from .kb_utils import apply_rule_defaults, compute_missing_fields, get_rule
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -20,24 +24,18 @@ def initialize_state(rule_id: str, session_id: str = "default", user_id: Optiona
         user_id: Optional user ID to store in agent state (for camera selection)
 
     Returns:
-        Dict with rule_id, status, and message
-    """
-    try:
-        rule = get_rule(rule_id)
-    except ValueError as e:
-        return {
-            "error": str(e),
-            "rule_id": None,
-            "status": "COLLECTING",
-            "message": f"Invalid rule_id: {rule_id}. Please check the knowledge base for available rules."
-        }
+        Dict with rule_id, status, and message (success path only).
 
-    # Preserve source_type and video_path if set by request (e.g. "create agent for this video") before reset
+    Raises:
+        RuleNotFoundError: rule_id not in knowledge base (from get_rule).
+        VisionAgentError: Unexpected error (with safe user_message).
+    """
+    rule = get_rule(rule_id)
+
     prev_state = get_agent_state(session_id)
     preserved_source_type = (prev_state.fields.get("source_type") or "").strip().lower()
     preserved_video_path = (prev_state.fields.get("video_path") or "").strip()
 
-    # Initialize state
     try:
         agent = reset_agent_state(session_id)
         agent.rule_id = rule_id
@@ -50,10 +48,8 @@ def initialize_state(rule_id: str, session_id: str = "default", user_id: Optiona
             agent.fields["source_type"] = "video_file"
             agent.fields["video_path"] = preserved_video_path
 
-        # Apply defaults and compute missing fields
         apply_rule_defaults(agent, rule)
         agent.status = "COLLECTING"
-
         compute_missing_fields(agent, rule)
 
         return {
@@ -61,10 +57,11 @@ def initialize_state(rule_id: str, session_id: str = "default", user_id: Optiona
             "status": agent.status,
             "message": "Agent state initialized. Check CURRENT AGENT STATE in instruction for missing_fields.",
         }
+    except VisionAgentError:
+        raise
     except Exception as e:
-        return {
-            "error": f"Unexpected error initializing state: {str(e)}",
-            "rule_id": None,
-            "status": "COLLECTING",
-            "message": f"Failed to initialize agent state: {str(e)}"
-        }
+        logger.exception("Unexpected error initializing state: %s", e)
+        raise VisionAgentError(
+            str(e),
+            user_message="Failed to initialize. Please try again.",
+        ) from e

@@ -17,6 +17,7 @@ import logging
 from pathlib import Path
 from typing import Dict, List
 
+from ..exceptions import RuleNotFoundError
 from ..session_state.agent_state import AgentState
 
 logger = logging.getLogger(__name__)
@@ -32,24 +33,17 @@ kb_rules: List[Dict] = []
 
 
 def load_knowledge_base() -> None:
-    """Load knowledge base; called at module init."""
+    """Load knowledge base; called at module init. Raises on missing file, invalid JSON, or empty rules."""
     global kb_rules
-    try:
-        if not KB_PATH.exists():
-            raise FileNotFoundError(f"Knowledge base file not found: {KB_PATH}")
-        with open(KB_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        rules = data.get("rules", [])
-        if not rules:
-            raise ValueError("Knowledge base contains no rules")
-        kb_rules = rules
-        logger.info("Loaded %s rules from knowledge base", len(kb_rules))
-    except json.JSONDecodeError as e:
-        logger.critical("Failed to parse knowledge base JSON: %s", e)
-        raise
-    except Exception as e:
-        logger.critical("Failed to load knowledge base: %s", e)
-        raise
+    if not KB_PATH.exists():
+        raise FileNotFoundError(f"Knowledge base file not found: {KB_PATH}")
+    with open(KB_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    rules = data.get("rules", [])
+    if not rules:
+        raise ValueError("Knowledge base contains no rules")
+    kb_rules = rules
+    logger.info("Loaded %s rules from knowledge base", len(kb_rules))
 
 
 load_knowledge_base()
@@ -70,12 +64,12 @@ def get_rule(rule_id: str) -> Dict:
         Rule dictionary from knowledge base
 
     Raises:
-        ValueError: If rule_id is not found in knowledge base
+        RuleNotFoundError: If rule_id is not found in knowledge base
     """
     for rule in kb_rules:
         if rule.get("rule_id") == rule_id:
             return rule
-    raise ValueError(f"Unknown rule_id: {rule_id}")
+    raise RuleNotFoundError(rule_id)
 
 
 # ============================================================================

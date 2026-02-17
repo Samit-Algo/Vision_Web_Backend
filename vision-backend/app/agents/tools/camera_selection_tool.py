@@ -6,6 +6,7 @@ from typing import Any, Dict
 
 from ...domain.constants.camera_fields import CameraFields
 from ...utils.db import get_collection
+from ..exceptions import CameraServiceError, ValidationError
 from .save_to_db_tool import (
     get_camera_repository as get_camera_repository_shared,
     set_camera_repository as set_camera_repository_shared,
@@ -52,19 +53,17 @@ def list_cameras(user_id: str, session_id: str = "default") -> Dict[str, Any]:
         session_id: Session identifier (for consistency with other tools)
 
     Returns:
-        Dict with cameras list:
-        {
-            "cameras": [
-                {"id": "CAM-001", "name": "Front Gate"},
-                {"id": "CAM-002", "name": "Warehouse Cam 2"}
-            ]
-        }
+        Dict with cameras list: {"cameras": [{"id": "...", "name": "..."}, ...]}
+
+    Raises:
+        ValidationError: user_id is missing.
+        CameraServiceError: Database or collection error (safe user_message).
     """
     if not user_id:
-        return {
-            "error": "user_id is required",
-            "cameras": []
-        }
+        raise ValidationError(
+            "user_id is required for list_cameras",
+            user_message="User ID is required to list cameras.",
+        )
 
     try:
         coll = cameras_collection()
@@ -74,7 +73,7 @@ def list_cameras(user_id: str, session_id: str = "default") -> Dict[str, Any]:
         return {"cameras": cameras}
     except Exception as e:
         logger.exception("Failed to list cameras for user %s: %s", user_id, e)
-        return {"error": f"Failed to list cameras: {str(e)}", "cameras": []}
+        raise CameraServiceError(str(e)) from e
 
 
 def resolve_camera(name_or_id: str, user_id: str, session_id: str = "default") -> Dict[str, Any]:
@@ -88,14 +87,20 @@ def resolve_camera(name_or_id: str, user_id: str, session_id: str = "default") -
 
     Returns:
         Dict with status: exact_match, multiple_matches, or not_found
+
+    Raises:
+        ValidationError: name_or_id or user_id missing.
+        CameraServiceError: Database error (safe user_message).
     """
     if not name_or_id or not user_id:
-        return {"status": "not_found", "error": "name_or_id and user_id are required"}
+        raise ValidationError(
+            "name_or_id and user_id are required for resolve_camera",
+            user_message="Camera name or ID and user are required.",
+        )
 
     try:
         coll = cameras_collection()
 
-        # Try by ID first only if it looks like ObjectId (24 hex chars)
         if len(name_or_id) == 24 and all(c in "0123456789abcdefABCDEF" for c in name_or_id):
             try:
                 from bson import ObjectId
@@ -142,4 +147,4 @@ def resolve_camera(name_or_id: str, user_id: str, session_id: str = "default") -
             user_id,
             e,
         )
-        return {"status": "not_found", "error": str(e)}
+        raise CameraServiceError(str(e)) from e

@@ -4,6 +4,7 @@ import json
 import logging
 from typing import Dict
 
+from ..exceptions import StateNotInitializedError, ValidationError, VisionAgentError
 from ..session_state.agent_state import AgentState, get_agent_state
 from .kb_utils import compute_missing_fields, get_rule
 
@@ -23,50 +24,51 @@ def set_field_value(field_values_json: str, session_id: str = "default") -> Dict
         session_id: Session identifier for state management
 
     Returns:
-        Dict with updated_fields, status, and message
+        Dict with updated_fields, status, and message (success path only).
+
+    Raises:
+        ValidationError: Invalid JSON or non-dict payload.
+        StateNotInitializedError: State has no rule selected yet.
+        RuleNotFoundError: Rule from state not in knowledge base (from get_rule).
+        VisionAgentError: Unexpected error (with safe user_message).
     """
     try:
         field_values = json.loads(field_values_json) if field_values_json else {}
-    except json.JSONDecodeError as e:
-        return {
-            "error": f"Invalid JSON in field_values_json: {str(e)}",
-            "updated_fields": [],
-            "status": "COLLECTING",
-            "message": "Failed to parse field values. Please check the format."
-        }
+    except json.JSONDecodeError:
+        raise ValidationError(
+            "Invalid JSON in field_values_json",
+            user_message="Invalid field values. Please check the format.",
+        )
 
     if not isinstance(field_values, dict):
-        return {
-            "error": "field_values_json must decode to an object/dict",
-            "updated_fields": [],
-            "status": "COLLECTING",
-            "message": "Invalid field values format."
-        }
+        raise ValidationError(
+            "field_values_json must decode to an object",
+            user_message="Invalid field values format.",
+        )
 
     logger.debug(
         "set_field_value called (session_id=%s, payload_length=%s)",
         session_id,
         len(field_values_json or ""),
     )
-    try:
-        agent = get_agent_state(session_id)
-        logger.debug(
-            "Current state before set_field_value (status=%s rule_id=%s missing=%s)",
-            agent.status,
-            agent.rule_id,
-            agent.missing_fields,
+
+    agent = get_agent_state(session_id)
+    logger.debug(
+        "Current state before set_field_value (status=%s rule_id=%s missing=%s)",
+        agent.status,
+        agent.rule_id,
+        agent.missing_fields,
+    )
+
+    if not agent.rule_id:
+        raise StateNotInitializedError(
+            "Cannot set fields before rule selection",
+            user_message="Please select what you want to create first, then provide the details.",
         )
 
-        if not agent.rule_id:
-            return {
-                "error": "Cannot set fields before rule selection. Call initialize_state first.",
-                "updated_fields": [],
-                "status": "COLLECTING",
-                "message": "Agent state not initialized."
-            }
+    rule = get_rule(agent.rule_id)
 
-        rule = get_rule(agent.rule_id)
-
+    try:
         if agent.fields.get("run_mode") is None:
             agent.fields["run_mode"] = "continuous"
 
@@ -113,20 +115,16 @@ def set_field_value(field_values_json: str, session_id: str = "default") -> Dict
         }
         logger.debug("set_field_value returning: %s", result)
         return result
-    except ValueError as e:
-        return {
-            "error": str(e),
-            "updated_fields": [],
-            "status": agent.status if 'agent' in locals() else "COLLECTING",
-            "message": f"Error: {str(e)}"
-        }
+    except (ValidationError, StateNotInitializedError):
+        raise
+    except VisionAgentError:
+        raise
     except Exception as e:
-        return {
-            "error": f"Unexpected error: {str(e)}",
-            "updated_fields": [],
-            "status": agent.status if 'agent' in locals() else "COLLECTING",
-            "message": f"An error occurred while updating fields: {str(e)}"
-        }
+        logger.exception("Unexpected error in set_field_value: %s", e)
+        raise VisionAgentError(
+            str(e),
+            user_message="Something went wrong while updating. Please try again.",
+        ) from e
 
 
 # ============================================================================

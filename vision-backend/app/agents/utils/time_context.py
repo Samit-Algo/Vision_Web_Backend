@@ -2,31 +2,47 @@
 Time context helpers for agent prompts.
 
 Provides current time in UTC and application timezone for use in LLM instructions.
+Timezone is validated on first use; invalid names are logged and UTC is used.
 """
 
 # -----------------------------------------------------------------------------
 # Standard library
 # -----------------------------------------------------------------------------
+import logging
 from datetime import datetime
+from typing import Optional
 
 # -----------------------------------------------------------------------------
 # Third-party
 # -----------------------------------------------------------------------------
 from pytz import UTC, timezone
+from pytz.exceptions import UnknownTimeZoneError
 
 # -----------------------------------------------------------------------------
 # Application
 # -----------------------------------------------------------------------------
 from ...core.config import get_settings
 
+logger = logging.getLogger(__name__)
+
+_cached_local_tz: Optional[object] = None
+
 
 def get_local_tz():
-    """Return application timezone from config (e.g. Asia/Kolkata)."""
-    tz_str = get_settings().local_timezone or "UTC"
+    """Return application timezone from config (e.g. Asia/Kolkata). Validates once and caches."""
+    global _cached_local_tz
+    if _cached_local_tz is not None:
+        return _cached_local_tz
+    tz_str = (get_settings().local_timezone or "UTC").strip()
+    if not tz_str:
+        tz_str = "UTC"
     try:
-        return timezone(tz_str)
-    except Exception:
-        return UTC
+        _cached_local_tz = timezone(tz_str)
+        return _cached_local_tz
+    except UnknownTimeZoneError:
+        logger.warning("Invalid LOCAL_TIMEZONE %r; using UTC", tz_str)
+        _cached_local_tz = UTC
+        return _cached_local_tz
 
 
 def get_current_time_context() -> str:

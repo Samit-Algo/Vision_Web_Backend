@@ -32,7 +32,7 @@ from google.genai import types
 # Application
 # -----------------------------------------------------------------------------
 from ..core.config import get_settings
-from .exceptions import VisionAgentError
+from .exceptions import ValidationError, VisionAgentError
 from .tools.camera_selection_tool import (
     list_cameras as list_cameras_impl,
     resolve_camera as resolve_camera_impl,
@@ -184,13 +184,47 @@ NON-NEGOTIABLE RULES:
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     ZONE HANDLING (STRICT)
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    CRITICAL ZONE COLLECTION RULES (NON-NEGOTIABLE):
+    - NEVER generate, assume, or infer zone coordinates
+    - NEVER use example coordinates like (100,200), (300,400), etc.
+    - NEVER call set_field_value with zone data unless user explicitly provided it
+    - Zone coordinates MUST come from the user via the zone drawing UI ONLY
+    - NEVER create placeholder zones or "temporary" coordinates
+    
+    WHEN ZONE IS REQUIRED (zone in missing_fields):
     - Ask about zone ONLY AFTER source is set (camera_id or video_path)
-    - If zone is REQUIRED:
-    → ask once and wait
-    - If zone is OPTIONAL:
-    - Ask once
-    - If user says “no”, “skip”, or ignores → set zone = null
-    - NEVER re-ask zone once resolved
+    - Tell user they need to draw the zone using the UI interface
+    - Explain what type of zone is needed based on the rule:
+      * Polygon zones (min 3 points): restricted_zone, wall_climb_detection
+      * Line zones (exactly 2 points): class_count, box_count (for crossing detection)
+    - WAIT for zone_data to be provided via the drawing interface
+    - DO NOT proceed to other fields or confirmation until zone is received from UI
+    - DO NOT generate placeholder coordinates under any circumstances
+    
+    WHEN ZONE IS OPTIONAL:
+    - Ask once if user wants to define a zone
+    - If user says "no", "skip", or ignores → set zone = null via set_field_value
+    - NEVER assume or generate zone coordinates
+    
+    - NEVER re-ask zone once it has been provided by the user via UI
+
+    WHEN ZONE IS REQUIRED (zone in missing_fields):
+    - Ask about zone ONLY AFTER source is set (camera_id or video_path)
+    - Tell user they need to draw the zone using the UI interface
+    - Explain what type of zone is needed based on the rule:
+      * Polygon zones (min 3 points): restricted_zone, wall_climb_detection
+      * Line zones (exactly 2 points): class_count, box_count (for crossing detection)
+    - WAIT for zone_data to be provided via the drawing interface
+    - DO NOT proceed to other fields or confirmation until zone is received from UI
+    - DO NOT generate placeholder coordinates under any circumstances
+    
+    WHEN ZONE IS OPTIONAL:
+    - Ask once if user wants to define a zone
+    - If user says "no", "skip", or ignores → set zone = null via set_field_value
+    - NEVER assume or generate zone coordinates
+    
+    - NEVER re-ask zone once it has been provided by the user via UI
+
 
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     TIME WINDOW HANDLING
@@ -263,17 +297,67 @@ def load_env() -> None:
         logger.warning("Failed to load .env: %s", exc)
 
 
-def ensure_groq_api_key() -> str:
-    """Ensure GROQ_API_KEY is set; return it. Raises ValueError if missing."""
+def detect_model_provider(model_name: str) -> str:
+    """
+    Detect the LLM provider based on model name.
+    
+    Args:
+        model_name: The model identifier (e.g., "Gemini 2.5 Flash", "llama-3.3-70b-versatile")
+    
+    Returns:
+        Provider name: "gemini" or "groq"
+    """
+    model_lower = model_name.lower()
+    if "gemini" in model_lower:
+        return "gemini"
+    return "groq"
+
+
+def ensure_model_api_key(model_name: str) -> tuple[str, str]:
+    """
+    Ensure the appropriate API key is set based on the model provider.
+    Returns tuple of (provider, api_key).
+    
+    Args:
+        model_name: The model identifier to determine which provider to use
+    
+    Returns:
+        Tuple of (provider_name, api_key)
+    
+    Raises:
+        ValueError: If the required API key is not set
+    """
     load_env()
-    groq_api_key = os.getenv("GROQ_API_KEY", "")
-    if not groq_api_key:
-        raise ValueError(
-            "GROQ_API_KEY is not set. Please set it in your .env file or environment variables. "
-            "Provider-style models require the API key to be set."
+    provider = detect_model_provider(model_name)
+    
+    if provider == "gemini":
+        # Try multiple Gemini API key environment variables
+        api_key = (
+            os.getenv("GEMINI_API_KEY") or 
+            os.getenv("GOOGLE_API_KEY") or 
+            os.getenv("GOOGLE_GENAI_API_KEY") or
+            ""
         )
-    os.environ["GROQ_API_KEY"] = groq_api_key
-    return groq_api_key
+        if not api_key:
+            raise ValueError(
+                "Gemini API key is not set. Please set GEMINI_API_KEY, GOOGLE_API_KEY, or "
+                "GOOGLE_GENAI_API_KEY in your .env file or environment variables."
+            )
+        # Google ADK typically uses GOOGLE_API_KEY
+        os.environ["GOOGLE_API_KEY"] = api_key
+        os.environ["GEMINI_API_KEY"] = api_key
+        logger.info(f"Using Gemini provider for model: {model_name}")
+        return ("gemini", api_key)
+    
+    else:  # groq
+        api_key = os.getenv("GROQ_API_KEY", "")
+        if not api_key:
+            raise ValueError(
+                "GROQ_API_KEY is not set. Please set it in your .env file or environment variables."
+            )
+        os.environ["GROQ_API_KEY"] = api_key
+        logger.info(f"Using Groq provider for model: {model_name}")
+        return ("groq", api_key)
 
 
 def compact_rule(rule: dict) -> dict:
@@ -372,16 +456,16 @@ def create_tool_wrappers(current_session_id: str, current_user_id: Optional[str]
         return initialize_state_impl(rule_id=rule_id, session_id=current_session_id, user_id=current_user_id)
 
     def set_field_value_wrapper(field_values_json: Any) -> Dict:
-        """Update one or more fields in the agent state."""
-        # Groq tool calls frequently send structured JSON objects for this tool.
-        # Normalize to the JSON string expected by set_field_value_impl.
+        """Update one or more fields in the agent state. Expects a JSON object (dict) or JSON string."""
         if isinstance(field_values_json, dict):
             payload = json.dumps(field_values_json)
         elif isinstance(field_values_json, str):
-            # Defensive fallback if provider sends a raw JSON string.
             payload = field_values_json
         else:
-            payload = json.dumps({})
+            raise ValidationError(
+                "set_field_value expects a JSON object or JSON string",
+                user_message="Invalid input format for field values.",
+            )
         return set_field_value_impl(field_values_json=payload, session_id=current_session_id)
 
     def save_to_db_wrapper() -> Dict:
@@ -403,13 +487,6 @@ def create_tool_wrappers(current_session_id: str, current_user_id: Optional[str]
 
         agent_state = get_agent_state(current_session_id)
         user_id_for_camera = agent_state.user_id or current_user_id
-
-        if not user_id_for_camera:
-            return {
-                "error": "user_id is required. Agent state must have user_id set.",
-                "cameras": []
-            }
-
         return list_cameras_impl(user_id=user_id_for_camera, session_id=current_session_id)
 
     def resolve_camera_wrapper(name_or_id: str) -> Dict:
@@ -418,13 +495,6 @@ def create_tool_wrappers(current_session_id: str, current_user_id: Optional[str]
 
         agent_state = get_agent_state(current_session_id)
         user_id_for_camera = agent_state.user_id or current_user_id
-
-        if not user_id_for_camera:
-            return {
-                "status": "not_found",
-                "error": "user_id is required. Agent state must have user_id set."
-            }
-
         return resolve_camera_impl(name_or_id=name_or_id, user_id=user_id_for_camera, session_id=current_session_id)
 
     initialize_state_wrapper.__name__ = "initialize_state_wrapper"
@@ -450,7 +520,15 @@ def create_tool_wrappers(current_session_id: str, current_user_id: Optional[str]
 def create_agent_for_session(session_id: str = "default", user_id: Optional[str] = None) -> LlmAgent:
     """Create and configure the main agent for a session."""
     try:
-        ensure_groq_api_key()
+        settings = get_settings()
+        # Ensure the appropriate API key is set based on the configured model
+        provider, api_key = ensure_model_api_key(settings.agent_creation_model)
+        logger.info(
+            "Agent session %s initialized with provider: %s, model: %s",
+            session_id,
+            provider,
+            settings.agent_creation_model,
+        )
 
         from .session_state.agent_state import get_agent_state
 
@@ -467,26 +545,29 @@ def create_agent_for_session(session_id: str = "default", user_id: Optional[str]
                 """Per-turn dynamic instruction: minimal state + time."""
                 try:
                     return build_instruction_dynamic_with_session(context, current_session_id)
+                except VisionAgentError:
+                    raise
                 except Exception as e:
-                    logger.error(
+                    logger.exception(
                         "Failed to build dynamic instruction for session %s: %s",
                         current_session_id,
                         e,
                     )
-                    # Return minimal valid JSON instruction to allow agent to continue.
-                    return 'CURRENT_STATE_JSON:\n{"status":"COLLECTING"}\n'
+                    raise VisionAgentError(
+                        str(e),
+                        user_message="Failed to load session state. Please try again.",
+                    ) from e
 
             return instruction_provider
 
         dynamic_instruction = create_dynamic_instruction_provider(session_id)
         planner = BuiltInPlanner(
             thinking_config=types.ThinkingConfig(
-                include_thoughts=True,
+                include_thoughts=False,  # Hide internal thinking from user responses
                 thinking_budget=-1,
             )
         )
 
-        settings = get_settings()
         agent = LlmAgent(
             name="main_agent",
             description="A main agent that guides users through creating vision analytics agents.",
@@ -495,6 +576,9 @@ def create_agent_for_session(session_id: str = "default", user_id: Optional[str]
             tools=wrapped_tools,
             planner=planner,
             model=settings.agent_creation_model,
+            generate_content_config=types.GenerateContentConfig(
+                temperature=0.0,  # Deterministic responses
+            ),
         )
 
         logger.info("Agent created successfully for session %s", session_id)

@@ -12,7 +12,7 @@ from ...domain.constants import AgentFields
 from ...utils.datetime_utils import utc_now
 from ...utils.db import get_collection
 from ..session_state.agent_state import get_agent_state
-from ..exceptions import DatabaseError
+from ..exceptions import DatabaseError, RuleNotFoundError
 from .flow_diagram_utils import generate_agent_flow_diagram
 
 logger = logging.getLogger(__name__)
@@ -191,10 +191,9 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
         code: str,
         user_message: str,
         status_value: str,
-        details_internal: Optional[Dict[str, Any]] = None,
         retryable: bool = False,
     ) -> Dict[str, Any]:
-        payload = {
+        return {
             "error": code,
             "code": code,
             "user_message": user_message,
@@ -202,9 +201,7 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
             "saved": False,
             "message": user_message,
             "retryable": retryable,
-            "details_internal": details_internal or {},
         }
-        return payload
 
     try:
         if agent_repository is None:
@@ -235,16 +232,14 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
                 code="invalid_state_transition",
                 user_message="Agent is not ready to save. Please complete all required fields first.",
                 status_value=agent_state.status,
-                details_internal={"missing_fields": list(agent_state.missing_fields or [])},
                 retryable=False,
             )
 
         if agent_state.missing_fields:
             return failure(
                 code="missing_fields",
-                user_message=f"Please provide the following fields: {', '.join(agent_state.missing_fields)}",
+                user_message="Please provide all required fields before saving.",
                 status_value=agent_state.status,
-                details_internal={"missing_fields": list(agent_state.missing_fields)},
                 retryable=False,
             )
 
@@ -260,7 +255,7 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
         if run_mode and run_mode not in ["continuous", "patrol"]:
             return failure(
                 code="invalid_run_mode",
-                user_message=f"Invalid run mode: {run_mode}. Please use 'continuous' or 'patrol'.",
+                user_message="Invalid run mode. Please use continuous or patrol.",
                 status_value=agent_state.status,
                 retryable=False,
             )
@@ -269,10 +264,10 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
 
         try:
             rule = get_rule(agent_state.rule_id) if agent_state.rule_id else None
-        except ValueError as exc:
+        except RuleNotFoundError:
             return failure(
                 code="invalid_rule_id",
-                user_message=f"Configuration error: {str(exc)}",
+                user_message="The requested rule is not available.",
                 status_value=agent_state.status,
                 retryable=False,
             )
@@ -296,10 +291,10 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
                     if isinstance(end_time_str, str)
                     else end_time_str
                 )
-        except ValueError as exc:
+        except ValueError:
             return failure(
                 code="invalid_time_format",
-                user_message=f"Time format error: {str(exc)}",
+                user_message="Invalid time format. Please use a valid date and time.",
                 status_value=agent_state.status,
                 retryable=False,
             )
@@ -344,10 +339,10 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
         try:
             agent = Agent(**payload)
         except Exception as exc:
-            logger.exception("Invalid agent payload for session %s", session_id)
+            logger.exception("Invalid agent payload for session %s: %s", session_id, exc)
             return failure(
                 code="invalid_agent_payload",
-                user_message=f"Configuration error: {str(exc)}",
+                user_message="Invalid configuration. Please check the provided values.",
                 status_value=agent_state.status,
                 retryable=False,
             )
@@ -392,12 +387,11 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
             "code": "saved",
         }
     except Exception as exc:
-        logger.exception("Unexpected error saving agent for session %s", session_id)
+        logger.exception("Unexpected error saving agent for session %s: %s", session_id, exc)
         return failure(
             code="unexpected_save_error",
             user_message="An unexpected error occurred while saving. Please try again.",
             status_value="COLLECTING",
-            details_internal={"error": str(exc)},
             retryable=True,
         )
 

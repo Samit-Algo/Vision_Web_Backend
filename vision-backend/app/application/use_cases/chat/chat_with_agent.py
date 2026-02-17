@@ -16,6 +16,7 @@ from google.genai import types
 
 # Local application imports
 from ...dto.chat_dto import ChatMessageRequest, ChatMessageResponse
+from ....agents.exceptions import RuleNotFoundError, VisionAgentError, get_user_message
 from ....agents.main_agent import create_agent_for_session
 from ....domain.repositories.agent_repository import AgentRepository
 from ....domain.repositories.camera_repository import CameraRepository
@@ -54,8 +55,7 @@ def _compute_zone_required(agent_state) -> bool:
             rule = get_rule(agent_state.rule_id)
             run_mode = agent_state.fields.get("run_mode", "continuous")
             requires_zone = compute_requires_zone(rule, run_mode)
-        except (ValueError, KeyError):
-            # Rule not found or error - assume zone not required
+        except (RuleNotFoundError, KeyError):
             requires_zone = False
         
         # Check if zone is empty or not set
@@ -162,9 +162,7 @@ class ChatWithAgentUseCase:
                 user_content=user_content,
             )
 
-            response_to_return = (
-                final_response_text.strip() if final_response_text.strip() else last_model_response.strip()
-            )
+            response_to_return = final_response_text.strip()
 
             return await self._finalize_chat_response(
                 response_to_return=response_to_return,
@@ -172,6 +170,8 @@ class ChatWithAgentUseCase:
                 session_id=session_id,
                 status="success",
             )
+        except VisionAgentError:
+            raise
         except Exception as e:
             logger.exception("[chat] execute failed")
             return await self._finalize_chat_response(
@@ -214,11 +214,9 @@ class ChatWithAgentUseCase:
 
         agent = self._get_or_create_agent_cached(user_id=user_id, session_id=session_id)
 
-        if "internal_session_id" not in getattr(adk_session, "state", {}):
-            try:
-                adk_session.state["internal_session_id"] = session_id
-            except Exception:
-                pass
+        state = getattr(adk_session, "state", None)
+        if state is not None and "internal_session_id" not in state:
+            state["internal_session_id"] = session_id
 
         runner = Runner(app_name=app_name, agent=agent, session_service=self.session_service)
 
@@ -247,9 +245,7 @@ class ChatWithAgentUseCase:
                     final_response_text = chunk.get("final_response_text") or ""
                     last_model_response = chunk.get("last_model_response") or ""
 
-            response_to_return = (
-                final_response_text.strip() if final_response_text.strip() else last_model_response.strip()
-            )
+            response_to_return = final_response_text.strip()
 
             final_response = await self._finalize_chat_response(
                 response_to_return=response_to_return,
@@ -258,6 +254,8 @@ class ChatWithAgentUseCase:
                 status="success",
             )
             yield {"event": "done", "data": final_response.model_dump()}
+        except VisionAgentError:
+            raise
         except Exception as e:
             logger.exception("[chat] stream_execute failed")
             final_response = await self._finalize_chat_response(
@@ -267,7 +265,7 @@ class ChatWithAgentUseCase:
                 status="error",
                 error=e,
             )
-            yield {"event": "error", "data": {"message": str(e)}}
+            yield {"event": "error", "data": {"message": get_user_message(e)}}
             yield {"event": "done", "data": final_response.model_dump()}
 
     async def _finalize_chat_response(
@@ -281,20 +279,19 @@ class ChatWithAgentUseCase:
     ) -> ChatMessageResponse:
         """Apply flow diagram + zone flags and build ChatMessageResponse."""
         if status != "success":
-            # On error, still compute zone signals for UI consistency
             try:
                 from ....agents.session_state.agent_state import get_agent_state
 
                 agent_state = get_agent_state(session_id)
                 camera_id = agent_state.fields.get("camera_id")
-                zone_required = bool("zone" in agent_state.missing_fields)
+                zone_required = bool("zone" in (agent_state.missing_fields or []))
                 awaiting_zone_input = bool(zone_required and camera_id)
             except Exception:
+                camera_id = None
                 zone_required = False
                 awaiting_zone_input = False
-                camera_id = None
 
-            msg = f"I encountered an error: {str(error)}. Please try again." if error else "I encountered an error."
+            msg = get_user_message(error) if error else "Something went wrong. Please try again."
             return ChatMessageResponse(
                 response=msg,
                 session_id=session_id,
@@ -306,11 +303,10 @@ class ChatWithAgentUseCase:
                 zone_type=None,
             )
 
-        # Prefer response_to_return; fall back to last_model_response
-        response_text = response_to_return.strip() if response_to_return else last_model_response.strip()
+        response_text = (response_to_return or "").strip()
         response_text = _sanitize_assistant_text(response_text)
         if not response_text:
-            response_text = "I apologize, but I didn't receive a proper response."
+            response_text = "Something went wrong. Please try again."
 
         # Get current internal state only (single source of truth).
         from ....agents.session_state.agent_state import get_agent_state
@@ -367,7 +363,7 @@ class ChatWithAgentUseCase:
                 if zone_support.get("supported", True) is False:
                     zone_required = False
                     awaiting_zone_input = False
-            except (ValueError, KeyError):
+            except (RuleNotFoundError, KeyError):
                 pass
 
         # Zone UI is only valid after camera selection is confirmed in state.
@@ -396,8 +392,8 @@ class ChatWithAgentUseCase:
                     rule = get_rule(agent_state.rule_id)
                     zone_support = rule.get("zone_support", {})
                     zone_type = zone_support.get("zone_type", "polygon")  # Default to polygon
-                except (ValueError, KeyError):
-                    zone_type = "polygon"  # Default
+                except (RuleNotFoundError, KeyError):
+                    zone_type = "polygon"
 
         return ChatMessageResponse(
             response=response_text,

@@ -16,7 +16,7 @@ from fastapi.responses import StreamingResponse
 # -----------------------------------------------------------------------------
 # Application
 # -----------------------------------------------------------------------------
-from ...agents.exceptions import ValidationError
+from ...agents.exceptions import ValidationError, VisionAgentError, get_user_message
 from ...application.dto.chat_dto import ChatMessageRequest, ChatMessageResponse
 from ...application.dto.user_dto import UserResponse
 from ...application.use_cases.chat.chat_with_agent import ChatWithAgentUseCase
@@ -48,10 +48,15 @@ async def chat_message(
         return await use_case.execute(request=request, user_id=current_user.id)
     except ValidationError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.user_message)
-    except Exception as e:
+    except VisionAgentError as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Chat error",
+            detail=e.user_message,
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Something went wrong. Please try again.",
         )
 
 
@@ -72,14 +77,26 @@ async def chat_message_stream(
                 yield encode_sse(str(ev), data if isinstance(data, dict) else {"data": data})
         except ValidationError as e:
             yield encode_sse("error", {"message": e.user_message})
-            sid = request.session_id or "validation-error"
             yield encode_sse("done", ChatMessageResponse(
                 response=e.user_message,
-                session_id=sid,
+                session_id=request.session_id or "validation-error",
+                status="error",
+            ).model_dump())
+        except VisionAgentError as e:
+            yield encode_sse("error", {"message": e.user_message})
+            yield encode_sse("done", ChatMessageResponse(
+                response=e.user_message,
+                session_id=request.session_id or "error",
                 status="error",
             ).model_dump())
         except Exception as e:
-            yield encode_sse("error", {"message": str(e)})
+            msg = get_user_message(e)
+            yield encode_sse("error", {"message": msg})
+            yield encode_sse("done", ChatMessageResponse(
+                response=msg,
+                session_id=request.session_id or "error",
+                status="error",
+            ).model_dump())
 
     return StreamingResponse(
         event_generator(),
