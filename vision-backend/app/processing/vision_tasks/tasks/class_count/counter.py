@@ -87,16 +87,34 @@ def filter_detections_by_class(
     Returns:
         List of (bbox, score) tuples for matching detections
     """
+    filtered, _ = filter_detections_by_class_with_indices(detections, target_class)
+    return filtered
+
+
+def filter_detections_by_class_with_indices(
+    detections: DetectionPacket,
+    target_class: str,
+) -> Tuple[List[Tuple[List[float], float]], List[int]]:
+    """
+    Filter detections by class while preserving original detection indices.
+    Shared by fall_detection and wall_climb_detection for tracker-based scenarios.
+
+    Returns:
+        (filtered_detections, original_indices) where
+        filtered_detections = list of (bbox, score), original_indices = list of indices into detections
+    """
     boxes = detections.boxes
     classes = detections.classes
     scores = detections.scores
     filtered: List[Tuple[List[float], float]] = []
+    original_indices: List[int] = []
     class_name_lower = target_class.lower()
     for i, detected_class in enumerate(classes):
         if isinstance(detected_class, str) and detected_class.lower() == class_name_lower:
             if i < len(boxes) and i < len(scores):
                 filtered.append((list(boxes[i]), float(scores[i])))
-    return filtered
+                original_indices.append(i)
+    return filtered, original_indices
 
 
 def generate_count_label(

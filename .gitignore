@@ -37,3 +37,5 @@ vision-backend/event_videos/*.mp4
 !vision-backend/box_detection.pt
 !vision-backend/fire_detection.pt
 back_up_models
+*.jpg
+wall_climb_detection_frames/

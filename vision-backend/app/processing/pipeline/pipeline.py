@@ -205,6 +205,7 @@ def evaluate_rules_stage(
             # 1970-era datetimes that cause OSError [Errno 22] on Windows when .timestamp() is used in reporters)
             frame_timestamp = utc_now()
 
+            # Pack this frame's data into the context that scenarios expect (frame, detections, etc.)
             frame_context = ScenarioFrameContext(
                 frame=frame_packet.frame,
                 frame_index=context.frame_index,
@@ -214,17 +215,21 @@ def evaluate_rules_stage(
                 pipeline_context=context
             )
 
+            # Run the scenario (e.g. fall_detection, intrusion); returns list of ScenarioEvent or []
             scenario_events = scenario_instance.process(frame_context)
 
             if scenario_events:
+                # Use the first event from this scenario
                 scenario_event = scenario_events[0]
 
+                # Build report from scenario metadata (for notifications/UI)
                 report = None
                 if scenario_event.metadata:
                     report = scenario_event.metadata.get("report")
                     if report is None:
                         report = {k: v for k, v in scenario_event.metadata.items() if k != "report"}
 
+                # Convert ScenarioEvent to rule_result dict (label, indices, report, event_type)
                 rule_result = {
                     "label": scenario_event.label,
                     "matched_detection_indices": scenario_event.detection_indices,
@@ -233,9 +238,11 @@ def evaluate_rules_stage(
                 }
 
                 if rule_result:
+                    # Collect all detection indices that matched any rule (for drawing/highlights)
                     idx_list = rule_result.get("matched_detection_indices")
                     if isinstance(idx_list, list):
                         all_matched_indices.extend(idx_list)
+                    # First rule that fires becomes the "winning" event for this frame
                     if not event and rule_result.get("label"):
                         event = rule_result
                         event.setdefault("rule_index", rule_idx)
@@ -243,6 +250,7 @@ def evaluate_rules_stage(
             print(f"[evaluate_rules_stage] ⚠️  Error processing scenario '{rule_type}': {exc}")
             continue
 
+    # Wrap the winning event (if any) as a RuleMatch for drawing and handle_event
     rule_match = None
     if event and event.get("label"):
         rule_match = RuleMatch(
@@ -731,6 +739,16 @@ class PipelineRunner:
                     fall_confirmed_orig_for_draw = [i for i in fall_confirmed_orig_for_draw if 0 <= i < keypoints_count]
                 detections["fall_suspected_indices"] = fall_suspected_orig_for_draw
                 detections["fall_confirmed_indices"] = fall_confirmed_orig_for_draw
+            
+            # Wall climb detection: pass confirmed indices so keypoints can be drawn red (VLM-confirmed)
+            # Use original indices from scenario state (they match merged_packet keypoints order)
+            if is_wall_climb_detection and wall_climb_scenario and hasattr(wall_climb_scenario, "_state"):
+                wall_climb_confirmed_orig_for_draw = wall_climb_scenario._state.get("confirmed_detection_indices") or []
+                # Ensure indices are valid (within keypoints range)
+                keypoints_count = len(getattr(merged_packet, "keypoints", []) or [])
+                if keypoints_count > 0:
+                    wall_climb_confirmed_orig_for_draw = [i for i in wall_climb_confirmed_orig_for_draw if 0 <= i < keypoints_count]
+                detections["wall_climb_confirmed_indices"] = wall_climb_confirmed_orig_for_draw
             # Draw annotations based on scenario type
             # For line-based counting (box_count/class_count), frontend handles drawing
             # Backend only draws for pose keypoints or regular bounding boxes
@@ -794,8 +812,9 @@ class PipelineRunner:
 
             # For restricted zone: indices into filtered detections that are inside the zone (for per-box red coloring)
             in_zone_indices: List[int] = []
-            # Wall climb: red when person is above user zone (no orange)
-            wall_climb_red_indices: List[int] = []
+            # Wall climb: confirmed violations (VLM-confirmed) for red keypoints (no bounding boxes)
+            wall_climb_confirmed_indices: List[int] = []
+            wall_climb_red_indices: List[int] = []  # Deprecated: kept for backward compatibility
             wall_climb_orange_indices: List[int] = []  # Unused; kept for payload compatibility
 
             # Filter detections based on scenario type (include keypoints for fall_detection/pose)
@@ -821,23 +840,25 @@ class PipelineRunner:
                                 in_zone_indices.append(filtered_idx)
                             filtered_idx += 1
             elif is_wall_climb_detection and target_class:
-                # Show ALL detections of target class; anyone above zone = red only (no orange).
+                # Show ALL detections of target class with keypoints (for red keypoint visualization, no bounding boxes)
                 f_boxes, f_classes, f_scores, f_keypoints = self.filter_detections_by_class(
                     target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores,
                     keypoints_src, confidence_threshold=0.5
                 )
-                state_red = []
+                # Map confirmed_detection_indices from scenario state (VLM-confirmed violations) to filtered indices
+                confirmed_orig = []
                 if wall_climb_scenario and hasattr(wall_climb_scenario, '_state'):
-                    state_red = wall_climb_scenario._state.get("red_indices") or []
-                orig_red = set(state_red)
-                filtered_idx = 0
-                for orig_idx in range(len(merged_packet.boxes)):
-                    if orig_idx < len(merged_packet.classes):
-                        det_class = merged_packet.classes[orig_idx]
-                        if isinstance(det_class, str) and det_class.lower() == target_class:
-                            if orig_idx in orig_red:
-                                wall_climb_red_indices.append(filtered_idx)
-                            filtered_idx += 1
+                    confirmed_orig = wall_climb_scenario._state.get("confirmed_detection_indices") or []
+                # Create mapping: original index -> filtered index
+                person_original_indices = []
+                for idx, (cls, score) in enumerate(zip(merged_packet.classes, merged_packet.scores)):
+                    if isinstance(cls, str) and cls.strip().lower() == target_class and score >= 0.5:
+                        person_original_indices.append(idx)
+                # Map confirmed original indices to filtered indices
+                wall_climb_confirmed_filtered = [i for i, o in enumerate(person_original_indices) if o in confirmed_orig]
+                wall_climb_confirmed_indices = wall_climb_confirmed_filtered
+                # Legacy: keep empty for backward compatibility (no bounding boxes)
+                wall_climb_red_indices = []
             elif is_fire_detection and fire_classes:
                 # Show ALL fire-related detections (fire, flame, smoke)
                 f_boxes, f_classes, f_scores, f_keypoints = self.filter_detections_by_fire_classes(
@@ -919,12 +940,8 @@ class PipelineRunner:
             draw_zone_polygon(processed_frame, restricted_zone_coordinates, width, height)
             draw_zone_line(processed_frame, line_zone, width, height)
             draw_boxes_in_zone_red(processed_frame, f_boxes, f_classes, f_scores, in_zone_indices)
-            # Wall climb: only red when person is above user zone (no orange)
-            if is_wall_climb_detection and wall_climb_red_indices:
-                draw_boxes_in_zone_red(
-                    processed_frame, f_boxes, f_classes, f_scores,
-                    wall_climb_red_indices, color_in_zone=(0, 0, 255)
-                )
+            # Wall climb: NO bounding boxes - only red keypoints are drawn after VLM confirmation
+            # Bounding boxes removed for wall climb detection as per requirement
             # Fall detection: NO bounding boxes - only keypoints are drawn (orange/red)
             # Bounding boxes removed for fall detection as per requirement
 
@@ -1000,7 +1017,8 @@ class PipelineRunner:
                 "fire_detected": fire_detected,  # Fire detection status (for red bounding boxes)
                 "in_zone_indices": in_zone_indices,  # Restricted zone: indices of filtered detections inside zone (red box only these)
                 "sleep_confirmed_indices": sleep_confirmed_indices,  # Sleep: same person box, red when VLM confirmed
-                "wall_climb_red_indices": wall_climb_red_indices,  # Wall climb: person above zone (red only)
+                "wall_climb_confirmed_indices": wall_climb_confirmed_indices,  # Wall climb: VLM-confirmed violations (red keypoints only, no bounding boxes)
+                "wall_climb_red_indices": wall_climb_red_indices,  # Deprecated: kept for backward compatibility
                 "wall_climb_orange_indices": wall_climb_orange_indices,  # Unused; kept for UI compatibility
                 "fall_detected": bool(is_fall_detection and fall_red_indices),  # Fall: show red alert on UI
                 "fall_red_indices": fall_red_indices,  # Fall: confirmed fall (red keypoints/boxes)

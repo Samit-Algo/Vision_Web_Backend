@@ -281,13 +281,16 @@ def draw_pose_keypoints(
         return out
 
     # Fall detection: orange = suspected, red = confirmed (indices = detection index in merged_packet)
+    # Wall climb detection: red = VLM-confirmed climbing (indices = detection index in merged_packet)
     # Note: indices must match the order in keypoints_list (which comes from merged_packet, all detections)
     fall_confirmed_indices = detections.get("fall_confirmed_indices") or []
     fall_suspected_indices = detections.get("fall_suspected_indices") or []
+    wall_climb_confirmed_indices = detections.get("wall_climb_confirmed_indices") or []
     # Filter to only valid indices (within keypoints_list range)
     max_idx = len(keypoints_list) - 1
     fall_confirmed_set = set(i for i in fall_confirmed_indices if 0 <= i <= max_idx)
     fall_suspected_set = set(i for i in fall_suspected_indices if 0 <= i <= max_idx)
+    wall_climb_confirmed_set = set(i for i in wall_climb_confirmed_indices if 0 <= i <= max_idx)
 
     point_radius = 3
     skeleton_thickness = 2
@@ -297,7 +300,11 @@ def draw_pose_keypoints(
         if not person_kps:
             continue
         # Check confirmed first (highest priority) - red keypoints
-        if person_idx in fall_confirmed_set:
+        # Wall climb confirmed takes priority (VLM-confirmed climbing)
+        if person_idx in wall_climb_confirmed_set:
+            point_color = (0, 0, 255)  # BGR red – VLM-confirmed wall climb
+            skeleton_color = (0, 0, 255)
+        elif person_idx in fall_confirmed_set:
             point_color = (0, 0, 255)  # BGR red – confirmed fall
             skeleton_color = (0, 0, 255)
         # Then check suspected - orange keypoints

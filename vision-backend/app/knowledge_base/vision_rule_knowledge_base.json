@@ -621,7 +621,7 @@
           "Monitor for people climbing the boundary"
         ],
       
-        "model": "yolov8l.pt",
+        "model": "yolov8l-pose.pt",
       
         "detectable_classes": [
           "person"
