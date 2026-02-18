@@ -51,6 +51,18 @@ class FallDetectionConfig:
         # Head-hip vertical separation: when lying, head and hip are at similar vertical level
         self.head_hip_vertical_ratio_max = float(config.get("head_hip_vertical_ratio_max", 0.5))
 
+        # --- VLM Configuration ---
+        # Enable/disable VLM confirmation (if False, uses timeout-based confirmation)
+        self.vlm_enabled = config.get("vlm_enabled", True)
+        # Minimum confidence from VLM to confirm fall (0.0-1.0)
+        self.vlm_confidence_threshold = float(config.get("vlm_confidence_threshold", 0.7))
+        # Minimum seconds between VLM calls for the same person (throttling)
+        self.vlm_throttle_seconds = float(config.get("vlm_throttle_seconds", 5.0))
+        # Directory to save frames sent to VLM (for debugging)
+        self.vlm_frames_dir = str(config.get("vlm_frames_dir", "./vlm_frames/fall_detection"))
+        # Size of frame buffer for VLM (should be >= 5 for 5-frame VLM call)
+        self.vlm_buffer_size = int(config.get("vlm_buffer_size", 20))
+
         # Legacy / compatibility (used as fallbacks in analysis)
         self.lying_angle_threshold = float(config.get("lying_angle_threshold", 38))
         self.hip_drop_threshold = float(config.get("hip_drop_threshold", 12))
