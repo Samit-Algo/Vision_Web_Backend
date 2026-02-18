@@ -1,56 +1,46 @@
-# Standard library imports
+"""
+Chat-with-agent use case: execute and stream agent creation conversations.
+"""
+
+import asyncio
 import json
-import logging
 import re
 import threading
-import asyncio
 import uuid
-from typing import Optional, Tuple, AsyncGenerator, Dict, Any
+from typing import Any, AsyncGenerator, Dict, Optional, Tuple
 
-# External package imports
 from google.adk.agents import LlmAgent
+from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.runners import Runner
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
-from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.genai import types
 
-# Local application imports
 from ...dto.chat_dto import ChatMessageRequest, ChatMessageResponse
-from ....agents.exceptions import RuleNotFoundError, VisionAgentError, get_user_message
-from ....agents.main_agent import create_agent_for_session
+from ....agents.agent_chat import create_agent_for_session, get_agent_state
+from ....agents.agent_chat.tools import set_agent_repository, set_camera_repository
+from ....agents.exceptions import RuleNotFoundError, VisionAgentError
 from ....domain.repositories.agent_repository import AgentRepository
 from ....domain.repositories.camera_repository import CameraRepository
-from ....agents.tools.save_to_db_tool import (
-    set_agent_repository,
-    set_camera_repository,
-)
 
+APP_NAME = "vision-agent-chat"
 
-logger = logging.getLogger(__name__)
+# Max attempts (1 initial + retries). Never show technical errors to the user.
+CHAT_MAX_ATTEMPTS = 3
+CHAT_RETRY_USER_MESSAGE = "Please try again."
 
 
 def _sanitize_assistant_text(text: str) -> str:
-    """Remove lightweight wrapper tags that should not be displayed to users."""
+    """Strip display-only tags from assistant text."""
     if not text:
         return text
     return re.sub(r"</?question>", "", text, flags=re.IGNORECASE).strip()
 
 
 def _compute_zone_required(agent_state) -> bool:
-    """
-    Compute if zone is required based on state and knowledge base.
-    Deterministic - never manually set.
-    
-    Args:
-        agent_state: The current agent state
-
-    Returns:
-        True if zone is required (requires_zone is True from KB and zone is None/empty)
-    """
-    # If state is initialized, compute from KB
+    """True if zone is required (from KB) and not yet set."""
     if agent_state.rule_id:
         # Compute requires_zone from knowledge base (derived state, not stored)
-        from ....agents.tools.kb_utils import get_rule, compute_requires_zone
+        from ....agents.agent_chat.tools import get_rule, compute_requires_zone
         try:
             rule = get_rule(agent_state.rule_id)
             run_mode = agent_state.fields.get("run_mode", "continuous")
@@ -72,38 +62,26 @@ def _compute_zone_required(agent_state) -> bool:
                 zone_required_by_kb = True
         
         return zone_required_by_kb
-    
-    # State not initialized (no rule_id) - do NOT infer zone from response text.
-    # Listing rules (e.g. "get all rules") produces text that mentions many rules
-    # (object enter zone, class count, etc.), which would incorrectly set zone_required=True.
-    # Only require zone when the agent has explicitly asked for it (zone in missing_fields).
     if "zone" in agent_state.missing_fields:
         return True
-
     return False
 
 
 class ChatWithAgentUseCase:
-    """Use case for chatting with the agent chatbot"""
-    
-    # Shared session service across all instances (singleton pattern)
-    _shared_session_service: Optional[InMemorySessionService] = None
-    # Shared agent cache across all instances (singleton pattern)
-    # Keyed by (user_id, session_id) to avoid cross-user leakage.
-    _shared_agent_cache: dict[Tuple[str, str], LlmAgent] = {}
-    _shared_agent_cache_lock = threading.Lock()
-    
+    """Execute and stream agent-creation chat; single session service and agent cache per (user_id, session_id)."""
+
+    _session_service: Optional[InMemorySessionService] = None
+    _agent_cache: dict[Tuple[str, str], LlmAgent] = {}
+    _cache_lock = threading.Lock()
+
     def __init__(
         self,
         agent_repository: Optional[AgentRepository] = None,
         camera_repository: Optional[CameraRepository] = None,
     ) -> None:
-        # Use shared session service to persist sessions across requests
-        if ChatWithAgentUseCase._shared_session_service is None:
-            ChatWithAgentUseCase._shared_session_service = InMemorySessionService()
-        self.session_service = ChatWithAgentUseCase._shared_session_service
-
-        # Set up repositories for tools if provided
+        if ChatWithAgentUseCase._session_service is None:
+            ChatWithAgentUseCase._session_service = InMemorySessionService()
+        self.session_service = ChatWithAgentUseCase._session_service
         if agent_repository:
             set_agent_repository(agent_repository)
         if camera_repository:
@@ -124,19 +102,14 @@ class ChatWithAgentUseCase:
         Returns:
             ChatMessageResponse with agent's response
         """
-        # user_id is required for agent creation (save_to_db) and camera listing
         if not user_id:
             from ....agents.exceptions import ValidationError
             raise ValidationError(
                 "user_id is required for agent creation chat",
-                user_message="Authentication required. Please sign in to create agents."
+                user_message="Authentication required. Please sign in to create agents.",
             )
-
-        # App name for ADK session service
-        app_name = "vision-agent-chat"
-        
         adk_session, session_id = await self._get_or_create_adk_session(
-            app_name=app_name,
+            app_name=APP_NAME,
             user_id=user_id,
             session_id=request.session_id,
         )
@@ -147,40 +120,43 @@ class ChatWithAgentUseCase:
         if "internal_session_id" not in adk_session.state:
             adk_session.state["internal_session_id"] = session_id
 
-        runner = Runner(app_name=app_name, agent=agent, session_service=self.session_service)
+        runner = Runner(app_name=APP_NAME, agent=agent, session_service=self.session_service)
 
         user_message = self._build_user_message(
             request=request, session_id=session_id, user_id=user_id
         )
+        user_message = self._apply_backend_time_safety(
+            session_id=session_id, user_id=user_id, user_message=user_message
+        )
         user_content = types.Content(role="user", parts=[types.Part(text=user_message)])
 
-        try:
-            final_response_text, last_model_response = await self._run_agent_and_collect_text(
-                runner=runner,
-                user_id=user_id,
-                adk_session_id=session_id,
-                user_content=user_content,
-            )
-
-            response_to_return = final_response_text.strip()
-
-            return await self._finalize_chat_response(
-                response_to_return=response_to_return,
-                last_model_response=last_model_response,
-                session_id=session_id,
-                status="success",
-            )
-        except VisionAgentError:
-            raise
-        except Exception as e:
-            logger.exception("[chat] execute failed")
-            return await self._finalize_chat_response(
-                response_to_return="",
-                last_model_response="",
-                session_id=session_id,
-                status="error",
-                error=e,
-            )
+        last_error = None
+        for attempt in range(CHAT_MAX_ATTEMPTS):
+            try:
+                final_response_text, last_model_response = await self._run_agent_and_collect_text(
+                    runner=runner,
+                    user_id=user_id,
+                    adk_session_id=session_id,
+                    user_content=user_content,
+                )
+                response_to_return = final_response_text.strip()
+                return await self._finalize_chat_response(
+                    response_to_return=response_to_return,
+                    last_model_response=last_model_response,
+                    session_id=session_id,
+                    status="success",
+                )
+            except Exception as e:
+                last_error = e
+                if attempt + 1 >= CHAT_MAX_ATTEMPTS:
+                    break
+        return await self._finalize_chat_response(
+            response_to_return="",
+            last_model_response="",
+            session_id=session_id,
+            status="error",
+            error=None,
+        )
 
     async def stream_execute(
         self,
@@ -204,10 +180,8 @@ class ChatWithAgentUseCase:
                 user_message="Authentication required. Please sign in to create agents."
             )
 
-        app_name = "vision-agent-chat"
-
         adk_session, session_id = await self._get_or_create_adk_session(
-            app_name=app_name,
+            app_name=APP_NAME,
             user_id=user_id,
             session_id=request.session_id,
         )
@@ -218,55 +192,57 @@ class ChatWithAgentUseCase:
         if state is not None and "internal_session_id" not in state:
             state["internal_session_id"] = session_id
 
-        runner = Runner(app_name=app_name, agent=agent, session_service=self.session_service)
+        runner = Runner(app_name=APP_NAME, agent=agent, session_service=self.session_service)
 
         user_message = self._build_user_message(
             request=request, session_id=session_id, user_id=user_id
         )
+        user_message = self._apply_backend_time_safety(
+            session_id=session_id, user_id=user_id, user_message=user_message
+        )
         user_content = types.Content(role="user", parts=[types.Part(text=user_message)])
 
-        # Let the client know the session_id immediately so UI can persist it mid-stream
         yield {"event": "meta", "data": {"session_id": session_id}}
 
-        try:
-            final_response_text = ""
-            last_model_response = ""
-            async for chunk in self._run_agent_stream(
-                runner=runner,
-                user_id=user_id,
-                adk_session_id=session_id,
-                user_content=user_content,
-            ):
-                if chunk.get("type") == "token":
-                    delta = chunk.get("delta") or ""
-                    if delta:
-                        yield {"event": "token", "data": {"delta": delta}}
-                elif chunk.get("type") == "result":
-                    final_response_text = chunk.get("final_response_text") or ""
-                    last_model_response = chunk.get("last_model_response") or ""
+        for attempt in range(CHAT_MAX_ATTEMPTS):
+            try:
+                final_response_text = ""
+                last_model_response = ""
+                async for chunk in self._run_agent_stream(
+                    runner=runner,
+                    user_id=user_id,
+                    adk_session_id=session_id,
+                    user_content=user_content,
+                ):
+                    if chunk.get("type") == "token":
+                        delta = chunk.get("delta") or ""
+                        if delta:
+                            yield {"event": "token", "data": {"delta": delta}}
+                    elif chunk.get("type") == "result":
+                        final_response_text = chunk.get("final_response_text") or ""
+                        last_model_response = chunk.get("last_model_response") or ""
 
-            response_to_return = final_response_text.strip()
+                response_to_return = final_response_text.strip()
+                final_response = await self._finalize_chat_response(
+                    response_to_return=response_to_return,
+                    last_model_response=last_model_response,
+                    session_id=session_id,
+                    status="success",
+                )
+                yield {"event": "done", "data": final_response.model_dump()}
+                return
+            except Exception:
+                if attempt + 1 >= CHAT_MAX_ATTEMPTS:
+                    break
 
-            final_response = await self._finalize_chat_response(
-                response_to_return=response_to_return,
-                last_model_response=last_model_response,
-                session_id=session_id,
-                status="success",
-            )
-            yield {"event": "done", "data": final_response.model_dump()}
-        except VisionAgentError:
-            raise
-        except Exception as e:
-            logger.exception("[chat] stream_execute failed")
-            final_response = await self._finalize_chat_response(
-                response_to_return="",
-                last_model_response="",
-                session_id=session_id,
-                status="error",
-                error=e,
-            )
-            yield {"event": "error", "data": {"message": get_user_message(e)}}
-            yield {"event": "done", "data": final_response.model_dump()}
+        final_response = await self._finalize_chat_response(
+            response_to_return="",
+            last_model_response="",
+            session_id=session_id,
+            status="error",
+            error=None,
+        )
+        yield {"event": "done", "data": final_response.model_dump()}
 
     async def _finalize_chat_response(
         self,
@@ -280,7 +256,7 @@ class ChatWithAgentUseCase:
         """Apply flow diagram + zone flags and build ChatMessageResponse."""
         if status != "success":
             try:
-                from ....agents.session_state.agent_state import get_agent_state
+                from ....agents.agent_chat import get_agent_state
 
                 agent_state = get_agent_state(session_id)
                 camera_id = agent_state.fields.get("camera_id")
@@ -291,7 +267,7 @@ class ChatWithAgentUseCase:
                 zone_required = False
                 awaiting_zone_input = False
 
-            msg = get_user_message(error) if error else "Something went wrong. Please try again."
+            msg = CHAT_RETRY_USER_MESSAGE
             return ChatMessageResponse(
                 response=msg,
                 session_id=session_id,
@@ -305,13 +281,22 @@ class ChatWithAgentUseCase:
 
         response_text = (response_to_return or "").strip()
         response_text = _sanitize_assistant_text(response_text)
-        if not response_text:
-            response_text = "Something went wrong. Please try again."
 
-        # Get current internal state only (single source of truth).
-        from ....agents.session_state.agent_state import get_agent_state
+        # Get current internal state (needed for zone fallback and response building).
+        from ....agents.agent_chat import get_agent_state
 
         agent_state = get_agent_state(session_id)
+
+        if not response_text:
+            zone_required = _compute_zone_required(agent_state)
+            awaiting_zone = bool(
+                agent_state.fields.get("camera_id")
+                and "zone" in (agent_state.missing_fields or [])
+            )
+            if status == "success" and awaiting_zone and zone_required:
+                response_text = "Please draw the monitoring zone in the editor below."
+            else:
+                response_text = CHAT_RETRY_USER_MESSAGE
 
         # Check if agent was just saved and attach flow diagram data
         flow_diagram_data = None
@@ -324,21 +309,11 @@ class ChatWithAgentUseCase:
                 saved_agent = await agent_repository.find_by_id(agent_state.saved_agent_id)
 
                 if saved_agent:
-                    from ....agents.tools.flow_diagram_utils import generate_agent_flow_diagram
-
-                    # Generate raw diagram data (single generation, frontend transforms)
+                    from ....agents.agent_chat.tools import generate_agent_flow_diagram
                     flow_diagram_data = generate_agent_flow_diagram(saved_agent)
-
-                    logger.debug(
-                        "[chat] flow diagram generated (nodes=%d, links=%d)",
-                        len(flow_diagram_data.get("nodes", [])),
-                        len(flow_diagram_data.get("links", [])),
-                    )
-
-                    # Add a simple text indicator for user context
                     response_text += "\n\n---\n\n## Processing Flow Diagram\n\n*Your agent's processing flow is shown below.*"
             except Exception:
-                logger.exception("[chat] failed to generate flow diagram")
+                pass
 
         # Deterministic camera gating: if camera is still missing in RTSP flow, force a stable prompt.
         source_type = str(agent_state.fields.get("source_type") or "").strip().lower()
@@ -356,7 +331,7 @@ class ChatWithAgentUseCase:
 
         # Do not show zone UI for rules that do not support zones (e.g. sleep_detection).
         if agent_state.rule_id:
-            from ....agents.tools.kb_utils import get_rule
+            from ....agents.agent_chat.tools import get_rule
             try:
                 rule = get_rule(agent_state.rule_id)
                 zone_support = rule.get("zone_support", {})
@@ -375,23 +350,13 @@ class ChatWithAgentUseCase:
         zone_type = None
 
         if (awaiting_zone_input or zone_required) and camera_id:
-            logger.debug(
-                "[chat] Zone UI triggered: awaiting=%s, required=%s, camera=%s",
-                awaiting_zone_input,
-                zone_required,
-                camera_id,
-            )
-            
-            # Generate snapshot URL for the camera
             frame_snapshot_url = f"/api/v1/cameras/{camera_id}/snapshot"
-            
-            # Determine zone type from rule
             if agent_state.rule_id:
-                from ....agents.tools.kb_utils import get_rule
+                from ....agents.agent_chat.tools import get_rule
                 try:
                     rule = get_rule(agent_state.rule_id)
                     zone_support = rule.get("zone_support", {})
-                    zone_type = zone_support.get("zone_type", "polygon")  # Default to polygon
+                    zone_type = zone_support.get("zone_type", "polygon")
                 except (RuleNotFoundError, KeyError):
                     zone_type = "polygon"
 
@@ -399,7 +364,7 @@ class ChatWithAgentUseCase:
             response=response_text,
             session_id=session_id,
             status="success",
-            camera_id=camera_id,  # Always include camera_id if available
+            camera_id=camera_id,
             zone_required=zone_required,
             awaiting_zone_input=awaiting_zone_input,
             frame_snapshot_url=frame_snapshot_url,
@@ -416,10 +381,8 @@ class ChatWithAgentUseCase:
             )
 
         try:
-            from ....agents.tools.camera_selection_tool import list_cameras
+            from ....agents.agent_chat.tools import list_cameras
 
-            # camera_selection_tool currently exposes sync list_cameras().
-            # Run in thread to keep this async path non-blocking.
             result = await asyncio.to_thread(
                 list_cameras, user_id=user_id, session_id=session_id
             )
@@ -435,7 +398,6 @@ class ChatWithAgentUseCase:
             lines.append("Reply with one camera name or camera ID from this list.")
             return "\n".join(lines)
         except Exception:
-            logger.exception("[chat] failed to build camera selection prompt")
             return "Please provide a camera name or camera ID from your account to continue."
 
     async def _run_agent_stream(
@@ -534,7 +496,6 @@ class ChatWithAgentUseCase:
                     session_id=session_id,
                 )
             except Exception:
-                logger.debug("[chat] get_session failed; will create a new session", exc_info=True)
                 adk_session = None
 
         if adk_session:
@@ -550,8 +511,6 @@ class ChatWithAgentUseCase:
                 session_id=session_id,
             )
         except Exception:
-            # If create fails (e.g. already exists), try to get it again; otherwise create with a new ID.
-            logger.debug("[chat] create_session failed; retrying get_session", exc_info=True)
             adk_session = await self.session_service.get_session(
                 app_name=app_name,
                 user_id=user_id,
@@ -570,11 +529,11 @@ class ChatWithAgentUseCase:
     def _get_or_create_agent_cached(self, *, user_id: str, session_id: str) -> LlmAgent:
         """Get or create the ADK agent instance for this (user_id, session_id)."""
         cache_key = (user_id, session_id)
-        with ChatWithAgentUseCase._shared_agent_cache_lock:
-            agent = ChatWithAgentUseCase._shared_agent_cache.get(cache_key)
+        with ChatWithAgentUseCase._cache_lock:
+            agent = ChatWithAgentUseCase._agent_cache.get(cache_key)
             if agent is None:
                 agent = create_agent_for_session(session_id=session_id, user_id=user_id)
-                ChatWithAgentUseCase._shared_agent_cache[cache_key] = agent
+                ChatWithAgentUseCase._agent_cache[cache_key] = agent
             return agent
 
     def _build_user_message(
@@ -591,7 +550,7 @@ class ChatWithAgentUseCase:
             # If agent state is already initialized, set zone deterministically (do not rely on LLM parsing).
             # Otherwise, fall back to appending zone JSON into the user message for rule selection stage.
             try:
-                from ....agents.session_state.agent_state import get_agent_state
+                from ....agents.agent_chat import get_agent_state
 
                 agent_state = get_agent_state(session_id)
                 if agent_state.rule_id:
@@ -609,7 +568,7 @@ class ChatWithAgentUseCase:
                 user_message = user_message + "\n\nZone data: " + zone_json
 
         if request.camera_id:
-            from ....agents.session_state.agent_state import get_agent_state
+            from ....agents.agent_chat import get_agent_state
 
             agent_state = get_agent_state(session_id)
             if agent_state.rule_id:
@@ -620,8 +579,8 @@ class ChatWithAgentUseCase:
                 user_message = user_message + f"\n\nCamera ID: {request.camera_id}"
 
         if request.video_path:
-            from ....agents.session_state.agent_state import get_agent_state
-            from ....agents.tools.kb_utils import compute_missing_fields, get_rule
+            from ....agents.agent_chat import get_agent_state
+            from ....agents.agent_chat.tools import compute_missing_fields, get_rule
 
             agent_state = get_agent_state(session_id)
             agent_state.fields["source_type"] = "video_file"
@@ -638,13 +597,20 @@ class ChatWithAgentUseCase:
         # If user typed a camera ID or camera name in the message but the LLM didn't
         # call set_field_value_wrapper, persist it here so frame_snapshot_url can be set.
         try:
-            from ....agents.session_state.agent_state import get_agent_state
-            from ....agents.tools.camera_selection_tool import resolve_camera as resolve_camera_impl
+            from ....agents.agent_chat import get_agent_state
+            from ....agents.agent_chat.state.agent_state import STEP_CAMERA
+            from ....agents.agent_chat.tools import (
+                compute_missing_fields,
+                get_current_step,
+                get_rule,
+                list_cameras,
+                resolve_camera as resolve_camera_impl,
+            )
 
             agent_state = get_agent_state(session_id)
             if agent_state.rule_id and not agent_state.fields.get("camera_id"):
                 raw = (user_message or "").strip()
-                # 1) Match explicit camera ID: CAM- + alphanumeric
+                # 1) Match explicit camera ID: CAM- + alphanumeric (unchanged)
                 cam_match = re.match(r"^CAM-[A-Za-z0-9]+$", raw)
                 if not cam_match:
                     cam_match = re.search(r"CAM-[A-Za-z0-9]+", raw)
@@ -652,8 +618,29 @@ class ChatWithAgentUseCase:
                     agent_state.fields["camera_id"] = cam_match.group(0)
                     if "camera_id" in agent_state.missing_fields:
                         agent_state.missing_fields.remove("camera_id")
+                elif agent_state.current_step == STEP_CAMERA and user_id and raw:
+                    # 2) Phase 3B: camera-name substring matching (no stopwords/regex normalization)
+                    try:
+                        result = list_cameras(user_id=user_id, session_id=session_id)
+                        cameras = result.get("cameras") or []
+                        message_lower = raw.lower()
+                        matches = [
+                            c for c in cameras
+                            if c.get("name") and (c["name"].strip().lower() in message_lower)
+                        ]
+                        if len(matches) == 1 and matches[0].get("id"):
+                            agent_state.fields["camera_id"] = matches[0]["id"]
+                            if "camera_id" in agent_state.missing_fields:
+                                agent_state.missing_fields.remove("camera_id")
+                            try:
+                                rule = get_rule(agent_state.rule_id)
+                                compute_missing_fields(agent_state, rule)
+                                agent_state.current_step = get_current_step(agent_state, rule)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                 else:
-                    # 2) Try resolving as camera name (e.g. "Test", "Camera Id : Test", "Front Gate")
                     candidate = None
                     for pattern in (
                         r"(?i)camera\s*id\s*[:\s]+\s*(\S+(?:\s+\S+)*)",
@@ -676,15 +663,92 @@ class ChatWithAgentUseCase:
                             agent_state.fields["camera_id"] = result["camera_id"]
                             if "camera_id" in agent_state.missing_fields:
                                 agent_state.missing_fields.remove("camera_id")
-                            logger.info(
-                                "[chat] Resolved camera name %r to camera_id=%s",
-                                candidate,
-                                result["camera_id"],
-                            )
+                            try:
+                                rule = get_rule(agent_state.rule_id)
+                                compute_missing_fields(agent_state, rule)
+                                agent_state.current_step = get_current_step(agent_state, rule)
+                            except Exception:
+                                pass
         except Exception:
             pass
-
         return user_message
+
+    def _apply_backend_time_safety(
+        self,
+        *,
+        session_id: str,
+        user_id: Optional[str],
+        user_message: str,
+    ) -> str:
+        """
+        Phase 2: Backend time safety layer. When current_step is TIME_WINDOW, rule
+        requires time, and source is not video, parse user message for time and update
+        state if successful. On parse failure, append structured result to message so
+        LLM can respond naturally. No backend-generated conversational text.
+        """
+        try:
+            from ....agents.agent_chat import get_agent_state
+            from ....agents.agent_chat.state.agent_state import STEP_TIME_WINDOW
+            from ....agents.agent_chat.tools import (
+                get_current_step,
+                get_rule,
+                compute_missing_fields,
+            )
+            from ....agents.agent_chat.tools.parse_time_window import parse_time_window
+        except Exception:
+            return user_message
+
+        agent_state = get_agent_state(session_id)
+        if not agent_state.rule_id:
+            return user_message
+        try:
+            rule = get_rule(agent_state.rule_id)
+        except RuleNotFoundError:
+            return user_message
+
+        if agent_state.current_step != STEP_TIME_WINDOW:
+            return user_message
+        time_window = rule.get("time_window", {})
+        if not time_window.get("required", False):
+            return user_message
+        source_type = (agent_state.fields.get("source_type") or "").strip().lower()
+        if source_type == "video_file":
+            return user_message
+
+        raw = (user_message or "").strip()
+        time_like = bool(
+            re.search(
+                r"\b(now|min|minute|hour|hr|am|pm|today|tomorrow|sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b",
+                raw.lower(),
+            )
+            or re.search(r"\d+\s*(min|hour|hr)", raw, re.IGNORECASE)
+        )
+        if not time_like:
+            return user_message
+
+        reference_start_iso = agent_state.fields.get("start_time")
+        if isinstance(reference_start_iso, str) and not reference_start_iso.strip():
+            reference_start_iso = None
+        parse_result = parse_time_window(
+            user_time_phrase=user_message,
+            reference_start_iso=reference_start_iso,
+            session_id=session_id,
+        )
+
+        if parse_result.get("success"):
+            if parse_result.get("start_time") is not None:
+                agent_state.fields["start_time"] = parse_result["start_time"]
+            if parse_result.get("end_time") is not None:
+                agent_state.fields["end_time"] = parse_result["end_time"]
+            compute_missing_fields(agent_state, rule)
+            agent_state.current_step = get_current_step(agent_state, rule)
+            return user_message
+
+        structured = {
+            "success": False,
+            "user_message": parse_result.get("user_message", ""),
+        }
+        return user_message + "\n\n[Backend time parse result: " + json.dumps(structured) + "]"
 
     async def _run_agent_and_collect_text(
         self,

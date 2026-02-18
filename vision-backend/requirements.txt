@@ -10,6 +10,7 @@ python-multipart>=0.0.6
 pytz
 google-adk>=1.21.0
 litellm>=1.75.5
+dateparser>=1.2.0
 parsedatetime
 nest-asyncio>=1.6.0
 httpx[http2]>=0.24.0
