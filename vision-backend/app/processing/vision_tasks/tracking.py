@@ -116,8 +116,12 @@ class SimpleTracker:
     - Better handling of temporary occlusions
     """
     
-    def __init__(self, max_age: int = 30, min_hits: int = 3, 
-                 iou_threshold: float = 0.3, score_threshold: float = 0.5):
+    def __init__(self, max_age: int = 30, min_hits: int = 3,
+                 iou_threshold: float = 0.3, score_threshold: float = 0.5,
+                 max_distance_threshold: float = 150.0,
+                 max_distance_threshold_max: float = 350.0,
+                 distance_growth_per_missed_frame: float = 8.0,
+                 use_kalman: bool = False):
         self.max_age = max_age
         self.min_hits = min_hits
         self.iou_threshold = iou_threshold
@@ -125,10 +129,11 @@ class SimpleTracker:
         self.tracks: List[Track] = []
         self.track_id_counter = 0
         self.frame_id = 0  # Current frame number
-        
-        # Distance threshold for fallback matching (pixels)
-        # This allows matching even when IoU is 0 (box moved too far)
-        self.max_distance_threshold = 150.0  # Increased for faster conveyor belts
+        self.use_kalman = use_kalman
+        # Distance threshold for fallback matching (pixels); wall_climb can tune for re-appearance
+        self.max_distance_threshold = max_distance_threshold
+        self.max_distance_threshold_max = max_distance_threshold_max
+        self.distance_growth_per_missed_frame = distance_growth_per_missed_frame
     
     def iou(self, box1: List[float], box2: List[float]) -> float:
         """Calculate Intersection over Union between two boxes."""

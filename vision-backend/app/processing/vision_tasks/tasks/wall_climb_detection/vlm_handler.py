@@ -19,6 +19,7 @@ from app.processing.vision_tasks.tasks.wall_climb_detection.types import (
     WallClimbVLMConfirmation,
 )
 from app.processing.vision_tasks.tasks.wall_climb_detection.state import WallClimbDetectionState
+from app.processing.vision_tasks.tasks.fall_detection.vlm_handler import expand_box_for_vlm
 from app.infrastructure.external.groq_vlm_service import GroqVLMService
 
 
@@ -26,38 +27,92 @@ def build_wall_climb_detection_prompt() -> str:
     """
     Prompt for the VLM: we send 3 images (before, suspicious moment, after).
     Ask for JSON with climbing_detected, confidence, description.
-    
-    Detects all climbing behaviors: active climbing, preparation/ready-to-climb, jumping over, and suspicious positioning.
+    Designed for accurate detection of wall-climb violation: trying, attempting, above wall, or any breach intent.
     """
-    return """These 3 images are sequential video frames from a security camera: (1) before, (2) suspicious moment, (3) after.
+    return """You are a security analyst. These 3 images are sequential video frames from a security camera: (1) BEFORE, (2) SUSPICIOUS MOMENT, (3) AFTER. Your task is to determine whether the person is committing or attempting a WALL-CLIMB / BARRIER-BREACH violation.
 
-Determine if the person is CLIMBING, PREPARING TO CLIMB, or JUMPING OVER a wall/fence/barrier.
+---
+CRITICAL — NORMAL BEHAVIOUR (climbing_detected = false)
+---
+- If the person is SIMPLY STANDING near the wall or WALKING past/along the wall — this is NORMAL behaviour. Do NOT set climbing_detected = true. Only set true when the person actually TRIES TO CLIMB (reaching, gripping, pulling over, jumping over, or body above the barrier in a climbing action).
+- Standing still next to the wall, walking alongside it, or leaning casually = NOT a violation. Set climbing_detected = false.
 
-**DETECT (climbing_detected = true):**
-- Active climbing: upper body above barrier, arms gripping/pulling, legs pushing up, scaling posture
-- Preparation: hands reaching up, crouching/jumping position, arms raised to grab, legs bent for thrust, assessing barrier
-- Jumping: airborne over barrier, legs clearing height
-- Suspicious: testing barrier stability/height, unusual positioning suggesting climbing intent
+---
+CONTEXT
+---
+- "Wall" means any vertical barrier: wall, fence, railing, gate, barrier, or similar structure meant to restrict access.
+- A VIOLATION is: trying to climb, actively climbing, already above the wall, jumping over, or any behavior that shows intent to cross the barrier unlawfully.
 
-**IGNORE (climbing_detected = false):**
-- Standing/walking past barrier (normal posture)
-- Leaning against wall casually
-- Looking/inspecting without climbing intent
-- Body clearly below barrier with no upward movement
+---
+WHAT TO DETECT AS VIOLATION (climbing_detected = true)
+---
 
-**ANALYSIS:**
-Analyze body position, posture, and movement across all 3 frames. Look for progression: preparation → attempt → completion. Consider arm/leg positions relative to barrier and overall intent.
+1) TRYING / PREPARING TO CLIMB
+   - Hands reaching upward toward the top of the barrier (grasping motion or extended toward top).
+   - Crouching or legs bent in a "ready to jump or push" posture next to the barrier.
+   - Body oriented toward the barrier with arms raised or extended to grab.
+   - Testing the barrier: touching, shaking, or feeling the top/surface as if assessing stability or height.
+   - Standing very close to barrier with non-casual posture suggesting next step is to climb.
 
-Respond ONLY with valid JSON:
+2) ACTIVELY CLIMBING
+   - Upper body (chest, shoulders, head) above the top of the barrier.
+   - Arms in pulling/gripping posture (elbows bent, hands on or over the barrier).
+   - Legs in pushing or stepping-up motion (one leg raised, foot on barrier, or legs driving upward).
+   - Body in a "scaling" or "pulling over" posture—clearly in the act of getting over.
+
+3) PERSON ABOVE THE WALL
+   - Torso or full body visibly above the barrier line (sitting on top, straddling, or already over).
+   - Person in mid-crossing: one side over, other side still on original side.
+   - Person descending the other side after having crossed (clear evidence they went over).
+
+4) JUMPING OVER
+   - Person airborne with body clearing the height of the barrier.
+   - Legs or body in mid-air over the barrier in a jump/vault motion.
+
+5) OTHER VIOLATION BEHAVIOUR
+   - Any clear intent to circumvent the barrier: repeated attempts, stepping on lower parts to reach top, using objects to assist climbing, or body language that unmistakably indicates climbing/crossing intent.
+
+---
+WHAT IS NOT A VIOLATION (climbing_detected = false)
+---
+- Simply STANDING near the wall or WALKING past/along the wall — normal behaviour; never set climbing_detected = true for this alone.
+- Walking or standing next to the wall with normal, upright posture (no reach, no grip, no climb posture).
+- Leaning against the wall casually (back or shoulder against it, relaxed).
+- Merely looking at or inspecting the barrier without climbing posture or hand/arm movement toward climbing.
+- Body entirely below the barrier with arms at sides or in normal walking position—no upward movement or intent.
+- Touching the wall briefly (e.g. hand on wall while walking) without grip or pull motion.
+- Person on the same side throughout all 3 frames with no progression toward climbing.
+- Until the person actually tries to climb (reach, grip, pull over, jump over), treat as normal — climbing_detected = false.
+
+---
+HOW TO ANALYSE THE 3 FRAMES
+---
+- Compare frame 1 → 2 → 3 for PROGRESSION: e.g. approach → reach/grip → pull over; or crouch → jump → over.
+- Estimate where the barrier top is (even if not fully visible) and judge: is the person’s head, chest, or torso above that line?
+- Focus on: arm position (reaching, gripping, pulling), leg position (bent to jump, stepping up, pushing), and body orientation relative to the barrier.
+- One strong frame (e.g. clearly above wall or clear climbing posture) can be enough; support with other frames if present.
+- If in doubt between "casual contact" and "climbing intent", prefer evidence: clear grip, clear above-barrier position, or clear jump = violation.
+
+---
+CONFIDENCE SCALE
+---
+- 0.90–1.00: Obvious violation — person clearly above wall, or clearly climbing/jumping over in at least one frame.
+- 0.70–0.89: Strong evidence — clear preparation (hands up, grip, crouch to jump) or clear attempt (pulling up, one leg over).
+- 0.50–0.69: Moderate evidence — posture or position suggests climbing intent but not definitive (e.g. hands near top, ambiguous).
+- 0.30–0.49: Weak/ambiguous — could be casual; do not set climbing_detected = true unless you still see some intent.
+- 0.00–0.29: No violation — normal standing, walking, or leaning; no climbing intent.
+
+---
+OUTPUT FORMAT
+---
+Respond ONLY with valid JSON, no other text:
 {
     "climbing_detected": true or false,
     "confidence": 0.0 to 1.0,
-    "description": "Brief description: position relative to barrier, posture, arm/leg positions, movement, reasoning"
+    "description": "Concise description: (1) position of person relative to barrier in each relevant frame, (2) posture and arm/leg positions, (3) movement or progression across frames, (4) which violation type if any: trying/preparing, actively climbing, above wall, jumping over, or other; (5) one-sentence reasoning for your decision."
 }
 
-**CONFIDENCE:** 0.9-1.0 (clear climbing), 0.7-0.89 (strong evidence/preparation), 0.5-0.69 (moderate), 0.0-0.49 (none/normal)
-
-Be strict: only true if clear evidence of climbing/preparation/intent. False positives worse than false negatives."""
+Be accurate: set climbing_detected = true only when there is clear evidence of trying to climb, actively climbing, person above the wall, jumping over, or other definite violation behaviour. When evidence is weak or ambiguous, set climbing_detected = false and use the lower end of the confidence range."""
 
 
 def should_call_vlm(
@@ -92,13 +147,15 @@ def save_vlm_frame(
     frame: np.ndarray,
     analysis: WallClimbAnalysis,
     frames_dir: str,
+    box_override: Optional[List[float]] = None,
 ) -> str:
-    """Save one frame to disk (optional, for debugging). Returns path."""
+    """Save one frame to disk (optional, for debugging). Uses box_override if provided, else analysis.box. Returns path."""
     os.makedirs(frames_dir, exist_ok=True)
     frame_filename = f"wall_climb_frame_{analysis.frame_index}_track_{analysis.track_id}_{int(analysis.timestamp.timestamp())}.jpg"
     frame_path = os.path.join(frames_dir, frame_filename)
 
-    x1, y1, x2, y2 = [int(c) for c in analysis.box[:4]]
+    box = box_override if box_override is not None else analysis.box
+    x1, y1, x2, y2 = [int(c) for c in box[:4]]
     h, w = frame.shape[:2]
     x1, y1 = max(0, x1), max(0, y1)
     x2, y2 = min(w, x2), min(h, y2)
@@ -145,7 +202,11 @@ def call_vlm(
     print(f"[WallClimb VLM] 📤 Sending 3 frames to VLM (track_id={track_id} person_index={analysis.person_index})")
 
     try:
-        # Optional: save frames to disk for debugging
+        # Expand box so VLM sees person + surroundings (reuse fall_detection helper)
+        h, w = frames[0].shape[:2]
+        expanded_box = expand_box_for_vlm(analysis.box, w, h)
+
+        # Optional: save frames to disk for debugging (same crop as sent to VLM)
         for idx, frame in enumerate(frames):
             temp = WallClimbAnalysis(
                 track_id=analysis.track_id,
@@ -156,14 +217,14 @@ def call_vlm(
                 timestamp=analysis.timestamp,
                 frame_index=analysis.frame_index + idx - len(frames) + 1,
             )
-            frame_path = save_vlm_frame(frame, temp, frames_dir)
+            frame_path = save_vlm_frame(frame, temp, frames_dir, box_override=expanded_box)
             print(f"[WallClimb VLM] 💾 Saved frame {idx + 1}/3 to {frame_path}")
 
-        # Call Groq VLM with 3 images (crop to person box)
+        # Call Groq VLM with 3 images (crop to expanded box for context)
         vlm_result = vlm_service.analyze_images(
             frames,
             prompt=prompt,
-            crop_box=analysis.box,
+            crop_box=expanded_box,
             temperature=0.1,
             max_tokens=500,
         )

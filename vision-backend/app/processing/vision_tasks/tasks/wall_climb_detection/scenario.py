@@ -24,7 +24,8 @@ from app.processing.vision_tasks.data_models import (
     ScenarioEvent,
 )
 from app.processing.vision_tasks.task_lookup import register_scenario
-from app.processing.vision_tasks.tracking import SimpleTracker
+# Use tracker WITH Kalman so same person keeps same track_id when they reappear (violator stays red)
+from app.processing.vision_tasks.tasks.tracking import SimpleTracker
 from app.processing.vision_tasks.tasks.class_count.counter import (
     filter_detections_by_class_with_indices,
     calculate_iou,
@@ -95,10 +96,14 @@ class WallClimbScenario(BaseScenario):
         super().__init__(config, pipeline_context)
         self.config_obj = WallClimbConfig(config, pipeline_context.task)
         self.tracker = SimpleTracker(
-            max_age=30,
-            min_hits=2,
-            iou_threshold=0.3,
-            score_threshold=self.config_obj.confidence_threshold,
+            max_age=self.config_obj.tracker_max_age,
+            min_hits=self.config_obj.tracker_min_hits,
+            iou_threshold=self.config_obj.tracker_iou_threshold,
+            score_threshold=self.config_obj.tracker_score_threshold,
+            max_distance_threshold=self.config_obj.tracker_max_distance,
+            max_distance_threshold_max=self.config_obj.tracker_max_distance_max,
+            distance_growth_per_missed_frame=self.config_obj.tracker_distance_growth,
+            use_kalman=self.config_obj.tracker_use_kalman,
         )
         self.state = WallClimbDetectionState(self.config_obj.buffer_size)
         self._vlm_service: Optional[GroqVLMService] = None
@@ -121,6 +126,7 @@ class WallClimbScenario(BaseScenario):
         """
         if not self.config_obj.target_class or not self.config_obj.zone_coordinates:
             self._state["red_indices"] = []
+            self._state["confirmed_detection_indices"] = []
             return []
 
         frame = frame_context.frame
@@ -146,6 +152,7 @@ class WallClimbScenario(BaseScenario):
 
         if not valid_detections:
             self._state["red_indices"] = []
+            self._state["confirmed_detection_indices"] = []
             return []
 
         self.tracker.update(valid_detections)
@@ -365,20 +372,27 @@ class WallClimbScenario(BaseScenario):
                         else:
                             print(f"[WallClimb Scenario] ⏭️ VLM already deferred for track_id={track_id} at frame {frame_context.frame_index}")
             
-            # If person moved back below zone, remove from confirmed violations
-            if prev_side == "above" and current_side == "below":
-                self.state.confirmed_violations.discard(track_id)
-                self.state.confirmed_track_to_detection.pop(track_id, None)
+            # Do NOT clear confirmed_violations when person moves below zone.
+            # Once VLM confirms violation, that track_id stays red until track is lost (so only the violator is highlighted).
 
         # Update state
         active_ids = {t.track_id for t in all_active_tracks}
         self._state["track_side"] = {tid: s for tid, s in track_side.items() if tid in active_ids}
-        
-        # Update confirmed violations detection indices for pipeline (for red keypoints)
+
+        # Remove confirmed_violations only when track is no longer in scene (so red doesn't stick to dead IDs)
+        self.state.confirmed_violations &= active_ids
+        for tid in list(self.state.confirmed_track_to_detection.keys()):
+            if tid not in active_ids:
+                self.state.confirmed_track_to_detection.pop(tid, None)
+
+        # Build confirmed_detection_indices from CURRENT frame: for each confirmed track_id, use this frame's detection index.
+        # This ensures only the violating person(s) are red, and correct person when 2–3 people are present.
         confirmed_detection_indices = []
         for track_id in self.state.confirmed_violations:
-            if track_id in self.state.confirmed_track_to_detection:
-                confirmed_detection_indices.append(self.state.confirmed_track_to_detection[track_id])
+            current_orig_idx = track_to_detection.get(track_id)
+            if current_orig_idx is not None:
+                confirmed_detection_indices.append(current_orig_idx)
+                self.state.confirmed_track_to_detection[track_id] = current_orig_idx
         self._state["confirmed_detection_indices"] = confirmed_detection_indices
         
         # Legacy red_indices for backward compatibility (will be empty - no bounding boxes)
