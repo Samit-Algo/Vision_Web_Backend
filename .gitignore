@@ -40,3 +40,4 @@ back_up_models
 *.jpg
 wall_climb_detection_frames/
 *.md
+electron_desktop_app/
