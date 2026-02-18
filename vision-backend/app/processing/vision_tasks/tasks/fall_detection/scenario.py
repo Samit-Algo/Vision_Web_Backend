@@ -2,13 +2,14 @@
 Fall detection scenario
 ------------------------
 
-Real-time fall detection using a state machine and FPS-independent metrics:
+Real-time fall detection using a state machine and FPS-independent metrics with VLM confirmation:
 
-  NORMAL → FALL_SUSPECTED → (RECOVERED → NORMAL) or (TIMEOUT → CONFIRMED_FALL → ALERT)
+  NORMAL → FALL_SUSPECTED → [VLM Analysis] → (RECOVERED → NORMAL) or (VLM_CONFIRMED → CONFIRMED_FALL → ALERT)
 
 - Fall suspected: sudden downward movement (A) + (height collapse (B) or horizontal torso (C)).
-- Recovery: height increased, torso vertical, or hip/head moved up within recovery window.
-- Confirmed fall: no recovery within recovery_timeout_seconds → emit alert.
+- VLM confirmation: sends 5 frames to VLM for confirmation (API limit).
+- Recovery: height increased, torso vertical, or hip/head moved up.
+- Confirmed fall: VLM confirms fall → emit alert.
 
 Keypoints: FALL_SUSPECTED → orange, CONFIRMED_FALL → red (set in state for pipeline/UI).
 """
@@ -17,6 +18,7 @@ Keypoints: FALL_SUSPECTED → orange, CONFIRMED_FALL → red (set in state for p
 # Standard library
 # -----------------------------------------------------------------------------
 import math
+import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -31,6 +33,10 @@ from app.processing.vision_tasks.data_models import (
 from app.processing.vision_tasks.task_lookup import register_scenario
 from app.processing.vision_tasks.tracking import SimpleTracker
 from .config import FallDetectionConfig
+from .types import PoseFrame, FallAnalysis
+from .state import FallDetectionState
+from .vlm_handler import should_call_vlm, call_vlm
+from app.infrastructure.external.groq_vlm_service import GroqVLMService
 
 # -----------------------------------------------------------------------------
 # State labels (for readability)
@@ -248,13 +254,23 @@ def check_recovery(
     current_hip_y = metrics.get("hip_y")
     current_head_y = metrics.get("head_y")
     current_angle = metrics.get("angle", 90)
+    current_aspect = metrics.get("aspect_ratio") or 0.0  # < 1 when standing (taller than wide)
+    torso_vertical = current_angle <= config.recovery_torso_angle_max
+    angle_not_horizontal = current_angle <= 50.0
     
-    # 1. Height recovery: person is standing again
+    # 0. Clearly standing: tall + vertical torso → recover (red keypoints go back to normal)
+    min_standing = getattr(config, "min_height_for_standing", 140)
+    if current_height >= min_standing and torso_vertical:
+        return True
+    # 0b. Upright bbox (aspect < 1) + not horizontal angle → standing
+    if current_aspect < 1.0 and angle_not_horizontal and current_height >= 100:
+        return True
+    
+    # 1. Height recovery: person is standing again (current much taller than fall height)
     if current_height >= fall_height * config.recovery_height_ratio:
         return True
     
     # 2. Torso vertical: person is upright (but might still be on ground)
-    torso_vertical = current_angle <= config.recovery_torso_angle_max
     
     # 3. Hip/head lifted up: moved up significantly from fall position
     hip_lifted = False
@@ -342,14 +358,48 @@ def calculate_iou(box1: List[float], box2: List[float]) -> float:
     return intersection / union
 
 
+def extract_pose_frame(frame_context: ScenarioFrameContext) -> Optional[PoseFrame]:
+    """
+    Extract pose data from frame context for VLM buffering.
+    Returns PoseFrame with frame, keypoints, person boxes, timestamp, frame_index.
+    """
+    detections = frame_context.detections
+    keypoints_list = getattr(detections, "keypoints", None) or []
+    boxes = getattr(detections, "boxes", None) or []
+    classes = getattr(detections, "classes", None) or []
+    
+    # Filter to only person detections
+    person_boxes = []
+    person_keypoints = []
+    
+    for i, (box, cls) in enumerate(zip(boxes, classes)):
+        if isinstance(cls, str) and cls.strip().lower() == "person":
+            person_boxes.append(list(box))
+            if i < len(keypoints_list):
+                person_keypoints.append(keypoints_list[i])
+            else:
+                person_keypoints.append([])
+    
+    if not person_boxes:
+        return None
+    
+    return PoseFrame(
+        frame=frame_context.frame.copy(),
+        keypoints=person_keypoints,
+        person_boxes=person_boxes,
+        timestamp=frame_context.timestamp,
+        frame_index=frame_context.frame_index,
+    )
+
+
 @register_scenario("fall_detection")
 class FallDetectionScenario(BaseScenario):
     """
-    Detects human falls using a state machine and FPS-independent pose analysis.
+    Detects human falls using a state machine and FPS-independent pose analysis with VLM confirmation.
 
     - FALL SUSPECTED: sudden drop + (height collapse or horizontal torso).
-    - Recovery window: recovery_timeout_seconds (configurable, default 3 s).
-    - CONFIRMED FALL: no recovery within window → alert; keypoints orange (suspected), red (confirmed).
+    - VLM confirmation: sends 9 frames (4 before + suspected + 4 after) to VLM.
+    - CONFIRMED FALL: VLM confirms fall → alert; keypoints orange (suspected), red (confirmed).
     """
 
     def __init__(self, config: Dict[str, Any], pipeline_context):
@@ -364,6 +414,15 @@ class FallDetectionScenario(BaseScenario):
             score_threshold=self.config_obj.confidence_threshold
         )
         
+        # VLM state management
+        if self.config_obj.vlm_enabled:
+            self.vlm_state = FallDetectionState(self.config_obj.vlm_buffer_size)
+            self._vlm_service: Optional[GroqVLMService] = None
+            os.makedirs(self.config_obj.vlm_frames_dir, exist_ok=True)
+        else:
+            self.vlm_state = None
+            self._vlm_service = None
+        
         # State storage by track_id (stable across frames) instead of detection index
         self._state["history"] = {}  # track_id -> last frame metrics (with dt_sec)
         self._state["baseline"] = {}  # track_id -> baseline metrics (standing height, hip_y, etc.)
@@ -377,11 +436,25 @@ class FallDetectionScenario(BaseScenario):
         self._state["fall_suspected_indices"] = []  # detection indices for drawing (orange)
         self._state["fall_confirmed_indices"] = []  # detection indices for drawing (red)
 
+    def get_vlm_service(self) -> Optional[GroqVLMService]:
+        """Create VLM service once (lazy)."""
+        if not self.config_obj.vlm_enabled:
+            return None
+        if self._vlm_service is None:
+            self._vlm_service = GroqVLMService()
+        return self._vlm_service
+
     def process(self, frame_context: ScenarioFrameContext) -> List[ScenarioEvent]:
         if not self.config_obj.enabled or not self.config_obj.target_class:
             self._state["fall_suspected_indices"] = []
             self._state["fall_confirmed_indices"] = []
             return []
+
+        # Step 1: Extract pose frame for VLM buffering (if VLM enabled)
+        if self.config_obj.vlm_enabled and self.vlm_state:
+            pose_frame = extract_pose_frame(frame_context)
+            if pose_frame:
+                self.vlm_state.add_pose_frame(pose_frame)
 
         detections = frame_context.detections
         target_class = self.config_obj.target_class
@@ -450,11 +523,66 @@ class FallDetectionScenario(BaseScenario):
         fall_suspected_at = self._state["fall_suspected_at"]
         fall_height = self._state["fall_height"]
         cooldown_sec = self.config_obj.alert_cooldown_seconds
-        recovery_timeout = self.config_obj.recovery_timeout_seconds
 
         suspected_detection_indices = []  # Detection indices for drawing (orange)
         confirmed_detection_indices = []  # Detection indices for drawing (red)
         events = []
+
+        # Step 2: Process deferred VLM calls (if VLM enabled)
+        # We deferred VLM calls when fall was suspected; now check if we have enough frames
+        if self.config_obj.vlm_enabled and self.vlm_state:
+            vlm_service = self.get_vlm_service()
+            if vlm_service:
+                to_remove = []
+                buf_len_now = len(self.vlm_state.pose_buffer)
+                for analysis, buffer_len_at_suspect in list(self.vlm_state.deferred_vlm):
+                    # Buffer-relative: need 2+ new frames after suspect and at least 5 frames total (Groq API max 5 images)
+                    if buf_len_now < 5 or buf_len_now < buffer_len_at_suspect + 2:
+                        continue
+                    # Take last 5 frames from buffer for VLM
+                    recent = self.vlm_state.pose_buffer[-5:]
+                    frames_to_send = [pf.frame for pf in recent]
+                    if len(frames_to_send) < 5:
+                        continue
+                    print(f"[Fall Detection] 📤 Calling VLM for track_id={analysis.track_id} (buffer_len={buf_len_now}, frames_collected={len(frames_to_send)})")
+                    vlm_result = call_vlm(
+                        analysis,
+                        frames_to_send,
+                        self.vlm_state,
+                        vlm_service,
+                        self.config_obj.vlm_confidence_threshold,
+                        self.config_obj.vlm_frames_dir,
+                    )
+                    to_remove.append((analysis, buffer_len_at_suspect))
+                    
+                    if vlm_result and vlm_result.fall_detected:
+                        # VLM confirmed fall - transition to CONFIRMED_FALL
+                        # Keep fall_height, fall_hip_y, fall_head_y so recovery can detect when person stands
+                        track_id = analysis.track_id
+                        person_states[track_id] = STATE_CONFIRMED_FALL
+                        self.vlm_state.confirmed_falls.add(track_id)
+                        self.vlm_state.confirmed_track_to_detection[track_id] = analysis.person_index
+                        fall_suspected_at.pop(track_id, None)
+                        print(f"[Fall Detection] 🔴 VLM CONFIRMED FALL (Track {track_id}): confidence={vlm_result.confidence:.2f}")
+                    elif vlm_result:
+                        # VLM said no fall - return to NORMAL (false positive)
+                        track_id = analysis.track_id
+                        if person_states.get(track_id) == STATE_FALL_SUSPECTED:
+                            person_states[track_id] = STATE_NORMAL
+                            fall_suspected_at.pop(track_id, None)
+                            fall_height.pop(track_id, None)
+                            self._state["fall_hip_y"].pop(track_id, None)
+                            self._state["fall_head_y"].pop(track_id, None)
+                            print(f"[Fall Detection] ✅ VLM cleared false positive (Track {track_id}): confidence={vlm_result.confidence:.2f}")
+                
+                for item in to_remove:
+                    try:
+                        self.vlm_state.deferred_vlm.remove(item)
+                    except ValueError:
+                        pass
+                
+                # Cleanup old data
+                self.vlm_state.cleanup_old_data(now)
 
         # Process each tracked person using track_id (stable across frames)
         for track in all_active_tracks:
@@ -546,6 +674,10 @@ class FallDetectionScenario(BaseScenario):
                     # This catches cases where we missed the fall transition due to frame skipping
                     fall_detected = True
                     print(f"[fall_detection] 🟠 FALL SUSPECTED (Track {track_id}): Horizontal posture + low height (no drop history)")
+                elif horizontal_posture and metrics.get("height", 0) < 280:
+                    # Already lying (padukura): clearly horizontal + low height → trigger so full fall alerts work
+                    fall_detected = True
+                    print(f"[fall_detection] 🟠 FALL SUSPECTED (Track {track_id}): Already lying (horizontal + low height)")
                 
                 if fall_detected:
                     person_states[track_id] = STATE_FALL_SUSPECTED
@@ -554,14 +686,48 @@ class FallDetectionScenario(BaseScenario):
                     self._state["fall_hip_y"][track_id] = metrics["hip_y"]
                     self._state["fall_head_y"][track_id] = metrics.get("head_y")
                     suspected_detection_indices.append(detection_idx)
+                    
+                    # If VLM enabled, create analysis and defer VLM call
+                    if self.config_obj.vlm_enabled and self.vlm_state:
+                        # Get bounding box
+                        bbox = None
+                        for j, oidx in enumerate(valid_indices):
+                            if oidx == detection_idx and j < len(valid_detections):
+                                bbox = valid_detections[j][0]
+                                break
+                        
+                        if bbox:
+                            analysis = FallAnalysis(
+                                track_id=track_id,
+                                person_index=detection_idx,
+                                box=list(bbox),
+                                metrics=metrics,
+                                signals=signals,
+                                confidence=1.0,
+                                timestamp=now,
+                                frame_index=frame_context.frame_index,
+                            )
+                            
+                            # Check if we should call VLM (throttling)
+                            if should_call_vlm(analysis, self.vlm_state, self.config_obj.vlm_throttle_seconds):
+                                # Defer by buffer length: call VLM once we have 2+ more frames in buffer (works when frames are skipped)
+                                buffer_len_now = len(self.vlm_state.pose_buffer)
+                                already_deferred = any(
+                                    a.track_id == track_id for a, _ in self.vlm_state.deferred_vlm
+                                )
+                                if not already_deferred:
+                                    self.vlm_state.deferred_vlm.append((analysis, buffer_len_now))
+                                    print(f"[Fall Detection] 📋 Deferred VLM for track_id={track_id} (buffer_len={buffer_len_now}, will call when buffer has 2+ more frames)")
+                            else:
+                                print(f"[Fall Detection] ⏭️ Skipping VLM for track_id={track_id}: throttled/cached")
 
             elif state == STATE_FALL_SUSPECTED:
                 suspected_detection_indices.append(detection_idx)
-                fall_time = fall_suspected_at.get(track_id)
                 stored_fall_height = fall_height.get(track_id) or metrics["height"]
                 stored_fall_hip_y = self._state["fall_hip_y"].get(track_id, metrics["hip_y"])
                 stored_fall_head_y = self._state["fall_head_y"].get(track_id)
 
+                # Check for recovery (person getting up)
                 if check_recovery(metrics, stored_fall_height, stored_fall_hip_y, stored_fall_head_y, self.config_obj):
                     # Recovered → back to NORMAL
                     person_states[track_id] = STATE_NORMAL
@@ -569,21 +735,34 @@ class FallDetectionScenario(BaseScenario):
                     fall_height.pop(track_id, None)
                     self._state["fall_hip_y"].pop(track_id, None)
                     self._state["fall_head_y"].pop(track_id, None)
+                    # Remove from VLM deferred list if present
+                    if self.config_obj.vlm_enabled and self.vlm_state:
+                        self.vlm_state.deferred_vlm = [
+                            (a, buf_len) for a, buf_len in self.vlm_state.deferred_vlm
+                            if a.track_id != track_id
+                        ]
                     if detection_idx in suspected_detection_indices:
                         suspected_detection_indices.remove(detection_idx)
-                elif fall_time is not None and isinstance(now, datetime) and isinstance(fall_time, datetime):
-                    elapsed = (now - fall_time).total_seconds()
-                    if elapsed >= recovery_timeout:
-                        # Timeout → CONFIRMED_FALL
-                        person_states[track_id] = STATE_CONFIRMED_FALL
-                        fall_suspected_at.pop(track_id, None)
-                        fall_height.pop(track_id, None)
-                        self._state["fall_hip_y"].pop(track_id, None)
-                        self._state["fall_head_y"].pop(track_id, None)
-                        if detection_idx in suspected_detection_indices:
-                            suspected_detection_indices.remove(detection_idx)
-                        confirmed_detection_indices.append(detection_idx)
-                        print(f"[fall_detection] 🔴 CONFIRMED FALL (Track {track_id}): No recovery after {elapsed:.1f}s")
+                # If VLM enabled, wait for VLM confirmation (no timeout)
+                # If VLM disabled, use timeout-based confirmation (legacy mode)
+                elif not self.config_obj.vlm_enabled:
+                    # Legacy mode: use timeout
+                    fall_time = fall_suspected_at.get(track_id)
+                    if fall_time is not None and isinstance(now, datetime) and isinstance(fall_time, datetime):
+                        elapsed = (now - fall_time).total_seconds()
+                        recovery_timeout = self.config_obj.recovery_timeout_seconds
+                        if elapsed >= recovery_timeout:
+                            # Timeout → CONFIRMED_FALL (legacy mode only)
+                            person_states[track_id] = STATE_CONFIRMED_FALL
+                            fall_suspected_at.pop(track_id, None)
+                            fall_height.pop(track_id, None)
+                            self._state["fall_hip_y"].pop(track_id, None)
+                            self._state["fall_head_y"].pop(track_id, None)
+                            if detection_idx in suspected_detection_indices:
+                                suspected_detection_indices.remove(detection_idx)
+                            confirmed_detection_indices.append(detection_idx)
+                            print(f"[fall_detection] 🔴 CONFIRMED FALL (Track {track_id}): No recovery after {elapsed:.1f}s (legacy timeout mode)")
+                # If VLM enabled, wait for VLM confirmation (handled in deferred VLM processing above)
 
             elif state == STATE_CONFIRMED_FALL:
                 # Person is confirmed fallen - check for recovery
@@ -592,17 +771,19 @@ class FallDetectionScenario(BaseScenario):
                 stored_fall_head_y = self._state["fall_head_y"].get(track_id)
                 
                 if check_recovery(metrics, stored_fall_height, stored_fall_hip_y, stored_fall_head_y, self.config_obj):
-                    # Person recovered - clear confirmed state and return to NORMAL
+                    # Person stood back up - clear confirmed state so keypoints return to normal (remove red)
                     person_states[track_id] = STATE_NORMAL
                     fall_height.pop(track_id, None)
                     self._state["fall_hip_y"].pop(track_id, None)
                     self._state["fall_head_y"].pop(track_id, None)
-                    # Explicitly remove from confirmed list (red keypoints should disappear)
+                    if self.config_obj.vlm_enabled and self.vlm_state:
+                        self.vlm_state.confirmed_falls.discard(track_id)
+                        self.vlm_state.confirmed_track_to_detection.pop(track_id, None)
                     if detection_idx in confirmed_detection_indices:
                         confirmed_detection_indices.remove(detection_idx)
-                    # Also ensure not in suspected list
                     if detection_idx in suspected_detection_indices:
                         suspected_detection_indices.remove(detection_idx)
+                    print(f"[fall_detection] ✅ Recovery (Track {track_id}): person standing — red keypoints removed")
                 else:
                     # Still confirmed fallen - add to confirmed list ONLY if not already there
                     # Red keypoints will show until person recovers
@@ -619,14 +800,28 @@ class FallDetectionScenario(BaseScenario):
         active_track_ids = {track.track_id for track in all_active_tracks}
         for track_id in list(person_states.keys()):
             if track_id not in active_track_ids:
-                # Track no longer active - clear its state
+                # Track no longer active - clear its state and VLM confirmed (so red keypoints don't stick)
                 person_states.pop(track_id, None)
                 fall_suspected_at.pop(track_id, None)
                 fall_height.pop(track_id, None)
                 self._state["fall_hip_y"].pop(track_id, None)
                 self._state["fall_head_y"].pop(track_id, None)
                 history.pop(track_id, None)
-                # Note: We keep baseline for a bit in case person comes back
+                if self.config_obj.vlm_enabled and self.vlm_state:
+                    self.vlm_state.confirmed_falls.discard(track_id)
+                    self.vlm_state.confirmed_track_to_detection.pop(track_id, None)
+
+        # Update confirmed detection indices from VLM state: only show red for tracks that are
+        # (a) still confirmed and (b) visible this frame — use current frame's detection index
+        if self.config_obj.vlm_enabled and self.vlm_state:
+            for track_id in list(self.vlm_state.confirmed_falls):
+                detection_idx = track_to_detection_map.get(track_id)
+                if detection_idx is not None:
+                    if detection_idx not in confirmed_detection_indices:
+                        confirmed_detection_indices.append(detection_idx)
+                    if detection_idx in suspected_detection_indices:
+                        suspected_detection_indices.remove(detection_idx)
+                # If track not in current frame, don't add any index (red will disappear for that person)
 
         # Clean up: Remove any detection indices from confirmed/suspected lists if they're no longer valid
         # (This handles cases where detection indices change or persons leave the frame)
@@ -655,9 +850,9 @@ class FallDetectionScenario(BaseScenario):
                             "target_class": self.config_obj.target_class,
                             "fallen_count": len(confirmed_detection_indices),
                             "fallen_indices": confirmed_detection_indices,
-                            "detection_method": "pose_keypoints",
+                            "detection_method": "pose_keypoints_vlm" if self.config_obj.vlm_enabled else "pose_keypoints_timeout",
                             "alert_cooldown_seconds": cooldown_sec,
-                            "recovery_timeout_seconds": recovery_timeout,
+                            "vlm_enabled": self.config_obj.vlm_enabled,
                         },
                         detection_indices=confirmed_detection_indices,
                         timestamp=frame_context.timestamp,
@@ -687,3 +882,6 @@ class FallDetectionScenario(BaseScenario):
         self._state["last_frame_time"] = None
         self._state["fall_suspected_indices"] = []
         self._state["fall_confirmed_indices"] = []
+        if self.config_obj.vlm_enabled and self.vlm_state:
+            self.vlm_state.reset()
+        self._vlm_service = None

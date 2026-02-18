@@ -42,3 +42,14 @@ class WallClimbConfig:
         
         # Folder where we save the 3 frames before sending to VLM (optional, for debugging)
         self.vlm_frames_dir = config.get("vlm_frames_dir", "wall_climb_vlm_frames")
+
+        # Tracker: keep same track_id when person reappears after occlusion (Kalman + longer max_age)
+        tracker_config = config.get("tracker_config") or {}
+        self.tracker_max_age = int(tracker_config.get("max_age", 180))  # frames to keep lost track (default 180 ≈ 6s @30fps)
+        self.tracker_min_hits = int(tracker_config.get("min_hits", 2))
+        self.tracker_iou_threshold = float(tracker_config.get("iou_threshold", 0.3))
+        self.tracker_score_threshold = float(tracker_config.get("score_threshold", self.confidence_threshold))
+        self.tracker_max_distance = float(tracker_config.get("max_distance_threshold", 180.0))
+        self.tracker_max_distance_max = float(tracker_config.get("max_distance_threshold_max", 400.0))
+        self.tracker_distance_growth = float(tracker_config.get("distance_growth_per_missed_frame", 10.0))
+        self.tracker_use_kalman = bool(tracker_config.get("use_kalman", True))

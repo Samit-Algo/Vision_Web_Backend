@@ -3,29 +3,131 @@ Object Tracking for Scenarios
 ------------------------------
 
 Simple object tracker for line-based counting.
-Used by class_count and box_count scenarios.
+Used by class_count, box_count, wall_climb_detection, fall_detection.
+
+- Kalman filter: predicts position/size when person is briefly occluded so the same
+  track_id can be re-assigned when they reappear (reduces ID switches and false new IDs).
+- For "same person after long absence" (many seconds): consider ByteTrack/BoT-SORT with
+  Re-ID (appearance embedding) — see TRACKING_README or integration notes below.
 """
 
 from typing import List, Tuple, Optional, Dict, Any
 import numpy as np
 
 
+# -----------------------------------------------------------------------------
+# Kalman filter for bounding box (constant-velocity model)
+# -----------------------------------------------------------------------------
+
+class KalmanBoxFilter:
+    """
+    Kalman filter for [cx, cy, w, h, vx, vy].
+    Predicts where the box will be next frame so we can match the same person
+    when they reappear after brief occlusion (same track_id, fewer false positives).
+    Uses only numpy; no extra dependencies.
+    """
+    def __init__(self, bbox: List[float], dt: float = 1.0):
+        # State: [cx, cy, w, h, vx, vy]
+        x1, y1, x2, y2 = bbox[:4]
+        cx = (x1 + x2) / 2.0
+        cy = (y1 + y2) / 2.0
+        w = max(x2 - x1, 1.0)
+        h = max(y2 - y1, 1.0)
+        self.dt = dt
+        self.state = np.array([cx, cy, w, h, 0.0, 0.0], dtype=np.float64)
+        # State covariance: allow uncertainty to grow when not updated
+        self.P = np.eye(6, dtype=np.float64) * 10.0
+        self.P[4:, 4:] *= 2.0  # velocity more uncertain initially
+        # Process noise (motion uncertainty per step)
+        self.Q = np.eye(6, dtype=np.float64) * 0.5
+        self.Q[0, 0] = self.Q[1, 1] = 1.0
+        self.Q[4, 4] = self.Q[5, 5] = 4.0
+        # Measurement noise
+        self.R = np.diag([5.0, 5.0, 10.0, 10.0]).astype(np.float64)
+        # F: state transition (constant velocity)
+        self.F = np.eye(6, dtype=np.float64)
+        self.F[0, 4] = self.F[1, 5] = dt
+        # H: we observe [cx, cy, w, h]
+        self.H = np.zeros((4, 6), dtype=np.float64)
+        self.H[0, 0] = self.H[1, 1] = self.H[2, 2] = self.H[3, 3] = 1.0
+
+    def predict(self) -> np.ndarray:
+        """Predict next state. Returns state vector [cx, cy, w, h, vx, vy]."""
+        self.state = self.F.dot(self.state)
+        self.P = self.F.dot(self.P).dot(self.F.T) + self.Q
+        return self.state.copy()
+
+    def update(self, bbox: List[float]) -> np.ndarray:
+        """Update with new bbox measurement. Returns state after update."""
+        x1, y1, x2, y2 = bbox[:4]
+        z = np.array([
+            (x1 + x2) / 2.0,
+            (y1 + y2) / 2.0,
+            max(x2 - x1, 1.0),
+            max(y2 - y1, 1.0),
+        ], dtype=np.float64)
+        y = z - self.H.dot(self.state)
+        S = self.H.dot(self.P).dot(self.H.T) + self.R
+        try:
+            K = self.P.dot(self.H.T).dot(np.linalg.inv(S))
+        except np.linalg.LinAlgError:
+            return self.state.copy()
+        self.state = self.state + K.dot(y)
+        self.P = (np.eye(6) - K.dot(self.H)).dot(self.P)
+        return self.state.copy()
+
+    def get_predicted_bbox(self) -> List[float]:
+        """Return [x1, y1, x2, y2] from current state (after predict)."""
+        s = self.state
+        cx, cy, w, h = s[0], s[1], s[2], s[3]
+        x1 = cx - w / 2.0
+        y1 = cy - h / 2.0
+        x2 = cx + w / 2.0
+        y2 = cy + h / 2.0
+        return [float(x1), float(y1), float(x2), float(y2)]
+
+    def get_predicted_center(self) -> Tuple[float, float]:
+        """Return (cx, cy) from current state."""
+        return (float(self.state[0]), float(self.state[1]))
+
+
 class Track:
-    """Represents a single tracked object."""
+    """
+    Represents a single tracked object.
+    Uses Kalman filter for prediction so the same person can be re-matched
+    when they reappear after brief occlusion (stable track_id, fewer false new IDs).
+    """
     
-    def __init__(self, track_id: int, bbox: List[float], score: float, frame_id: int):
+    def __init__(self, track_id: int, bbox: List[float], score: float, frame_id: int, use_kalman: bool = True):
         self.track_id = track_id
-        self.bbox = bbox  # [x1, y1, x2, y2]
+        self.bbox = list(bbox)  # [x1, y1, x2, y2]
         self.score = score
-        self.frame_id = frame_id  # Frame where this track was first seen
+        self.frame_id = frame_id  # Frame where this track was last updated
         self.center = self.calculate_center()
         self.history = [self.center]  # Movement history
         self.age = 1
         self.hit_streak = 1
         self.time_since_update = 0  # Frames since last successful match
-        
-        # Velocity estimation (for motion prediction)
         self.velocity: Tuple[float, float] = (0.0, 0.0)
+        # Kalman filter for better prediction when person reappears after occlusion
+        self._kalman: Optional[KalmanBoxFilter] = KalmanBoxFilter(bbox) if use_kalman else None
+        if self._kalman:
+            self._kalman.update(bbox)  # initialize with first measurement
+        self._cached_predicted_bbox: Optional[List[float]] = None
+        self._cached_predicted_center: Optional[Tuple[float, float]] = None
+    
+    def advance_predict(self) -> None:
+        """Call once per frame before matching: run Kalman predict and cache result."""
+        if self._kalman is not None:
+            self._kalman.predict()
+            self._cached_predicted_bbox = self._kalman.get_predicted_bbox()
+            self._cached_predicted_center = self._kalman.get_predicted_center()
+        else:
+            self.update_velocity()
+            dx, dy = self.velocity
+            x1, y1, x2, y2 = self.bbox
+            self._cached_predicted_bbox = [x1 + dx, y1 + dy, x2 + dx, y2 + dy]
+            self._cached_predicted_center = (self.center[0] + dx, self.center[1] + dy)
     
     def calculate_center(self) -> Tuple[float, float]:
         """Calculate center point of bounding box."""
@@ -45,40 +147,43 @@ class Track:
             self.velocity = (0.0, 0.0)
     
     def predict_position(self) -> Tuple[float, float]:
-        """Predict next position based on velocity."""
-        # Use velocity to predict where the box will be
-        predicted_x = self.center[0] + self.velocity[0]
-        predicted_y = self.center[1] + self.velocity[1]
-        return (predicted_x, predicted_y)
+        """Predict next position (uses cached result from advance_predict() if set)."""
+        if self._cached_predicted_center is not None:
+            return self._cached_predicted_center
+        self.advance_predict()
+        return self._cached_predicted_center or self.center
     
     def get_predicted_bbox(self) -> List[float]:
-        """Get predicted bounding box based on velocity."""
-        dx, dy = self.velocity
-        x1, y1, x2, y2 = self.bbox
-        return [x1 + dx, y1 + dy, x2 + dx, y2 + dy]
+        """Get predicted bbox (uses cached result from advance_predict() if set)."""
+        if self._cached_predicted_bbox is not None:
+            return self._cached_predicted_bbox
+        self.advance_predict()
+        return self._cached_predicted_bbox or self.bbox
     
     def update(self, bbox: List[float], score: float, frame_id: int):
         """Update track with new detection."""
-        self.bbox = bbox
+        self.bbox = list(bbox)
         self.score = score
         self.frame_id = frame_id
         self.center = self.calculate_center()
         self.history.append(self.center)
         self.age += 1
         self.hit_streak += 1
-        self.time_since_update = 0  # Reset on successful match
-        
-        # Update velocity estimation
+        self.time_since_update = 0
         self.update_velocity()
-        
-        # Keep only last 30 positions
+        if self._kalman is not None:
+            self._kalman.update(bbox)
+        self._cached_predicted_bbox = None
+        self._cached_predicted_center = None
         if len(self.history) > 30:
             self.history = self.history[-30:]
     
     def mark_missed(self):
         """Mark this track as missed (not matched in current frame)."""
         self.time_since_update += 1
-        self.hit_streak = 0  # Reset hit streak on miss
+        self.hit_streak = 0
+        self._cached_predicted_bbox = None
+        self._cached_predicted_center = None
 
 
 class SimpleTracker:
@@ -99,8 +204,12 @@ class SimpleTracker:
     - Better handling of temporary occlusions
     """
     
-    def __init__(self, max_age: int = 30, min_hits: int = 3, 
-                 iou_threshold: float = 0.3, score_threshold: float = 0.5):
+    def __init__(self, max_age: int = 30, min_hits: int = 3,
+                 iou_threshold: float = 0.3, score_threshold: float = 0.5,
+                 max_distance_threshold: float = 150.0,
+                 max_distance_threshold_max: float = 350.0,
+                 distance_growth_per_missed_frame: float = 8.0,
+                 use_kalman: bool = True):
         self.max_age = max_age
         self.min_hits = min_hits
         self.iou_threshold = iou_threshold
@@ -108,10 +217,11 @@ class SimpleTracker:
         self.tracks: List[Track] = []
         self.track_id_counter = 0
         self.frame_id = 0  # Current frame number
-        
-        # Distance threshold for fallback matching (pixels)
-        # This allows matching even when IoU is 0 (box moved too far)
-        self.max_distance_threshold = 150.0  # Increased for faster conveyor belts
+        self.use_kalman = use_kalman
+        # Distance threshold for fallback matching (pixels); scales when track was missed (re-appearance)
+        self.max_distance_threshold = max_distance_threshold
+        self.max_distance_threshold_max = max_distance_threshold_max
+        self.distance_growth_per_missed_frame = distance_growth_per_missed_frame
     
     def iou(self, box1: List[float], box2: List[float]) -> float:
         """Calculate Intersection over Union between two boxes."""
@@ -178,6 +288,11 @@ class SimpleTracker:
             unmatched_detection_indices = list(range(len(detections)))
             return [], unmatched_detection_indices, []
         
+        # One Kalman predict per track so we have predicted position/bbox for matching
+        if use_prediction:
+            for track in tracks:
+                track.advance_predict()
+        
         # Calculate matching matrices
         num_dets = len(detections)
         num_tracks = len(tracks)
@@ -226,20 +341,25 @@ class SimpleTracker:
         # Use 0.15 instead of self.iou_threshold for better matching
         effective_iou_threshold = min(self.iou_threshold, 0.15)
         
+        # Per-track distance threshold: allow larger distance when track was missed more frames (re-appearance)
+        def _distance_threshold(track: Track) -> float:
+            growth = getattr(self, "distance_growth_per_missed_frame", 0.0)
+            cap = getattr(self, "max_distance_threshold_max", self.max_distance_threshold)
+            return min(cap, self.max_distance_threshold + track.time_since_update * growth)
+        
         # Find matches (greedy matching using combined score)
         potential_matches = []
         for d_idx in range(num_dets):
             for t_idx in range(num_tracks):
                 iou_score = best_iou_matrix[d_idx, t_idx]
                 dist_score = best_dist_matrix[d_idx, t_idx]
-                
-                # Match if IoU is good enough OR distance is close enough
-                # This allows matching even when IoU is 0 (box moved far but is close)
-                if iou_score >= effective_iou_threshold or dist_score < self.max_distance_threshold:
+                dist_thresh = _distance_threshold(tracks[t_idx])
+                # Match if IoU is good enough OR distance is close enough (larger threshold for missed tracks)
+                if iou_score >= effective_iou_threshold or dist_score < dist_thresh:
                     potential_matches.append((
-                        d_idx, t_idx, 
-                        combined_score[d_idx, t_idx], 
-                        iou_score, 
+                        d_idx, t_idx,
+                        combined_score[d_idx, t_idx],
+                        iou_score,
                         dist_score
                     ))
         
@@ -253,10 +373,9 @@ class SimpleTracker:
         
         for d_idx, t_idx, score, iou, dist in potential_matches:
             if d_idx not in used_detections and t_idx not in used_tracks:
-                # Additional validation: don't match if both IoU is 0 AND distance is too far
-                if iou < 0.01 and dist > self.max_distance_threshold:
+                # Additional validation: don't match if both IoU is 0 AND distance is too far (use per-track threshold)
+                if iou < 0.01 and dist > _distance_threshold(tracks[t_idx]):
                     continue
-                    
                 matches.append((d_idx, t_idx))
                 used_detections.add(d_idx)
                 used_tracks.add(t_idx)
@@ -291,11 +410,13 @@ class SimpleTracker:
             det_center = self.get_detection_center(d_bbox)
             
             for t_idx, track in enumerate(tracks):
-                # Use predicted position for matching
                 predicted_center = track.predict_position()
                 dist = self.point_distance(det_center, predicted_center)
-                
-                if dist < self.max_distance_threshold:
+                dist_thresh = min(
+                    getattr(self, "max_distance_threshold_max", self.max_distance_threshold),
+                    self.max_distance_threshold + track.time_since_update * getattr(self, "distance_growth_per_missed_frame", 0.0)
+                )
+                if dist < dist_thresh:
                     distance_pairs.append((d_idx, t_idx, dist))
         
         # Sort by distance (smallest first)
@@ -390,7 +511,7 @@ class SimpleTracker:
         for d_idx in remaining_unmatched_indices:
             if d_idx < len(valid_detections):
                 bbox, score = valid_detections[d_idx]
-                new_track = Track(self.track_id_counter, bbox, score, self.frame_id)
+                new_track = Track(self.track_id_counter, bbox, score, self.frame_id, use_kalman=self.use_kalman)
                 self.tracks.append(new_track)
                 self.track_id_counter += 1
         

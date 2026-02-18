@@ -820,10 +820,15 @@ class PipelineRunner:
             # Filter detections based on scenario type (include keypoints for fall_detection/pose)
             keypoints_src = getattr(merged_packet, "keypoints", None) or []
             if is_restricted_zone and target_class:
-                # Show ALL detections of target class (e.g., all persons)
+                # Get scenario's confidence threshold (must match for index mapping to work)
+                scenario_conf = 0.5  # Default
+                if restricted_zone_scenario and hasattr(restricted_zone_scenario, 'config_obj'):
+                    scenario_conf = getattr(restricted_zone_scenario.config_obj, 'confidence_threshold', 0.5)
+                
+                # Show ALL detections of target class (e.g., all persons) using SAME confidence as scenario
                 f_boxes, f_classes, f_scores, f_keypoints = self.filter_detections_by_class(
                     target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores,
-                    keypoints_src,
+                    keypoints_src, confidence_threshold=scenario_conf,
                 )
                 # Use scenario state in_zone_indices so per-box red is correct even during alert cooldown
                 # (when no event is emitted, all_matched_indices is empty but state still has who is in zone)
@@ -831,11 +836,15 @@ class PipelineRunner:
                 if restricted_zone_scenario and hasattr(restricted_zone_scenario, '_state'):
                     state_in_zone = restricted_zone_scenario._state.get("in_zone_indices") or []
                 orig_in_zone = set(state_in_zone) if state_in_zone else set(all_matched_indices)
+                
+                # Map original indices to filtered indices (only count boxes that pass confidence threshold)
                 filtered_idx = 0
                 for orig_idx in range(len(merged_packet.boxes)):
-                    if orig_idx < len(merged_packet.classes):
+                    if orig_idx < len(merged_packet.classes) and orig_idx < len(merged_packet.scores):
                         det_class = merged_packet.classes[orig_idx]
-                        if isinstance(det_class, str) and det_class.lower() == target_class:
+                        det_score = merged_packet.scores[orig_idx]
+                        # Only count boxes that pass the SAME confidence threshold as f_boxes
+                        if isinstance(det_class, str) and det_class.lower() == target_class and det_score >= scenario_conf:
                             if orig_idx in orig_in_zone:
                                 in_zone_indices.append(filtered_idx)
                             filtered_idx += 1
