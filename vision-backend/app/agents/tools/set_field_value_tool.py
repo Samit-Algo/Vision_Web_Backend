@@ -1,0 +1,163 @@
+from __future__ import annotations
+
+import json
+import logging
+from typing import Dict
+
+from ..exceptions import StateNotInitializedError, ValidationError, VisionAgentError
+from ..session_state.agent_state import AgentState, get_agent_state
+from .kb_utils import compute_missing_fields, get_rule
+
+logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# FIELD UPDATE
+# ============================================================================
+
+def set_field_value(field_values_json: str, session_id: str = "default") -> Dict:
+    """
+    Update one or more fields on the current agent state.
+
+    Args:
+        field_values_json: JSON string mapping field name -> value
+        session_id: Session identifier for state management
+
+    Returns:
+        Dict with updated_fields, status, and message (success path only).
+
+    Raises:
+        ValidationError: Invalid JSON or non-dict payload.
+        StateNotInitializedError: State has no rule selected yet.
+        RuleNotFoundError: Rule from state not in knowledge base (from get_rule).
+        VisionAgentError: Unexpected error (with safe user_message).
+    """
+    try:
+        field_values = json.loads(field_values_json) if field_values_json else {}
+    except json.JSONDecodeError:
+        raise ValidationError(
+            "Invalid JSON in field_values_json",
+            user_message="Invalid field values. Please check the format.",
+        )
+
+    if not isinstance(field_values, dict):
+        raise ValidationError(
+            "field_values_json must decode to an object",
+            user_message="Invalid field values format.",
+        )
+
+    logger.debug(
+        "set_field_value called (session_id=%s, payload_length=%s)",
+        session_id,
+        len(field_values_json or ""),
+    )
+
+    agent = get_agent_state(session_id)
+    logger.debug(
+        "Current state before set_field_value (status=%s rule_id=%s missing=%s)",
+        agent.status,
+        agent.rule_id,
+        agent.missing_fields,
+    )
+
+    if not agent.rule_id:
+        raise StateNotInitializedError(
+            "Cannot set fields before rule selection",
+            user_message="Please select what you want to create first, then provide the details.",
+        )
+
+    rule = get_rule(agent.rule_id)
+
+    try:
+        if agent.fields.get("run_mode") is None:
+            agent.fields["run_mode"] = "continuous"
+
+        updated_fields = []
+        for key, value in field_values.items():
+            agent.fields[key] = value
+            updated_fields.append(key)
+
+        update_rules_field(agent, rule)
+
+        if not agent.fields.get("name"):
+            compute_missing_fields(agent, rule)
+            if not agent.missing_fields:
+                rule_name = rule.get("rule_name", "Agent")
+                class_name = agent.fields.get("class") or agent.fields.get("gesture") or ""
+                if class_name:
+                    class_display = class_name.replace("_", " ").title()
+                    agent.fields["name"] = f"{class_display} {rule_name} Agent"
+                else:
+                    agent.fields["name"] = f"{rule_name} Agent"
+
+        compute_missing_fields(agent, rule)
+
+        logger.debug(
+            "Fields updated (updated=%s missing=%s status=%s)",
+            updated_fields,
+            agent.missing_fields,
+            agent.status,
+        )
+
+        if updated_fields and not agent.missing_fields:
+            agent.status = "CONFIRMATION"
+            logger.debug("Status transitioned to CONFIRMATION")
+        elif not updated_fields:
+            logger.debug("No fields updated; keeping status=%s", agent.status)
+        else:
+            agent.status = "COLLECTING"
+            logger.debug("Status set to COLLECTING; remaining missing=%s", agent.missing_fields)
+
+        result = {
+            "updated_fields": updated_fields,
+            "status": agent.status,
+            "message": f"Updated {len(updated_fields)} field(s). Check CURRENT AGENT STATE in instruction for current missing_fields.",
+        }
+        logger.debug("set_field_value returning: %s", result)
+        return result
+    except (ValidationError, StateNotInitializedError):
+        raise
+    except VisionAgentError:
+        raise
+    except Exception as e:
+        logger.exception("Unexpected error in set_field_value: %s", e)
+        raise VisionAgentError(
+            str(e),
+            user_message="Something went wrong while updating. Please try again.",
+        ) from e
+
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def update_rules_field(agent: AgentState, rule: Dict) -> None:
+    """
+    Dynamically update the rules array with complete configuration based on knowledge base definition.
+
+    Special handling:
+    - "label" field: If in rules_config_fields but not provided, auto-generate from "class" if available
+    - "zone" field: For counting rules (class_count, box_count), include zone in rule config if it exists
+    """
+    rule_id = agent.rule_id
+    rule_config = {"type": rule_id}
+
+    rules_config_fields = rule.get("rules_config_fields", [])
+
+    for field_name in rules_config_fields:
+        if field_name == "label" and field_name not in agent.fields:
+            if agent.fields.get("class"):
+                class_name = agent.fields["class"].replace("_", " ").title()
+                rule_config["label"] = f"{class_name} detection"
+        elif field_name in agent.fields:
+            value = agent.fields[field_name]
+            if value is not None:
+                rule_config[field_name] = value
+
+    # For counting rules (class_count, box_count), include zone in rule config if it exists
+    if rule_id in ["class_count", "box_count"]:
+        zone = agent.fields.get("zone")
+        if zone is not None:
+            rule_config["zone"] = zone
+
+    agent.fields["rules"] = [rule_config]

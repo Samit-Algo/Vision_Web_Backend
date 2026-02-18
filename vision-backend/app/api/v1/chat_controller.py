@@ -1,13 +1,22 @@
 """
-Chat API: non-streaming message and SSE stream endpoints.
+Agent chat API: send message and stream response (SSE).
 """
 
+# -----------------------------------------------------------------------------
+# Standard library
+# -----------------------------------------------------------------------------
 import json
 
+# -----------------------------------------------------------------------------
+# Third-party
+# -----------------------------------------------------------------------------
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 
-from ...agents.exceptions import ValidationError, VisionAgentError
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
+from ...agents.exceptions import ValidationError, VisionAgentError, get_user_message
 from ...application.dto.chat_dto import ChatMessageRequest, ChatMessageResponse
 from ...application.dto.user_dto import UserResponse
 from ...application.use_cases.chat.chat_with_agent import ChatWithAgentUseCase
@@ -15,67 +24,82 @@ from ...di.container import get_container
 
 from .dependencies import get_current_user
 
+# -----------------------------------------------------------------------------
+# Router
+# -----------------------------------------------------------------------------
 router = APIRouter(tags=["chat"])
 
 
-def _sse_encode(event: str, data: dict) -> bytes:
-    """Encode one SSE event (event + data)."""
+def encode_sse(event_name: str, data: dict) -> bytes:
+    """Encode event name and data as Server-Sent Events format."""
     payload = json.dumps(data, ensure_ascii=False)
-    return f"event: {event}\ndata: {payload}\n\n".encode("utf-8")
-
-
-# Never show technical errors to the user.
-GENERIC_MESSAGE = "Please try again."
-
-
-def _error_done_response(message: str, session_id: str | None, default_sid: str = "error") -> dict:
-    return ChatMessageResponse(
-        response=message,
-        session_id=session_id or default_sid,
-        status="error",
-    ).model_dump()
+    return f"event: {event_name}\ndata: {payload}\n\n".encode("utf-8")
 
 
 @router.post("/message", response_model=ChatMessageResponse)
-async def post_message(
+async def chat_message(
     request: ChatMessageRequest,
     current_user: UserResponse = Depends(get_current_user),
 ) -> ChatMessageResponse:
-    """Send a message; return full response."""
-    use_case = get_container().get(ChatWithAgentUseCase)
+    """Send a message to the agent chatbot; returns full response."""
+    container = get_container()
+    use_case = container.get(ChatWithAgentUseCase)
     try:
         return await use_case.execute(request=request, user_id=current_user.id)
     except ValidationError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.user_message)
-    except (VisionAgentError, Exception):
-        return ChatMessageResponse(
-            response=GENERIC_MESSAGE,
-            session_id=request.session_id or "",
-            status="error",
+    except VisionAgentError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=e.user_message,
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Something went wrong. Please try again.",
         )
 
 
 @router.post("/message/stream")
-async def post_message_stream(
+async def chat_message_stream(
     request: ChatMessageRequest,
     current_user: UserResponse = Depends(get_current_user),
 ) -> StreamingResponse:
-    """Stream response as SSE (meta, token, done, error)."""
-    use_case = get_container().get(ChatWithAgentUseCase)
+    """Stream agent response as Server-Sent Events (event: meta, token, done, error)."""
+    container = get_container()
+    use_case = container.get(ChatWithAgentUseCase)
 
-    async def generate():
+    async def event_generator():
         try:
             async for item in use_case.stream_execute(request=request, user_id=current_user.id):
-                event = item.get("event") or "message"
+                ev = item.get("event") or "message"
                 data = item.get("data") or {}
-                yield _sse_encode(str(event), data if isinstance(data, dict) else {"data": data})
+                yield encode_sse(str(ev), data if isinstance(data, dict) else {"data": data})
         except ValidationError as e:
-            yield _sse_encode("done", _error_done_response(e.user_message, request.session_id, "validation-error"))
-        except (VisionAgentError, Exception):
-            yield _sse_encode("done", _error_done_response(GENERIC_MESSAGE, request.session_id))
+            yield encode_sse("error", {"message": e.user_message})
+            yield encode_sse("done", ChatMessageResponse(
+                response=e.user_message,
+                session_id=request.session_id or "validation-error",
+                status="error",
+            ).model_dump())
+        except VisionAgentError as e:
+            yield encode_sse("error", {"message": e.user_message})
+            yield encode_sse("done", ChatMessageResponse(
+                response=e.user_message,
+                session_id=request.session_id or "error",
+                status="error",
+            ).model_dump())
+        except Exception as e:
+            msg = get_user_message(e)
+            yield encode_sse("error", {"message": msg})
+            yield encode_sse("done", ChatMessageResponse(
+                response=msg,
+                session_id=request.session_id or "error",
+                status="error",
+            ).model_dump())
 
     return StreamingResponse(
-        generate(),
+        event_generator(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
