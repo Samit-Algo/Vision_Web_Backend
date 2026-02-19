@@ -4,8 +4,8 @@ Camera-related tools for the General Chat Agent.
 
 import asyncio
 from typing import Dict, Any, Optional
-from ...tools.camera_selection_tool import list_cameras as _list_cameras_base
-from ...tools.camera_selection_tool import resolve_camera as _resolve_camera_base
+from ...agent_chat.tools.camera import list_cameras as _list_cameras_base
+from ...agent_chat.tools.camera import resolve_camera as _resolve_camera_base
 
 def list_my_cameras(user_id: str) -> Dict[str, Any]:
     """
