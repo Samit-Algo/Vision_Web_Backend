@@ -30,15 +30,16 @@ class LoomContext:
 
 @dataclass
 class MotionAnalysis:
-    """Motion analysis result for a single loom ROI."""
+    """Motion analysis result for a single loom ROI (MOG2 + rolling buffer)."""
 
     loom_id: str
-    motion_detected: bool
-    motion_energy: float
-    confidence: float
+    motion_detected: bool  # True if motion_ratio > motion_ratio_stopped (for idle sample buffer)
+    motion_ratio: float  # foreground_pixels / total_roi_pixels (0.0–1.0)
+    confidence: float  # same as motion_ratio for compatibility
     timestamp: datetime
     frame_index: int
-    optical_flow_magnitude: Optional[float] = None
+    motion_energy: float = 0.0  # alias for motion_ratio (backward compat)
+    optical_flow_magnitude: Optional[float] = None  # unused with MOG2
 
 
 @dataclass

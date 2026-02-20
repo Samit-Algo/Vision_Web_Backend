@@ -203,6 +203,46 @@ def save_agent_to_db(session_id: str = "default", user_id: Optional[str] = None)
     if requires_zone and agent_state.fields.get("zone") is not None:
         payload["zone"] = agent_state.fields["zone"]
 
+    # Build rules payload: for loom_machine_state, build from zone (motion_rois) + config
+    if agent_state.rule_id == "loom_machine_state":
+        zone = agent_state.fields.get("zone")
+        if isinstance(zone, dict) and zone.get("type") == "motion_rois" and isinstance(zone.get("looms"), list) and len(zone.get("looms", [])) >= 1:
+            # idle_threshold_minutes is required (in required_fields_from_user), so it should always be present
+            # The is not None check handles the case where value might be 0 (valid)
+            idle_threshold = agent_state.fields.get("idle_threshold_minutes")
+            if idle_threshold is None:
+                return failure("missing_idle_threshold", "Idle threshold (in minutes) is required. Please provide how many minutes the machine should be idle before alerting.", agent_state.status, False)
+            def _get(key, default):
+                v = agent_state.fields.get(key)
+                return v if v is not None else default
+            config = {
+                "idle_threshold_minutes": idle_threshold,
+                "analysis_window_minutes": _get("analysis_window_minutes", 15),
+                "frames_per_minute": _get("frames_per_minute", 5),
+                "notify_on_idle": _get("notify_on_idle", True),
+                "alert_cooldown_minutes": _get("alert_cooldown_minutes", 30),
+                "rolling_window_seconds": _get("rolling_window_seconds", 15),
+                "motion_ratio_running": _get("motion_ratio_running", 0.02),
+                "motion_ratio_stopped": _get("motion_ratio_stopped", 0.005),
+                "debounce_seconds": _get("debounce_seconds", 5),
+                "mog2_history": _get("mog2_history", 500),
+                "mog2_var_threshold": _get("mog2_var_threshold", 16),
+                "mog2_detect_shadows": _get("mog2_detect_shadows", False),
+                "preprocess_blur_ksize": _get("preprocess_blur_ksize", 5),
+                "morph_ksize": _get("morph_ksize", 3),
+            }
+            payload["rules"] = [
+                {
+                    "type": "loom_machine_state",
+                    "looms": zone["looms"],
+                    "config": config,
+                }
+            ]
+        else:
+            payload["rules"] = agent_state.fields.get("rules", [])
+    else:
+        payload["rules"] = agent_state.fields.get("rules", [])
+
     try:
         agent = Agent(**payload)
     except Exception:

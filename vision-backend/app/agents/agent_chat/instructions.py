@@ -34,6 +34,7 @@ You receive CURRENT_STATE_JSON with a field **current_step**. It is one of: came
 - **Zone**: Zone is always drawn by the user in the UI. Never output coordinates or assume a zone.
 - **After save**: If status is SAVED, thank the user and say the agent is active. Do not restart or ask for more fields unless the user asks for something new.
 - **Object class / gesture**: When the rule has detectable_classes or detectable_gestures in ACTIVE_RULE_CONTEXT_JSON, map the user's words to one of those values (e.g. "someone" → person, "vehicle" → car). Set it via set_field_value; do not ask for confirmation.
+- **Idle threshold (loom_machine_state)**: For the Machine Idle Alert rule, you MUST ask the user for the idle threshold in minutes (e.g., "15 minutes", "30 minutes"). This is required and cannot use a default. Ask after the zone is drawn or during confirmation if it's missing. Extract the number from the user's response and set it via set_field_value with field name "idle_threshold_minutes" (numeric value only, e.g., 15, 30).
 
 ## Conversation style
 - Be brief and direct. One question per message when collecting; one summary at confirmation.
@@ -51,9 +52,14 @@ def get_step_hint(current_step: str, rule: dict) -> str:
         zone_type = zone_support.get("zone_type", "polygon")
         if zone_type == "line":
             return "Do: Ask user to draw a line in the zone editor (exactly 2 points). Do not ask for object class or anything else."
+        if zone_type == "motion_rois":
+            return "Do: Ask user to draw one rectangle (motion ROI) per machine in the zone editor, around the moving parts of each machine. At least one rectangle is required. Do not ask for object class or anything else."
         return "Do: Ask user to draw a polygon in the zone editor (at least 3 points). Do not ask for object class or anything else."
     if current_step == "time_window":
         return "Do: Ask for start and end time (e.g. 'start now, end in 1 hour'). Use parse_time_window_wrapper with the user's exact phrase. If end_time is missing in the result, ask when to end."
     if current_step == "confirmation":
+        rule_id = (rule or {}).get("rule_id", "")
+        if rule_id == "loom_machine_state":
+            return "Do: Check if idle_threshold_minutes is missing. If missing, ask the user: 'How many minutes should the machine be idle before alerting?' Extract the number and set it via set_field_value with field name 'idle_threshold_minutes'. Then summarize the agent and ask for confirmation."
         return "Do: Summarize the agent in one short paragraph, then ask user to confirm (Yes/No). If they say yes or confirm, call save_wrapper immediately."
     return "Do: Proceed according to current_step and ACTIVE_RULE_CONTEXT_JSON."

@@ -250,7 +250,7 @@ def main(shared_store=None) -> None:
                 worker_process.start()
                 task_processes[task_id] = worker_process
 
-                print(f"[runner] 🏃 Launched worker for task {task_id} (pid={worker_process.pid})")
+                print(f"[runner] 🏃 Launched worker for task {task_id} (pid={worker_process.pid}) | overlay store_key={task_id!r}")
 
             # Clean up finished processes
             for finished_task_id, worker_process in list(task_processes.items()):

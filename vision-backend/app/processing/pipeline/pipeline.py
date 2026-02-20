@@ -11,6 +11,7 @@ Manages the main loop (continuous or patrol), FPS pacing, and stage sequencing.
 # -----------------------------------------------------------------------------
 import dataclasses
 import time
+import traceback
 from typing import Any, Dict, List, Optional, Tuple
 
 # -----------------------------------------------------------------------------
@@ -34,6 +35,7 @@ from app.processing.drawing.frame_processor import (
     draw_zone_polygon,
     draw_zone_line,
     draw_boxes_in_zone_red,
+    draw_loom_machine_polygons,
 )
 # Trigger scenario registration (decorators run on import)
 from app.processing.vision_tasks import scenario_registry  # noqa: F401
@@ -140,7 +142,19 @@ def overlay_data_to_dict_list(overlay_data: Any) -> List[Dict[str, Any]]:
                 out.append(item)
         return out
     if isinstance(overlay_data, dict):
-        # Loom-style: {boxes, labels, colors} -> list of {box, label, color}
+        # Loom machine state: {polygons, colors} -> list of {polygon, color}
+        if "polygons" in overlay_data:
+            polygons = overlay_data.get("polygons") or []
+            colors = overlay_data.get("colors") or []
+            n = max(len(polygons), len(colors))
+            return [
+                {
+                    "polygon": polygons[i] if i < len(polygons) else None,
+                    "color": colors[i] if i < len(colors) else None,
+                }
+                for i in range(n)
+            ]
+        # Legacy loom-style: {boxes, labels, colors} -> list of {box, label, color}
         boxes = overlay_data.get("boxes") or []
         labels = overlay_data.get("labels") or []
         colors = overlay_data.get("colors") or []
@@ -450,9 +464,14 @@ class PipelineRunner:
                 min_interval = 1.0 / max(1, fps)
 
             # 4. Run stages 2–4 and draw/publish/event/heartbeat (shared logic)
-            next_tick, last_status, processed_in_window, skipped_in_window = self.process_one_frame(
-                frame_packet, fps, min_interval, next_tick, last_status, processed_in_window, skipped_in_window
-            )
+            try:
+                next_tick, last_status, processed_in_window, skipped_in_window = self.process_one_frame(
+                    frame_packet, fps, min_interval, next_tick, last_status, processed_in_window, skipped_in_window
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[worker {self.context.task_id}] ⚠️ Error in process_one_frame (continuing): {exc}")
+                traceback.print_exc()
+                next_tick = max(next_tick + min_interval, time.time())
 
     # -------------------------------------------------------------------------
     # Public: run pipeline in patrol mode
@@ -505,9 +524,14 @@ class PipelineRunner:
                     fps = int(frame_packet.fps)
                     min_interval = 1.0 / max(1, fps)
 
-                next_tick, last_status, processed_in_window, skipped_in_window = self.process_one_frame(
-                    frame_packet, fps, min_interval, next_tick, last_status, processed_in_window, skipped_in_window
-                )
+                try:
+                    next_tick, last_status, processed_in_window, skipped_in_window = self.process_one_frame(
+                        frame_packet, fps, min_interval, next_tick, last_status, processed_in_window, skipped_in_window
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[worker {self.context.task_id}] ⚠️ Error in process_one_frame (patrol, continuing): {exc}")
+                    traceback.print_exc()
+                    next_tick = max(next_tick + min_interval, time.time())
 
             print(f"[worker {self.context.task_id}] 💤 Patrol window ended; going back to sleep")
     
@@ -555,8 +579,10 @@ class PipelineRunner:
     ) -> Optional[Any]:
         """Draw bounding boxes and publish processed frame to shared_store."""
         if self.shared_store is None or not self.context.rules:
+            if self.shared_store is None:
+                print(f"[worker {self.context.task_id}] ⚠️ draw_and_publish_frame: shared_store is None, skip publish")
             return None
-        
+
         try:
             frame = frame_packet.frame.copy()
             
@@ -973,6 +999,20 @@ class PipelineRunner:
                         scenario_overlays.extend(
                             overlay_data_to_dict_list(overlay_data)
                         )
+                        # Loom machine state: draw polygons directly on frame
+                        if scenario_type == "loom_machine_state" and isinstance(overlay_data, dict):
+                            polygons = overlay_data.get("polygons", [])
+                            colors = overlay_data.get("colors", [])
+                            if polygons and colors:
+                                draw_loom_machine_polygons(
+                                    processed_frame,
+                                    polygons,
+                                    colors,
+                                    width,
+                                    height,
+                                    thickness=3,
+                                    fill_alpha=0.3
+                                )
                         # Face detection: use same overlay for face_recognitions so UI and stream both get boxes
                         if scenario_type == "face_detection":
                             face_recognitions = []
@@ -998,7 +1038,7 @@ class PipelineRunner:
 
             # Publish to shared_store (key must be string so overlay/ws can read by agent_id from URL)
             store_key = str(self.context.agent_id)
-            self.shared_store[store_key] = {
+            payload = {
                 "shape": (height, width, 3),
                 "dtype": "uint8",
                 "frame_index": frame_packet.frame_index,
@@ -1034,7 +1074,14 @@ class PipelineRunner:
                 "fall_suspected_indices": fall_suspected_indices,  # Fall: suspected fall (orange keypoints)
                 "face_recognitions": face_recognitions,  # Face detection: [{ "box": [x1,y1,x2,y2], "name": "..." }]
             }
-            
+            try:
+                self.shared_store[store_key] = payload
+                # Debug: log every 30th frame (and first 3) so we see writes without flooding
+                idx = frame_packet.frame_index
+                if idx <= 3 or (idx % 30 == 0):
+                    print(f"[worker {self.context.task_id}] 📤 shared_store WRITE ok | store_key={store_key!r} frame_index={idx}")
+            except Exception as write_exc:  # noqa: BLE001
+                print(f"[worker {self.context.task_id}] ⚠️ shared_store write failed (stream may be stale): {write_exc}")
             return processed_frame
         except Exception as exc:  # noqa: BLE001
             print(f"[worker {self.context.task_id}] ⚠️  Error processing frame for stream: {exc}")

@@ -9,6 +9,7 @@ import asyncio
 import dataclasses
 import logging
 import subprocess
+import time
 from typing import Any, List, Optional
 
 # -----------------------------------------------------------------------------
@@ -396,6 +397,12 @@ async def websocket_agent_processed_frames(
         await websocket.close(code=1011, reason="Shared store not initialized")
         return
 
+    store_key = str(agent_id)
+    logger.info(
+        "Agent overlay frames WS: agent_id=%s store_key=%s (must match worker shared_store key)",
+        agent_id, store_key,
+    )
+
     await websocket.accept()
 
     _frame_push_done = asyncio.Event()
@@ -405,27 +412,47 @@ async def websocket_agent_processed_frames(
         max_fps = 15.0
         interval = 1.0 / max_fps
         last_jpeg: Optional[bytes] = None
-        store_key = str(agent_id)
+        last_frame_index: Optional[int] = None
+        frames_sent = 0
+        last_log_time = 0.0
+        first_entry_logged = False
         try:
             while not _frame_push_done.is_set():
                 entry = None
                 try:
                     entry = shared_store.get(store_key)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Agent overlay get(store_key) failed: %s", e)
+                if entry and not first_entry_logged:
+                    first_entry_logged = True
+                    idx = entry.get("frame_index") if isinstance(entry, dict) else None
+                    logger.info(
+                        "Agent overlay first entry from shared_store: agent_id=%s frame_index=%s",
+                        agent_id, idx,
+                    )
                 jpeg = _entry_to_jpeg_bytes(entry) if entry else None
                 if jpeg:
                     last_jpeg = jpeg
+                    if isinstance(entry, dict):
+                        last_frame_index = entry.get("frame_index")
                 if last_jpeg:
                     try:
                         await asyncio.wait_for(
                             websocket.send_bytes(last_jpeg),
                             timeout=2.0,
                         )
+                        frames_sent += 1
                     except asyncio.TimeoutError:
                         pass
                     except Exception:
                         break
+                now = time.time()
+                if now - last_log_time >= 5.0:
+                    last_log_time = now
+                    logger.info(
+                        "Agent overlay stream debug: agent_id=%s store_key=%s entry=%s last_frame_index=%s frames_sent=%s",
+                        agent_id, store_key, "yes" if entry else "NO", last_frame_index, frames_sent,
+                    )
                 await asyncio.sleep(interval)
         except asyncio.CancelledError:
             pass

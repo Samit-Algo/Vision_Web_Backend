@@ -141,12 +141,17 @@ def compute_missing_fields(agent: AgentState, rule: Dict) -> None:
         add_unique("end_time")
 
     # Zone: treat None or empty dict/list as missing; video_path: None or empty string; others: None only
+    # For loom_machine_state, zone must be { type: "motion_rois", looms: [...] } with at least one loom
+    rule_id = rule.get("rule_id")
     missing = []
     for f in ordered_required:
         value = agent.fields.get(f)
         if f == "zone":
             if not value or (isinstance(value, (dict, list)) and not value):
                 missing.append(f)
+            elif rule_id == "loom_machine_state":
+                if not isinstance(value, dict) or value.get("type") != "motion_rois" or not isinstance(value.get("looms"), list) or len(value.get("looms", [])) < 1:
+                    missing.append(f)
         elif f == "video_path":
             if value is None or (isinstance(value, str) and not value.strip()):
                 missing.append(f)

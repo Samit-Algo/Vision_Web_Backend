@@ -209,6 +209,67 @@ def draw_zone_line(
     cv2.line(frame, tuple(pts[0]), tuple(pts[1]), color, thickness)
 
 
+def draw_loom_machine_polygons(
+    frame: np.ndarray,
+    polygons: List[List[List[float]]],
+    colors: List[str],
+    width: int,
+    height: int,
+    thickness: int = 3,
+    fill_alpha: float = 0.3,
+) -> None:
+    """
+    Draw loom machine ROI polygons on frame (in-place).
+    Each polygon gets a colored fill and outline based on machine state.
+    
+    Args:
+        frame: BGR image (HxWx3 numpy array)
+        polygons: List of polygons, each polygon is [[x1,y1], [x2,y2], ...] (pixel coordinates)
+        colors: List of hex color strings (e.g., "#00ff00" for green, "#ff0000" for red)
+        width: Frame width (for coordinate scaling if needed)
+        height: Frame height (for coordinate scaling if needed)
+        thickness: Outline thickness
+        fill_alpha: Fill transparency (0-1)
+    """
+    ensure_cv2()
+    if not polygons or not colors:
+        return
+    
+    for i, polygon in enumerate(polygons):
+        if not polygon or len(polygon) < 3:
+            continue
+        
+        # Get color for this polygon (default to gray if not enough colors)
+        hex_color = colors[i] if i < len(colors) else "#808080"
+        # Convert hex to BGR
+        hex_color = hex_color.lstrip("#")
+        r = int(hex_color[0:2], 16)
+        g = int(hex_color[2:4], 16)
+        b = int(hex_color[4:6], 16)
+        bgr_color = (b, g, r)  # BGR format for OpenCV
+        
+        # Scale coordinates if needed (check if normalized)
+        max_val = max(max(p[0], p[1]) for p in polygon)
+        if max_val <= 1.0:
+            pts = [(int(p[0] * width), int(p[1] * height)) for p in polygon]
+        else:
+            pts = [(int(p[0]), int(p[1])) for p in polygon]
+        
+        if len(pts) < 3:
+            continue
+        
+        pts_arr = np.array(pts, dtype=np.int32)
+        
+        # Draw filled polygon with transparency
+        if fill_alpha > 0:
+            overlay = np.zeros_like(frame)
+            cv2.fillPoly(overlay, [pts_arr], bgr_color)
+            cv2.addWeighted(overlay, fill_alpha, frame, 1.0 - fill_alpha, 0, frame)
+        
+        # Draw polygon outline
+        cv2.polylines(frame, [pts_arr], isClosed=True, color=bgr_color, thickness=thickness)
+
+
 # -----------------------------------------------------------------------------
 # boxes in zone red drawing function
 # -----------------------------------------------------------------------------

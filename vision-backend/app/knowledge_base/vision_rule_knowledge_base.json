@@ -887,9 +887,75 @@
           "alert_cooldown_seconds": 10,
           "tolerance": 0.55
         }
+      },
+      {
+        "rule_id": "loom_machine_state",
+        "rule_name": "Machine Idle Alert",
+        "description": "Notifies when a machine (e.g. loom) is idle for longer than a configurable threshold (in minutes). Uses industrial-grade motion detection: OpenCV MOG2 background subtraction plus morphological cleanup and a rolling-window motion ratio. No YOLO—model is 'none'. User draws one motion ROI (polygon) per machine around the moving parts; the system samples frames per minute, computes motion ratio per ROI, and uses a 15-second rolling average with hysteresis (RUNNING when avg motion > 0.02, STOPPED when < 0.005). When idle duration exceeds the user-specified threshold, an alert is sent (email/Kafka) and the machine is highlighted. The idle threshold must be provided by the user during agent creation.",
+        "intent_examples": [
+          "Notify me if the machine is idle for more than 15 minutes",
+          "Alert when a machine stops for more than 15 min",
+          "Tell me if the loom has been idle for too long",
+          "Machine idle detection",
+          "Alert if machine on idle state for more than 15 min"
+        ],
+        "model": "none",
+        "required_fields_from_user": [
+          "idle_threshold_minutes"
+        ],
+        "time_window": { "supported": true, "required": true },
+        "zone_support": {
+          "supported": true,
+          "required": true,
+          "zone_type": "motion_rois",
+          "description": "User must draw one polygon (motion ROI) per machine around the moving parts. Each ROI defines where to measure pixel movement. Draw at least one polygon; multiple machines = multiple polygons. The system converts each polygon to a bounding box and uses these regions to decide if the machine is running or idle."
+        },
+        "execution_modes": {
+          "continuous": {
+            "description": "Continuously monitors machine motion and alerts when idle too long",
+            "required_fields": [],
+            "forbidden_fields": ["interval_minutes", "check_duration_seconds"],
+            "zone_required": true
+          },
+          "patrol": {
+            "description": "Checks machine state periodically",
+            "required_fields": ["interval_minutes", "check_duration_seconds"],
+            "zone_required": true
+          }
+        },
+        "rules_config_fields": [
+          "idle_threshold_minutes",
+          "analysis_window_minutes",
+          "frames_per_minute",
+          "notify_on_idle",
+          "alert_cooldown_minutes",
+          "rolling_window_seconds",
+          "motion_ratio_running",
+          "motion_ratio_stopped",
+          "debounce_seconds",
+          "mog2_history",
+          "mog2_var_threshold",
+          "mog2_detect_shadows",
+          "preprocess_blur_ksize",
+          "morph_ksize"
+        ],
+        "defaults": {
+          "fps": 5,
+          "run_mode": "continuous",
+          "analysis_window_minutes": 15,
+          "frames_per_minute": 5,
+          "notify_on_idle": true,
+          "alert_cooldown_minutes": 30,
+          "rolling_window_seconds": 15,
+          "motion_ratio_running": 0.02,
+          "motion_ratio_stopped": 0.005,
+          "debounce_seconds": 5,
+          "mog2_history": 500,
+          "mog2_var_threshold": 16,
+          "mog2_detect_shadows": false,
+          "preprocess_blur_ksize": 5,
+          "morph_ksize": 3
+        }
       }
-      
-      
-      
     ]
   }

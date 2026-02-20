@@ -34,6 +34,13 @@ def can_enter_confirmation(agent: AgentState, rule: Dict) -> bool:
         zone = agent.fields.get("zone")
         if not zone or (isinstance(zone, (dict, list)) and not zone):
             return False
+        # Loom/machine idle rule: zone must be motion_rois with at least one loom
+        if rule.get("rule_id") == "loom_machine_state":
+            if not isinstance(zone, dict) or zone.get("type") != "motion_rois":
+                return False
+            looms = zone.get("looms")
+            if not isinstance(looms, list) or len(looms) < 1:
+                return False
 
     time_window = rule.get("time_window", {})
     if time_window.get("required", False) and source_type != "video_file":
@@ -120,11 +127,15 @@ def compute_missing_fields(agent: AgentState, rule: Dict) -> None:
         add("end_time")
 
     missing = []
+    rule_id = rule.get("rule_id")
     for f in ordered:
         value = agent.fields.get(f)
         if f == "zone":
             if not value or (isinstance(value, (dict, list)) and not value):
                 missing.append(f)
+            elif rule_id == "loom_machine_state":
+                if not isinstance(value, dict) or value.get("type") != "motion_rois" or not isinstance(value.get("looms"), list) or len(value.get("looms", [])) < 1:
+                    missing.append(f)
         elif f == "video_path":
             if value is None or (isinstance(value, str) and not value.strip()):
                 missing.append(f)
