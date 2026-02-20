@@ -956,6 +956,70 @@
           "preprocess_blur_ksize": 5,
           "morph_ksize": 3
         }
+      },
+      {
+        "rule_id": "person_near_machine",
+        "rule_name": "Person Near Machine Monitoring",
+        "description": "Monitors whether an operator (person) is present in a user-drawn polygon zone. Uses YOLO person class only (no truck/other objects). Zone is stored exactly as drawn (polygon with 3+ points, like Restricted Zone). Processes 5 frames per second. If a person appears and stays inside the zone for 5 seconds, zone is marked ATTENDED (green). If no person in zone (after grace time), marked UNATTENDED (red). Alert when unattended for user-specified minutes (absence_threshold_minutes required). Independent of machine motion. Only person detections are shown and evaluated.",
+        "intent_examples": [
+          "Alert if no operator near machine for 15 minutes",
+          "Notify when loom machine is unattended",
+          "Monitor operator presence near loom",
+          "Alert if person not near machine for more than 15 minutes",
+          "Detect unattended loom machines"
+        ],
+        "model": "yolov8m.pt",
+        "required_fields_from_user": [
+          "absence_threshold_minutes"
+        ],
+        "time_window": { "supported": true, "required": true },
+        "zone_support": {
+          "supported": true,
+          "required": true,
+          "zone_type": "polygon",
+          "description": "User draws one polygon (operator zone) exactly like Restricted Zone: free-form polygon with 3+ points. Stored as zone.type 'polygon' and zone.coordinates [[x,y], ...]. No ROI/rectangle; exact user-drawn shape. Red = unattended, green = attended. Only person class is detected inside the zone."
+        },
+        "execution_modes": {
+          "continuous": {
+            "description": "Continuously monitors operator presence and alerts when unattended too long",
+            "required_fields": [],
+            "forbidden_fields": ["interval_minutes", "check_duration_seconds"],
+            "zone_required": true
+          },
+          "patrol": {
+            "description": "Checks operator presence periodically",
+            "required_fields": ["interval_minutes", "check_duration_seconds"],
+            "zone_required": true
+          }
+        },
+        "rules_config_fields": [
+          "absence_threshold_minutes",
+          "grace_time_seconds",
+          "min_presence_seconds",
+          "confidence_threshold",
+          "tracker_max_age",
+          "tracker_min_hits",
+          "tracker_iou_threshold",
+          "notify_on_absence",
+          "alert_cooldown_minutes",
+          "emit_state_transitions",
+          "emit_periodic_updates",
+          "fps"
+        ],
+        "defaults": {
+          "fps": 5,
+          "run_mode": "continuous",
+          "grace_time_seconds": 10.0,
+          "min_presence_seconds": 5.0,
+          "confidence_threshold": 0.5,
+          "tracker_max_age": 30,
+          "tracker_min_hits": 3,
+          "tracker_iou_threshold": 0.3,
+          "notify_on_absence": true,
+          "alert_cooldown_minutes": 30.0,
+          "emit_state_transitions": false,
+          "emit_periodic_updates": false
+        }
       }
     ]
   }

@@ -58,8 +58,17 @@ def get_step_hint(current_step: str, rule: dict) -> str:
     if current_step == "time_window":
         return "Do: Ask for start and end time (e.g. 'start now, end in 1 hour'). Use parse_time_window_wrapper with the user's exact phrase. If end_time is missing in the result, ask when to end."
     if current_step == "confirmation":
-        rule_id = (rule or {}).get("rule_id", "")
-        if rule_id == "loom_machine_state":
-            return "Do: Check if idle_threshold_minutes is missing. If missing, ask the user: 'How many minutes should the machine be idle before alerting?' Extract the number and set it via set_field_value with field name 'idle_threshold_minutes'. Then summarize the agent and ask for confirmation."
+        required = (rule or {}).get("required_fields_from_user") or []
+        if required:
+            hints = {
+                "idle_threshold_minutes": "How many minutes should the machine be idle before alerting?",
+                "absence_threshold_minutes": "How many minutes can the machine be unattended (no operator) before alerting?",
+            }
+            parts = ["Ensure each required field is set (ask user if missing)."]
+            for f in required:
+                if f in hints:
+                    parts.append(f"For {f}: ask user \"{hints[f]}\" then set_field_value.")
+            parts.append("Then summarize the agent and ask for confirmation.")
+            return "Do: " + " ".join(parts)
         return "Do: Summarize the agent in one short paragraph, then ask user to confirm (Yes/No). If they say yes or confirm, call save_wrapper immediately."
     return "Do: Proceed according to current_step and ACTIVE_RULE_CONTEXT_JSON."

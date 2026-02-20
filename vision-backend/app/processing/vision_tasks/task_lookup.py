@@ -14,6 +14,7 @@ Registered scenario types (imported in vision_tasks/__init__.py):
 - restricted_zone  : Alert when object of class is inside polygon zone
 - wall_climb_detection : Alert when person climbs or is fully above wall (orange/red)
 - loom_machine_state : Loom run/idle state from motion
+- person_near_machine : Monitor operator presence near loom machines (YOLO + tracking)
 - weapon_detection  : Weapon detection with pose + optional VLM
 - sleep_detection   : Person sleeping (lying or standing) with pose + VLM confirmation
 - face_detection    : Person identification from reference photos; alert when watched person appears

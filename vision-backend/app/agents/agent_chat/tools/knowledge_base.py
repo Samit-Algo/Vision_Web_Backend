@@ -34,12 +34,20 @@ def can_enter_confirmation(agent: AgentState, rule: Dict) -> bool:
         zone = agent.fields.get("zone")
         if not zone or (isinstance(zone, (dict, list)) and not zone):
             return False
-        # Loom/machine idle rule: zone must be motion_rois with at least one loom
-        if rule.get("rule_id") == "loom_machine_state":
+        # Rules that use zone_type motion_rois require zone with type and at least one loom
+        zone_type = (rule.get("zone_support") or {}).get("zone_type")
+        if zone_type == "motion_rois":
             if not isinstance(zone, dict) or zone.get("type") != "motion_rois":
                 return False
             looms = zone.get("looms")
             if not isinstance(looms, list) or len(looms) < 1:
+                return False
+        # Rules that use zone_type polygon require zone with type polygon and at least 3 coordinates
+        elif zone_type == "polygon":
+            if not isinstance(zone, dict) or zone.get("type") != "polygon":
+                return False
+            coords = zone.get("coordinates")
+            if not isinstance(coords, list) or len(coords) < 3:
                 return False
 
     time_window = rule.get("time_window", {})
@@ -133,8 +141,11 @@ def compute_missing_fields(agent: AgentState, rule: Dict) -> None:
         if f == "zone":
             if not value or (isinstance(value, (dict, list)) and not value):
                 missing.append(f)
-            elif rule_id == "loom_machine_state":
+            elif (rule.get("zone_support") or {}).get("zone_type") == "motion_rois":
                 if not isinstance(value, dict) or value.get("type") != "motion_rois" or not isinstance(value.get("looms"), list) or len(value.get("looms", [])) < 1:
+                    missing.append(f)
+            elif (rule.get("zone_support") or {}).get("zone_type") == "polygon":
+                if not isinstance(value, dict) or value.get("type") != "polygon" or not isinstance(value.get("coordinates"), list) or len(value.get("coordinates", [])) < 3:
                     missing.append(f)
         elif f == "video_path":
             if value is None or (isinstance(value, str) and not value.strip()):

@@ -336,44 +336,86 @@ def save_to_db(session_id: str = "default", user_id: Optional[str] = None) -> Di
             if zone is not None:
                 payload["zone"] = zone
 
-        # For loom_machine_state, build rules from zone (motion_rois) + config
-        if agent_state.rule_id == "loom_machine_state":
-            zone = agent_state.fields.get("zone")
-            if isinstance(zone, dict) and zone.get("type") == "motion_rois" and isinstance(zone.get("looms"), list) and len(zone.get("looms", [])) >= 1:
-                # idle_threshold_minutes is required (in required_fields_from_user), so it should always be present
-                # The is not None check handles the case where value might be 0 (valid)
-                idle_threshold = agent_state.fields.get("idle_threshold_minutes")
-                if idle_threshold is None:
+        # Rules that use zone type motion_rois: build rules from zone (looms) + config
+        zone = agent_state.fields.get("zone")
+        zone_has_looms = (
+            isinstance(zone, dict)
+            and zone.get("type") == "motion_rois"
+            and isinstance(zone.get("looms"), list)
+            and len(zone.get("looms", [])) >= 1
+        )
+
+        if agent_state.rule_id == "loom_machine_state" and zone_has_looms:
+            idle_threshold = agent_state.fields.get("idle_threshold_minutes")
+            if idle_threshold is None:
+                return failure(
+                    code="missing_idle_threshold",
+                    user_message="Idle threshold (in minutes) is required. Please provide how many minutes the machine should be idle before alerting.",
+                    status_value=agent_state.status,
+                    retryable=False,
+                )
+            def _get(key, default):
+                v = agent_state.fields.get(key)
+                return v if v is not None else default
+            payload["rules"] = [
+                {
+                    "type": "loom_machine_state",
+                    "looms": zone["looms"],
+                    "config": {
+                        "idle_threshold_minutes": idle_threshold,
+                        "analysis_window_minutes": _get("analysis_window_minutes", 15),
+                        "frames_per_minute": _get("frames_per_minute", 5),
+                        "notify_on_idle": _get("notify_on_idle", True),
+                        "alert_cooldown_minutes": _get("alert_cooldown_minutes", 30),
+                        "rolling_window_seconds": _get("rolling_window_seconds", 15),
+                        "motion_ratio_running": _get("motion_ratio_running", 0.02),
+                        "motion_ratio_stopped": _get("motion_ratio_stopped", 0.005),
+                        "debounce_seconds": _get("debounce_seconds", 5),
+                        "mog2_history": _get("mog2_history", 500),
+                        "mog2_var_threshold": _get("mog2_var_threshold", 16),
+                        "mog2_detect_shadows": _get("mog2_detect_shadows", False),
+                        "preprocess_blur_ksize": _get("preprocess_blur_ksize", 5),
+                        "morph_ksize": _get("morph_ksize", 3),
+                    },
+                }
+            ]
+        elif agent_state.rule_id == "person_near_machine":
+            zone_polygon = (
+                isinstance(zone, dict)
+                and zone.get("type") == "polygon"
+                and isinstance(zone.get("coordinates"), list)
+                and len(zone.get("coordinates", [])) >= 3
+            )
+            if zone_polygon:
+                absence_threshold = agent_state.fields.get("absence_threshold_minutes")
+                if absence_threshold is None:
                     return failure(
-                        code="missing_idle_threshold",
-                        user_message="Idle threshold (in minutes) is required. Please provide how many minutes the machine should be idle before alerting.",
+                        code="missing_absence_threshold",
+                        user_message="Unattended threshold (absence_threshold_minutes) is required. Please provide how many minutes the machine can be unattended before alerting.",
                         status_value=agent_state.status,
                         retryable=False,
                     )
-                def _get(key, default):
+                def _get_pnm(key, default):
                     v = agent_state.fields.get(key)
                     return v if v is not None else default
-                config = {
-                    "idle_threshold_minutes": idle_threshold,
-                    "analysis_window_minutes": _get("analysis_window_minutes", 15),
-                    "frames_per_minute": _get("frames_per_minute", 5),
-                    "notify_on_idle": _get("notify_on_idle", True),
-                    "alert_cooldown_minutes": _get("alert_cooldown_minutes", 30),
-                    "rolling_window_seconds": _get("rolling_window_seconds", 15),
-                    "motion_ratio_running": _get("motion_ratio_running", 0.02),
-                    "motion_ratio_stopped": _get("motion_ratio_stopped", 0.005),
-                    "debounce_seconds": _get("debounce_seconds", 5),
-                    "mog2_history": _get("mog2_history", 500),
-                    "mog2_var_threshold": _get("mog2_var_threshold", 16),
-                    "mog2_detect_shadows": _get("mog2_detect_shadows", False),
-                    "preprocess_blur_ksize": _get("preprocess_blur_ksize", 5),
-                    "morph_ksize": _get("morph_ksize", 3),
-                }
                 payload["rules"] = [
                     {
-                        "type": "loom_machine_state",
-                        "looms": zone["looms"],
-                        "config": config,
+                        "type": "person_near_machine",
+                        "zone": {"type": "polygon", "coordinates": zone["coordinates"]},
+                        "config": {
+                            "absence_threshold_minutes": absence_threshold,
+                            "grace_time_seconds": _get_pnm("grace_time_seconds", 10.0),
+                            "min_presence_seconds": _get_pnm("min_presence_seconds", 5.0),
+                            "confidence_threshold": _get_pnm("confidence_threshold", 0.5),
+                            "tracker_max_age": _get_pnm("tracker_max_age", 30),
+                            "tracker_min_hits": _get_pnm("tracker_min_hits", 3),
+                            "tracker_iou_threshold": _get_pnm("tracker_iou_threshold", 0.3),
+                            "notify_on_absence": _get_pnm("notify_on_absence", True),
+                            "alert_cooldown_minutes": _get_pnm("alert_cooldown_minutes", 30.0),
+                            "emit_state_transitions": _get_pnm("emit_state_transitions", False),
+                            "emit_periodic_updates": _get_pnm("emit_periodic_updates", False),
+                            "fps": _get_pnm("fps", 5),
+                        },
                     }
                 ]
 
