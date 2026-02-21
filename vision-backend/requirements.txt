@@ -32,3 +32,8 @@ groq>=0.5.0
 deepface>=0.0.79
 tensorflow
 tf-keras
+langchain>=0.3.0
+langchain-groq>=0.2.0
+langchain-core>=0.3.0
+langgraph>=0.2.0
+requests>=2.31.0
