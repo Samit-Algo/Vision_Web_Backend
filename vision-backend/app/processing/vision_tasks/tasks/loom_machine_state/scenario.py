@@ -1,85 +1,60 @@
 """
-Loom machine state scenario
-----------------------------
+Loom machine state scenario (industrial-grade)
+-----------------------------------------------
 
-Determines RUNNING/STOPPED per loom using motion on per-loom ROIs. No YOLO; raw frames only.
+MOG2 background subtraction + morphological cleanup + rolling-window motion ratio.
+Hysteresis: RUNNING when avg motion_ratio > threshold, STOPPED when < threshold.
+No YOLO; raw frames only. Idle alert when no motion for >= idle_threshold_minutes.
 """
 
-# -----------------------------------------------------------------------------
-# Standard library
-# -----------------------------------------------------------------------------
 from typing import Any, Dict, List, Optional
 
-import numpy as np
-
-# -----------------------------------------------------------------------------
-# Application
-# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
     ScenarioFrameContext,
-    ScenarioEvent
+    ScenarioEvent,
 )
 from app.processing.vision_tasks.task_lookup import register_scenario
 from .config import LoomMachineStateConfig
 from .state import LoomMachineStateManager
-from .motion_detector import (
-    detect_motion,
-    extract_roi
-)
+from .motion_detector import create_mog2_subtractor, detect_motion
 
 
 @register_scenario("loom_machine_state")
 class LoomMachineStateScenario(BaseScenario):
     """
-    Loom machine state detection scenario.
-    
-    Determines RUNNING/STOPPED state per loom using motion-based analysis.
-    One camera may contain multiple looms, each with its own motion ROI and independent state.
-    
-    Flow:
-    1. Extract ROI for each loom from frame
-    2. Compute motion (frame diff + optical flow)
-    3. Update motion history buffer
-    4. Check temporal consistency
-    5. Update state machine (if needed)
-    6. Store state (no events by default)
+    Industrial loom state: MOG2 + 15s rolling average + hysteresis.
+    Green=RUNNING, Red=STOPPED. Idle alert after idle_threshold_minutes.
     """
-    
+
     def requires_yolo_detections(self) -> bool:
-        """Loom scenario doesn't need YOLO - only uses raw frames for motion detection."""
         return False
-    
+
     def __init__(self, config: Dict[str, Any], pipeline_context):
         super().__init__(config, pipeline_context)
-        
-        # Load configuration
         self.config_obj = LoomMachineStateConfig(config)
-        
-        # Get FPS from pipeline context
-        fps = pipeline_context.fps
-        
-        # Initialize state manager
+        fps = getattr(pipeline_context, "fps", None) or 5
+        if self.config_obj.update_interval_frames == 0:
+            self.config_obj.update_interval_frames = max(
+                1, (fps * 60) // self.config_obj.frames_per_minute
+            )
         self.state_manager = LoomMachineStateManager(self.config_obj, fps)
-        
-        # Store previous ROI frames for each loom (for frame difference)
-        self.previous_rois: Dict[str, Optional[np.ndarray]] = {
-            loom["loom_id"]: None
+        self.mog2_subtractors: Dict[str, Any] = {
+            loom["loom_id"]: create_mog2_subtractor(
+                history=self.config_obj.mog2_history,
+                var_threshold=self.config_obj.mog2_var_threshold,
+                detect_shadows=self.config_obj.mog2_detect_shadows,
+            )
             for loom in self.config_obj.looms
         }
-        
-        # Frame counter for update interval
         self.frame_counter = 0
-        
-        # Track previous state for each loom (to detect transitions)
         self.previous_states: Dict[str, str] = {
-            loom["loom_id"]: "UNKNOWN"
-            for loom in self.config_obj.looms
+            loom["loom_id"]: "UNKNOWN" for loom in self.config_obj.looms
         }
-        
         print(
-            f"[LoomMachineStateScenario] Initialized with {len(self.config_obj.looms)} loom(s): "
-            f"{[loom['loom_id'] for loom in self.config_obj.looms]}"
+            f"[LoomMachineState] looms={[l['loom_id'] for l in self.config_obj.looms]}, "
+            f"fpm={self.config_obj.frames_per_minute}, roll_win={self.config_obj.rolling_window_seconds}s, "
+            f"idle_threshold_min={self.config_obj.idle_threshold_minutes}"
         )
     
     def process(self, frame_context: ScenarioFrameContext) -> List[ScenarioEvent]:
@@ -105,59 +80,31 @@ class LoomMachineStateScenario(BaseScenario):
         if self.frame_counter % self.config_obj.update_interval_frames != 0:
             return events  # Skip this frame
         
-        # Process each loom independently
         for loom in self.config_obj.looms:
             loom_id = loom["loom_id"]
             motion_roi = loom["motion_roi"]
-            
-            # Get previous ROI frame
-            previous_roi = self.previous_rois[loom_id]
-            
-            # Detect motion
+            mog2 = self.mog2_subtractors[loom_id]
             motion_analysis = detect_motion(
                 frame=frame,
                 roi=motion_roi,
-                previous_roi=previous_roi,
-                motion_threshold=self.config_obj.motion_threshold,
-                optical_flow_threshold=self.config_obj.optical_flow_threshold,
+                mog2=mog2,
+                motion_ratio_stopped=self.config_obj.motion_ratio_stopped,
+                preprocess_blur_ksize=self.config_obj.preprocess_blur_ksize,
+                morph_ksize=self.config_obj.morph_ksize,
                 loom_id=loom_id,
                 frame_index=frame_index,
-                timestamp=timestamp
+                timestamp=timestamp,
             )
-            
-            # Update state manager and check for transitions
             previous_state = self.state_manager.add_motion_analysis(motion_analysis)
-            
-            # Debug logging (every 10 frames)
-            if frame_index % 10 == 0:
-                print(
-                    f"[LoomMachineStateScenario] {loom_id}: "
-                    f"motion_energy={motion_analysis.motion_energy:.4f} "
-                    f"(threshold={self.config_obj.motion_threshold:.4f}), "
-                    f"optical_flow={motion_analysis.optical_flow_magnitude}, "
-                    f"detected={motion_analysis.motion_detected}, "
-                    f"state={self.state_manager.get_loom_state(loom_id).current_state if self.state_manager.get_loom_state(loom_id) else 'N/A'}"
-                )
-            
-            # Store current ROI for next frame
-            current_roi = extract_roi(frame, motion_roi)
-            self.previous_rois[loom_id] = current_roi
-            
-            # Get current loom state
             loom_state = self.state_manager.get_loom_state(loom_id)
-            current_state = loom_state.current_state
-            
+            current_state = loom_state.current_state if loom_state else "UNKNOWN"
+
             # Emit state transition event if configured and state changed
+            loom_name = loom.get("name", loom_id)
             if self.config_obj.emit_state_transitions and previous_state is not None:
                 # State transition occurred (previous_state returned from add_motion_analysis)
                 # Only emit if transitioning from a known state (not UNKNOWN on first detection)
                 if previous_state != "UNKNOWN" and previous_state != current_state:
-                    # Get loom name for better event label
-                    loom_name = next(
-                        (loom.get("name", loom_id) for loom in self.config_obj.looms if loom["loom_id"] == loom_id),
-                        loom_id
-                    )
-                    
                     event = ScenarioEvent(
                         event_type="loom_state_transition",
                         label=f"Loom '{loom_name}' ({loom_id}) changed from {previous_state} to {current_state}",
@@ -168,9 +115,8 @@ class LoomMachineStateScenario(BaseScenario):
                             "previous_state": previous_state,
                             "current_state": current_state,
                             "state_duration_seconds": loom_state.state_duration_seconds,
-                            "motion_energy": loom_state.last_motion_energy,
-                            "optical_flow_magnitude": loom_state.last_optical_flow_magnitude,
-                            "transition_timestamp": timestamp.isoformat()
+                            "motion_ratio": loom_state.last_motion_energy,
+                            "transition_timestamp": timestamp.isoformat(),
                         },
                         detection_indices=[],
                         timestamp=timestamp,
@@ -182,6 +128,34 @@ class LoomMachineStateScenario(BaseScenario):
                         f"[LoomMachineStateScenario] 📢 Emitted state transition event: "
                         f"Loom '{loom_id}' {previous_state} → {current_state}"
                     )
+            
+            # Idle alert: notify when machine idle for >= idle_threshold_minutes
+            idle_alert = self.state_manager.check_idle_alert(loom_id, loom_name, timestamp)
+            if idle_alert:
+                events.append(
+                    ScenarioEvent(
+                        event_type="loom_idle_alert",
+                        label=f"Machine '{loom_name}' ({loom_id}) has been idle for {idle_alert['idle_duration_minutes']:.1f} minutes",
+                        confidence=1.0,
+                        metadata={
+                            "loom_id": loom_id,
+                            "loom_name": loom_name,
+                            "idle_duration_minutes": idle_alert["idle_duration_minutes"],
+                            "idle_since": idle_alert.get("idle_since"),
+                            "report": {
+                                "machine": loom_name,
+                                "idle_minutes": round(idle_alert["idle_duration_minutes"], 1),
+                            },
+                        },
+                        detection_indices=[],
+                        timestamp=timestamp,
+                        frame_index=frame_index
+                    )
+                )
+                print(
+                    f"[LoomMachineStateScenario] 🚨 Idle alert: {loom_name} ({loom_id}) idle "
+                    f"for {idle_alert['idle_duration_minutes']:.1f} min"
+                )
             
             # Update previous state tracking
             self.previous_states[loom_id] = current_state
@@ -198,8 +172,7 @@ class LoomMachineStateScenario(BaseScenario):
                             "loom_id": loom_id,
                             "state": loom_state.current_state,
                             "state_duration_seconds": loom_state.state_duration_seconds,
-                            "motion_energy": loom_state.last_motion_energy,
-                            "optical_flow_magnitude": loom_state.last_optical_flow_magnitude
+                            "motion_ratio": loom_state.last_motion_energy,
                         },
                         detection_indices=[],
                         timestamp=timestamp,
@@ -233,61 +206,61 @@ class LoomMachineStateScenario(BaseScenario):
                 for loom_id, state in all_states.items()
             },
             "config": {
-                "motion_threshold": self.config_obj.motion_threshold,
-                "optical_flow_threshold": self.config_obj.optical_flow_threshold,
-                "temporal_consistency_seconds": self.config_obj.temporal_consistency_seconds
+                "rolling_window_seconds": self.config_obj.rolling_window_seconds,
+                "motion_ratio_running": self.config_obj.motion_ratio_running,
+                "motion_ratio_stopped": self.config_obj.motion_ratio_stopped,
             }
         }
     
     def get_overlay_data(self, frame_context=None) -> Optional[Dict[str, Any]]:
-        """Get ROI boxes with state labels for overlay visualization. frame_context is optional for API compatibility."""
+        """Get ROI polygons with colors for overlay visualization (no text labels). frame_context is optional for API compatibility."""
+        from app.utils.datetime_utils import utc_now
         all_states = self.state_manager.get_all_states()
-        boxes = []
-        labels = []
+        polygons = []
         colors = []
-        
+        now = utc_now()
+
         for loom in self.config_obj.looms:
             loom_id = loom["loom_id"]
-            motion_roi = loom["motion_roi"]
-            loom_state = all_states.get(loom_id)
+            motion_roi = loom["motion_roi"]  # [x1, y1, x2, y2]
             
+            # Always show polygon, even if state is not initialized yet
+            # Convert bounding box [x1, y1, x2, y2] to polygon [[x1,y1], [x2,y1], [x2,y2], [x1,y2]]
+            x1, y1, x2, y2 = motion_roi
+            polygon = [
+                [x1, y1],  # Top-left
+                [x2, y1],  # Top-right
+                [x2, y2],  # Bottom-right
+                [x1, y2],  # Bottom-left
+            ]
+            polygons.append(polygon)
+
+            # Get state if available, otherwise default to UNKNOWN
+            loom_state = all_states.get(loom_id)
             if loom_state:
-                # Add ROI box
-                boxes.append(motion_roi)  # [x1, y1, x2, y2]
-                
-                # Create label with state
                 state = loom_state.current_state
-                loom_name = loom.get("name", loom_id)
-                label = f"{loom_name}: {state}"
-                labels.append(label)
-                
-                # Color: green for RUNNING, red for STOPPED, yellow for UNKNOWN
-                if state == "RUNNING":
-                    colors.append("#00ff00")  # Green
-                elif state == "STOPPED":
-                    colors.append("#ff0000")  # Red
-                else:
-                    colors.append("#ffff00")  # Yellow
-        
-        if not boxes:
+            else:
+                state = "UNKNOWN"
+
+            # Color based on state: Green for RUNNING, Red for STOPPED
+            if state == "RUNNING":
+                colors.append("#00ff00")  # Green
+            elif state == "STOPPED":
+                colors.append("#ff0000")  # Red
+            else:
+                colors.append("#808080")  # Gray for UNKNOWN
+
+        if not polygons:
             return None
-        
+
         return {
-            "boxes": boxes,
-            "labels": labels,
+            "polygons": polygons,
             "colors": colors
         }
     
     def reset(self) -> None:
-        """Reset scenario state."""
+        """Reset scenario state. MOG2 subtractors are re-used (they retain background model)."""
         self.state_manager.reset()
-        self.previous_rois = {
-            loom["loom_id"]: None
-            for loom in self.config_obj.looms
-        }
-        self.previous_states = {
-            loom["loom_id"]: "UNKNOWN"
-            for loom in self.config_obj.looms
-        }
+        self.previous_states = {loom["loom_id"]: "UNKNOWN" for loom in self.config_obj.looms}
         self.frame_counter = 0
         self._state.clear()

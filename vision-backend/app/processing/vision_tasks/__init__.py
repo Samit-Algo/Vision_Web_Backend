@@ -27,6 +27,7 @@ from app.processing.vision_tasks.tasks.weapon_detection import scenario as weapo
 from app.processing.vision_tasks.tasks.sleep_detection import scenario as sleep_detection_scenario  # noqa: F401
 from app.processing.vision_tasks.tasks.class_count import scenario as class_count_scenario  # noqa: F401
 from app.processing.vision_tasks.tasks.loom_machine_state import scenario as loom_machine_state_scenario  # noqa: F401
+from app.processing.vision_tasks.tasks.person_near_machine import scenario as person_near_machine_scenario  # noqa: F401
 from app.processing.vision_tasks.tasks.box_count import scenario as box_count_scenario  # noqa: F401
 from app.processing.vision_tasks.tasks.fall_detection import scenario as fall_detection_scenario  # noqa: F401
 from app.processing.vision_tasks.tasks.fire_detection import scenario as fire_detection_scenario  # noqa: F401

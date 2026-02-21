@@ -13,11 +13,11 @@ class Settings:
     
     def __init__(self) -> None:
         # Database Configuration
-        uri = os.getenv("MONGO_URI", "mongodb://localhost:27017").split("#")[0].strip()
-        # On Windows, localhost can cause 30+ sec IPv6 resolution delays; use 127.0.0.1
-        if os.name == "nt" and "localhost" in uri and "127.0.0.1" not in uri:
-            uri = uri.replace("localhost", "127.0.0.1")
-        self.mongo_uri: Final[str] = uri
+        # uri = os.getenv("MONGO_URI", "mongodb://mongo:27017").split("#")[0].strip()
+        # # On Windows, localhost can cause 30+ sec IPv6 resolution delays; use 127.0.0.1
+        # if os.name == "nt" and "localhost" in uri and "127.0.0.1" not in uri:
+        #     uri = uri.replace("localhost", "127.0.0.1")
+        self.mongo_uri: Final[str] = "mongodb://mongo:27017"
         self.mongo_database_name: Final[str] = os.getenv("MONGO_DB_NAME", "algo_vision_app_cloud").split('#')[0].strip()
         
         # JWT Configuration

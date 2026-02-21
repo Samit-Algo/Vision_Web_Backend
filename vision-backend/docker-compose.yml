@@ -1,0 +1,45 @@
+# Vision Backend + MongoDB — one command runs both
+# Usage: docker compose up --build
+# Your .env (API keys, etc.) is loaded automatically; MONGO_URI is set here for the Mongo container.
+
+services:
+  mongo:
+    image: mongo:7
+    container_name: vision-mongo
+    ports:
+      # Use 27018 on host to avoid conflict with local MongoDB on 27017; backend still uses mongo:27017 inside Docker
+      - "27018:27017"
+    volumes:
+      - mongo_data:/data/db
+    restart: unless-stopped
+
+  vision-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vision-backend:latest
+    container_name: vision-backend
+
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Use the Mongo container (ignore MONGO_URI from .env when using this compose)
+      - MONGO_URI=mongodb://mongo:27017
+      - MONGO_DB_NAME=${MONGO_DB_NAME:-algo_vision_app_cloud}
+      - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-host.docker.internal:9092}
+      - WEB_BACKEND_URL=${WEB_BACKEND_URL:-http://localhost:8000}
+    volumes:
+      - event_videos:/app/event_videos
+      - static_video_uploads:/app/static_video_uploads
+      - Gallery:/app/Gallery
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  mongo_data:
+  event_videos:
+  static_video_uploads:
+  Gallery:

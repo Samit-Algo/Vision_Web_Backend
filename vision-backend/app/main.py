@@ -232,13 +232,14 @@ def create_application() -> FastAPI:
     """
     Create and configure the FastAPI application.
 
-    - Loads environment from .env
+    - Loads environment from .env if present (optional in Docker; use runtime env)
     - Applies CORS middleware
     - Registers all v1 API routers
     - Uses lifespan for startup/shutdown
     """
     env_path = Path(__file__).resolve().parent.parent / ".env"
-    load_dotenv(env_path)
+    if env_path.exists():
+        load_dotenv(env_path)
 
     application = FastAPI(
         title="Vision Backend API",

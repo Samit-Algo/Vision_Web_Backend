@@ -11,6 +11,7 @@ Manages the main loop (continuous or patrol), FPS pacing, and stage sequencing.
 # -----------------------------------------------------------------------------
 import dataclasses
 import time
+import traceback
 from typing import Any, Dict, List, Optional, Tuple
 
 # -----------------------------------------------------------------------------
@@ -34,6 +35,7 @@ from app.processing.drawing.frame_processor import (
     draw_zone_polygon,
     draw_zone_line,
     draw_boxes_in_zone_red,
+    draw_loom_machine_polygons,
 )
 # Trigger scenario registration (decorators run on import)
 from app.processing.vision_tasks import scenario_registry  # noqa: F401
@@ -140,7 +142,19 @@ def overlay_data_to_dict_list(overlay_data: Any) -> List[Dict[str, Any]]:
                 out.append(item)
         return out
     if isinstance(overlay_data, dict):
-        # Loom-style: {boxes, labels, colors} -> list of {box, label, color}
+        # Loom machine state: {polygons, colors} -> list of {polygon, color}
+        if "polygons" in overlay_data:
+            polygons = overlay_data.get("polygons") or []
+            colors = overlay_data.get("colors") or []
+            n = max(len(polygons), len(colors))
+            return [
+                {
+                    "polygon": polygons[i] if i < len(polygons) else None,
+                    "color": colors[i] if i < len(colors) else None,
+                }
+                for i in range(n)
+            ]
+        # Legacy loom-style: {boxes, labels, colors} -> list of {box, label, color}
         boxes = overlay_data.get("boxes") or []
         labels = overlay_data.get("labels") or []
         colors = overlay_data.get("colors") or []
@@ -450,9 +464,14 @@ class PipelineRunner:
                 min_interval = 1.0 / max(1, fps)
 
             # 4. Run stages 2–4 and draw/publish/event/heartbeat (shared logic)
-            next_tick, last_status, processed_in_window, skipped_in_window = self.process_one_frame(
-                frame_packet, fps, min_interval, next_tick, last_status, processed_in_window, skipped_in_window
-            )
+            try:
+                next_tick, last_status, processed_in_window, skipped_in_window = self.process_one_frame(
+                    frame_packet, fps, min_interval, next_tick, last_status, processed_in_window, skipped_in_window
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[worker {self.context.task_id}] ⚠️ Error in process_one_frame (continuing): {exc}")
+                traceback.print_exc()
+                next_tick = max(next_tick + min_interval, time.time())
 
     # -------------------------------------------------------------------------
     # Public: run pipeline in patrol mode
@@ -505,9 +524,14 @@ class PipelineRunner:
                     fps = int(frame_packet.fps)
                     min_interval = 1.0 / max(1, fps)
 
-                next_tick, last_status, processed_in_window, skipped_in_window = self.process_one_frame(
-                    frame_packet, fps, min_interval, next_tick, last_status, processed_in_window, skipped_in_window
-                )
+                try:
+                    next_tick, last_status, processed_in_window, skipped_in_window = self.process_one_frame(
+                        frame_packet, fps, min_interval, next_tick, last_status, processed_in_window, skipped_in_window
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[worker {self.context.task_id}] ⚠️ Error in process_one_frame (patrol, continuing): {exc}")
+                    traceback.print_exc()
+                    next_tick = max(next_tick + min_interval, time.time())
 
             print(f"[worker {self.context.task_id}] 💤 Patrol window ended; going back to sleep")
     
@@ -555,8 +579,10 @@ class PipelineRunner:
     ) -> Optional[Any]:
         """Draw bounding boxes and publish processed frame to shared_store."""
         if self.shared_store is None or not self.context.rules:
+            if self.shared_store is None:
+                print(f"[worker {self.context.task_id}] ⚠️ draw_and_publish_frame: shared_store is None, skip publish")
             return None
-        
+
         try:
             frame = frame_packet.frame.copy()
             
@@ -589,6 +615,7 @@ class PipelineRunner:
             fall_red_indices: List[int] = []  # Confirmed fall (red keypoints/boxes); set in fall_detection branch
             fall_suspected_indices: List[int] = []  # Suspected fall (orange keypoints); set in fall_detection branch
             face_recognitions: List[Dict[str, Any]] = []  # Face detection: [{ "box": [...], "name": "..." }]
+            is_person_near_machine = False  # Polygon zone; show only person detections
             
             if hasattr(self.context, '_scenario_instances'):
                 for rule_idx, scenario_instance in self.context._scenario_instances.items():
@@ -649,6 +676,11 @@ class PipelineRunner:
                         fall_detection_scenario = scenario_instance
                         if hasattr(scenario_instance, 'config_obj') and hasattr(scenario_instance.config_obj, 'target_class'):
                             target_class = scenario_instance.config_obj.target_class
+                    # Person near machine: polygon zone (like restricted_zone), show only person detections
+                    elif scenario_type == 'person_near_machine':
+                        is_person_near_machine = True
+                        if hasattr(scenario_instance, 'config_obj') and hasattr(scenario_instance.config_obj, 'zone_coordinates'):
+                            restricted_zone_coordinates = getattr(scenario_instance.config_obj, 'zone_coordinates', None)
                     
                     # Check if this is a line-based counting scenario (class_count or box_count)
                     elif scenario_type in ['class_count', 'box_count']:
@@ -716,7 +748,7 @@ class PipelineRunner:
                                                         line_crossed_indices.append(idx)
                                                     break
             
-            # For restricted_zone and wall_climb: draw only target class. Wall climb uses confidence 0.5.
+            # For restricted_zone, wall_climb, and person_near_machine: draw only target class (person for person_near_machine).
             detections_for_draw = None
             if (is_restricted_zone or is_wall_climb_detection) and target_class:
                 kp_src = getattr(merged_packet, "keypoints", None) or []
@@ -724,6 +756,19 @@ class PipelineRunner:
                 fd_boxes, fd_classes, fd_scores, _ = self.filter_detections_by_class(
                     target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores,
                     kp_src, confidence_threshold=draw_conf
+                )
+                detections_for_draw = {"boxes": fd_boxes, "classes": fd_classes, "scores": fd_scores}
+            elif is_person_near_machine:
+                # Person near machine: draw ONLY person detections (no truck or other classes)
+                kp_src = getattr(merged_packet, "keypoints", None) or []
+                pnm_conf = 0.5
+                for _si in (self.context._scenario_instances or {}).values():
+                    if getattr(_si, "scenario_id", "") == "person_near_machine" and hasattr(_si, "config_obj"):
+                        pnm_conf = getattr(_si.config_obj, "confidence_threshold", 0.5)
+                        break
+                fd_boxes, fd_classes, fd_scores, _ = self.filter_detections_by_class(
+                    "person", merged_packet.boxes, merged_packet.classes, merged_packet.scores,
+                    kp_src, confidence_threshold=pnm_conf,
                 )
                 detections_for_draw = {"boxes": fd_boxes, "classes": fd_classes, "scores": fd_scores}
 
@@ -848,6 +893,17 @@ class PipelineRunner:
                             if orig_idx in orig_in_zone:
                                 in_zone_indices.append(filtered_idx)
                             filtered_idx += 1
+            elif is_person_near_machine:
+                # Person near machine: show only person detections (no truck/other classes)
+                scenario_conf = 0.5
+                for scenario_instance in (self.context._scenario_instances or {}).values():
+                    if getattr(scenario_instance, 'scenario_id', '') == 'person_near_machine' and hasattr(scenario_instance, 'config_obj'):
+                        scenario_conf = getattr(scenario_instance.config_obj, 'confidence_threshold', 0.5)
+                        break
+                f_boxes, f_classes, f_scores, f_keypoints = self.filter_detections_by_class(
+                    "person", merged_packet.boxes, merged_packet.classes, merged_packet.scores,
+                    keypoints_src, confidence_threshold=scenario_conf,
+                )
             elif is_wall_climb_detection and target_class:
                 # Show ALL detections of target class with keypoints (for red keypoint visualization, no bounding boxes)
                 f_boxes, f_classes, f_scores, f_keypoints = self.filter_detections_by_class(
@@ -973,6 +1029,22 @@ class PipelineRunner:
                         scenario_overlays.extend(
                             overlay_data_to_dict_list(overlay_data)
                         )
+                        # Any scenario returning polygons + colors: draw zone polygons (e.g. green/red by state)
+                        if isinstance(overlay_data, dict):
+                            polygons = overlay_data.get("polygons", [])
+                            colors = overlay_data.get("colors", [])
+                            if polygons and colors:
+                                # person_near_machine: very light fill (gray/green/red by state); others e.g. loom_machine_state: 0.3 fill
+                                fill_alpha = 0.10 if scenario_type == "person_near_machine" else 0.3
+                                draw_loom_machine_polygons(
+                                    processed_frame,
+                                    polygons,
+                                    colors,
+                                    width,
+                                    height,
+                                    thickness=2,
+                                    fill_alpha=fill_alpha
+                                )
                         # Face detection: use same overlay for face_recognitions so UI and stream both get boxes
                         if scenario_type == "face_detection":
                             face_recognitions = []
@@ -998,7 +1070,7 @@ class PipelineRunner:
 
             # Publish to shared_store (key must be string so overlay/ws can read by agent_id from URL)
             store_key = str(self.context.agent_id)
-            self.shared_store[store_key] = {
+            payload = {
                 "shape": (height, width, 3),
                 "dtype": "uint8",
                 "frame_index": frame_packet.frame_index,
@@ -1034,7 +1106,14 @@ class PipelineRunner:
                 "fall_suspected_indices": fall_suspected_indices,  # Fall: suspected fall (orange keypoints)
                 "face_recognitions": face_recognitions,  # Face detection: [{ "box": [x1,y1,x2,y2], "name": "..." }]
             }
-            
+            try:
+                self.shared_store[store_key] = payload
+                # Debug: log every 30th frame (and first 3) so we see writes without flooding
+                idx = frame_packet.frame_index
+                if idx <= 3 or (idx % 30 == 0):
+                    print(f"[worker {self.context.task_id}] 📤 shared_store WRITE ok | store_key={store_key!r} frame_index={idx}")
+            except Exception as write_exc:  # noqa: BLE001
+                print(f"[worker {self.context.task_id}] ⚠️ shared_store write failed (stream may be stale): {write_exc}")
             return processed_frame
         except Exception as exc:  # noqa: BLE001
             print(f"[worker {self.context.task_id}] ⚠️  Error processing frame for stream: {exc}")

@@ -162,27 +162,26 @@ class RestrictedZoneScenario(BaseScenario):
             entry_time_before = prev_state.entry_time if prev_state else None
             was_inside_before = bool(prev_state and prev_state.confirmed_inside)
 
-            # Check box-zone intersection
+            # Check box-zone intersection (only use 'inside' result, ignore 'touches')
             intersection_result = check_box_zone_intersection(
                 track.bbox,
                 self.config_obj.zone_coordinates,
                 frame_width,
                 frame_height,
             )
-            touches = intersection_result['touches']
             inside = intersection_result['inside']
             
             # Debug: log first detection in zone
-            if touches or inside:
-                print(f"[RESTRICTED_ZONE] 🔍 Track {track.track_id}: touches={touches}, inside={inside}, "
+            if inside:
+                print(f"[RESTRICTED_ZONE] 🔍 Track {track.track_id}: inside={inside}, "
                       f"ratio={intersection_result.get('intersection_ratio', 0):.2f}")
 
-            # Update track state with stability confirmation
+            # Update track state with stability confirmation (touches_zone=False, only track inside)
             track_state = self.zone_state.update_track_state(
                 track.track_id,
-                touches,
-                inside,
-                frame_context.timestamp,
+                touches_zone=False,  # Not used, kept for compatibility
+                inside_zone=inside,
+                timestamp=frame_context.timestamp,
                 stability_frames=self.config_obj.stability_frames,
             )
 

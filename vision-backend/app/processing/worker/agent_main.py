@@ -74,12 +74,30 @@ def run_task_worker(task_id: str, shared_store: Optional[Dict[str, Any]] = None)
 
     print(f"[worker {task_id}] ▶️ Starting '{agent_name}' | mode={run_mode} fps={fps} models={model_ids}")
 
-    # Load models
-    model_loader = ModelLoader()
-    models = model_loader.load_models(model_ids)
-    if not models:
-        print(f"[worker {task_id}] ❌ No models loaded. Exiting.")
-        return
+    # Create context first to check if YOLO is required
+    context = PipelineContext(task, task_id)
+    
+    # Check if any scenario requires YOLO detections
+    from app.processing.pipeline.pipeline import any_scenario_requires_yolo
+    requires_yolo = any_scenario_requires_yolo(context)
+    
+    # Load models only if YOLO is required
+    models = []
+    if requires_yolo:
+        model_loader = ModelLoader()
+        # Filter out "none" or empty model IDs
+        valid_model_ids = [mid for mid in model_ids if mid and mid.strip() and mid.lower() != "none"]
+        if valid_model_ids:
+            models = model_loader.load_models(valid_model_ids)
+            if not models:
+                print(f"[worker {task_id}] ❌ No models loaded (YOLO required but models failed to load). Exiting.")
+                return
+        else:
+            print(f"[worker {task_id}] ❌ YOLO required but no valid models provided. Exiting.")
+            return
+    else:
+        # No YOLO required - models can be empty
+        print(f"[worker {task_id}] ℹ️ No YOLO models required for this scenario (motion-based detection only)")
 
     # Create source (RTSP via shared_store or video file)
     source = create_source(task, shared_store)
@@ -87,7 +105,9 @@ def run_task_worker(task_id: str, shared_store: Optional[Dict[str, Any]] = None)
         print(f"[worker {task_id}] ⚠️ Could not create source (need camera_id or video_path). Exiting.")
         return
 
-    context = PipelineContext(task, task_id)
+    # Debug: key used for agent overlay stream (must match API agent_id in /agents/{agent_id}/overlay/frames/ws)
+    print(f"[worker {task_id}] 📌 shared_store key for overlay stream: {context.agent_id!r}")
+
     runner = PipelineRunner(context, source, models, shared_store)
 
     try:
