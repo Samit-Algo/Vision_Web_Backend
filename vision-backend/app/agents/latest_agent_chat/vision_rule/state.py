@@ -33,6 +33,26 @@ def list_rule_ids() -> list[str]:
     return list(load_knowledge_base().keys())
 
 
+def get_rules_summary_for_prompt() -> str:
+    """
+    Build a summary of all rules from the knowledge base for injection into the system prompt.
+    Returns a string with rule_id, rule_name, and intent_examples per rule so the LLM can
+    match user intents and use the correct rule_id. New rules added to the JSON are
+    included automatically.
+    """
+    kb = load_knowledge_base()
+    lines: list[str] = []
+    for rule_id, rule in kb.items():
+        name = rule.get("rule_name", rule_id)
+        examples = rule.get("intent_examples") or []
+        examples_str = "; ".join(f'"{ex}"' for ex in examples)
+        if examples_str:
+            lines.append(f"- {rule_id} ({name}): intent examples e.g. {examples_str}")
+        else:
+            lines.append(f"- {rule_id} ({name})")
+    return "\n".join(lines)
+
+
 def build_initial_config(rule: dict[str, Any]) -> dict[str, Any]:
     """Config from rule defaults (deep copy)."""
     defaults = rule.get("defaults") or {}
