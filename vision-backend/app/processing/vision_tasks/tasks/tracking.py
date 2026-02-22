@@ -1,23 +1,21 @@
 """
 Object Tracking for Scenarios
 ------------------------------
+Shared tracker for class_count, box_count, wall_climb_detection, fall_detection, restricted_zone, person_near_machine.
+Kalman filter: predicts bbox so same track_id can be re-used after brief occlusion.
 
-Simple object tracker for line-based counting.
-Used by class_count, box_count, wall_climb_detection, fall_detection.
-
-- Kalman filter: predicts position/size when person is briefly occluded so the same
-  track_id can be re-assigned when they reappear (reduces ID switches and false new IDs).
-- For "same person after long absence" (many seconds): consider ByteTrack/BoT-SORT with
-  Re-ID (appearance embedding) — see TRACKING_README or integration notes below.
+Code layout:
+  - KalmanBoxFilter: predict/update bbox (constant-velocity model).
+  - Track: single object (track_id, bbox, center, score, frame_id).
+  - SimpleTracker: update(detections) → active tracks; optional Kalman.
+  - LineCrossingCounter: line + direction; check_touch(track), is_track_touching, get_counts, get_track_touch_info.
 """
 
 from typing import List, Tuple, Optional, Dict, Any
 import numpy as np
 
 
-# -----------------------------------------------------------------------------
-# Kalman filter for bounding box (constant-velocity model)
-# -----------------------------------------------------------------------------
+# ========== Kalman filter for bbox (constant-velocity model) ==========
 
 class KalmanBoxFilter:
     """

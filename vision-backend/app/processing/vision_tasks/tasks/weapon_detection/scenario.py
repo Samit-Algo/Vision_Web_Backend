@@ -1,19 +1,17 @@
 """
-Weapon detection scenario
+Weapon Detection Scenario
 --------------------------
+Pose keypoints → temporal buffer → arm posture analysis → VLM confirmation → weapon_detected event.
+Only emits when VLM confirms. Pipeline draws person + keypoints for overlay.
 
-Pose → temporal buffer → arm posture analysis → VLM confirmation → alert.
+Code layout:
+  - WeaponDetectionScenario: __init__ (config, state buffer, VLM dir), get_vlm_service, process (extract pose → buffer → deferred VLM → events), get_overlay_data.
 """
 
-# -----------------------------------------------------------------------------
-# Standard library
-# -----------------------------------------------------------------------------
+# -------- Imports --------
 import os
 from typing import Any, Dict, List, Optional
 
-# -----------------------------------------------------------------------------
-# Application
-# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
     ScenarioFrameContext,
@@ -32,6 +30,8 @@ from .vlm_handler import (
 )
 from app.infrastructure.external.groq_vlm_service import GroqVLMService
 
+
+# ========== Scenario: Weapon detection (pose → buffer → VLM confirm) ==========
 
 @register_scenario("weapon_detection")
 class WeaponDetectionScenario(BaseScenario):
@@ -77,16 +77,12 @@ class WeaponDetectionScenario(BaseScenario):
         Returns events only when VLM confirms weapon.
         """
         events = []
-        
-        # Step 1: Extract pose data from detections
+        # --- Extract pose; skip if no keypoints ---
         pose_frame = extract_pose_frame(frame_context)
         if not pose_frame:
-            return events  # No pose data, skip
-        
-        # Step 2: Buffer pose frames
+            return events
         self.state.add_pose_frame(pose_frame)
-        
-        # Step 3: Process deferred VLM calls (now we have current frame = N+1, so we have [N-1, N, N+1])
+        # --- Process deferred VLM: when we have 3 frames (before, suspicious, after), call VLM ---
         vlm_service = self.get_vlm_service()
         to_remove_deferred = []
         for analysis, suspicious_frame_index in list(self.state.deferred_vlm):

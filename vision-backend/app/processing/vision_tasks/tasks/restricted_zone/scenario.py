@@ -1,28 +1,18 @@
 """
-Restricted zone scenario - Industrial Implementation
-----------------------------------------------------
+Restricted Zone Scenario (Industrial)
+---------------------------------------
+Polygon zone; box–polygon intersection (not just center). Tracking for stable IDs.
+Alerts: Level 1 (orange) = touch boundary, Level 2 (red) = inside zone, Level 3 = inside > duration_threshold.
+Per-track state; optional stability_frames; duration-based repeat alerts.
 
-Industrial-grade restricted zone monitoring with:
-- Box-polygon intersection detection (not just center point)
-- Object tracking for stable IDs
-- Multi-level alerts:
-  * Level 1 (Orange): Person touches boundary
-  * Level 2 (Red): Person fully inside zone
-  * Level 3 (Frequent): Person inside >2 seconds
-- Temporal stability (anti-flicker)
-- Duration-based alerting
-- Per-track state management
+Code layout:
+  - RestrictedZoneScenario: __init__ (tracker, zone_state, _state), process (filter → track → zone check → alerts), _generate_alerts, _should_alert, _generate_*_label, reset
 """
 
-# -----------------------------------------------------------------------------
-# Standard library
-# -----------------------------------------------------------------------------
+# -------- Imports --------
 from datetime import datetime
 from typing import Any, Dict, List, Set, Tuple
 
-# -----------------------------------------------------------------------------
-# Application
-# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
     ScenarioEvent,
@@ -36,6 +26,8 @@ from .zone_utils import check_box_zone_intersection
 from .state import RestrictedZoneState, TrackZoneState
 from .report_storage import add_violation as report_add_violation, finalize_report as report_finalize
 
+
+# ========== Scenario: Restricted zone (touch / inside / duration alerts) ==========
 
 @register_scenario("restricted_zone")
 class RestrictedZoneScenario(BaseScenario):
@@ -54,8 +46,7 @@ class RestrictedZoneScenario(BaseScenario):
     def __init__(self, config: Dict[str, Any], pipeline_context):
         super().__init__(config, pipeline_context)
         self.config_obj = RestrictedZoneConfig(config, pipeline_context.task)
-        
-        # Initialize tracker
+        # --- Tracker for stable person IDs ---
         self.tracker = SimpleTracker(
             max_age=self.config_obj.tracker_max_age,
             min_hits=self.config_obj.tracker_min_hits,
@@ -66,11 +57,8 @@ class RestrictedZoneScenario(BaseScenario):
             distance_growth_per_missed_frame=self.config_obj.tracker_distance_growth,
             use_kalman=self.config_obj.tracker_use_kalman,
         )
-        
-        # Initialize state manager
         self.zone_state = RestrictedZoneState()
-        
-        # Legacy state for compatibility
+        # --- State for pipeline/UI: in_zone_indices, touch/inside indices, report ---
         self._state["last_alert_time"] = None
         self._state["objects_in_zone"] = False
         self._state["in_zone_indices"] = []  # Detection indices inside zone
@@ -92,7 +80,7 @@ class RestrictedZoneScenario(BaseScenario):
         4. Update per-track state with stability confirmation
         5. Generate multi-level alerts based on state
         """
-        # Step 1: Validate configuration
+        # --- Validate: need target_class and polygon zone ---
         if not self.config_obj.target_class or not self.config_obj.zone_coordinates:
             self._state["in_zone_indices"] = []
             self._state["touch_indices"] = []
@@ -105,8 +93,7 @@ class RestrictedZoneScenario(BaseScenario):
         boxes = detections.boxes
         classes = detections.classes
         scores = detections.scores
-        
-        # Step 2: Filter detections by target class and confidence
+        # --- Filter by target class and confidence ---
         target_class = self.config_obj.target_class.lower()
         confidence_threshold = self.config_obj.confidence_threshold
         
@@ -122,17 +109,15 @@ class RestrictedZoneScenario(BaseScenario):
             print(f"[RESTRICTED_ZONE] 📊 Frame: {len(filtered_detections)} person(s) detected "
                   f"(conf>={confidence_threshold:.2f})")
         
-        # Step 3: Update tracker to get stable track IDs
-        # Note: tracker.update returns confirmed active tracks
+        # --- Update tracker; get confirmed active tracks ---
         tracked_objects = self.tracker.update(filtered_detections)
         
         if len(filtered_detections) > 0 and len(tracked_objects) == 0:
             print(f"[RESTRICTED_ZONE] ⚠️ No tracks yet (need {self.config_obj.tracker_min_hits} hits) | "
                   f"detections: {len(filtered_detections)}")
         
-        # Step 4: Match tracks to detections and check zone intersection
-        # We need to match tracks back to original detection indices
-        track_to_detection = {}  # track_id -> detection_index
+        # --- Match each track to detection index; check box–zone intersection; update per-track state ---
+        track_to_detection = {}
         touch_track_ids: Set[int] = set()
         inside_track_ids: Set[int] = set()
         
@@ -162,7 +147,7 @@ class RestrictedZoneScenario(BaseScenario):
             entry_time_before = prev_state.entry_time if prev_state else None
             was_inside_before = bool(prev_state and prev_state.confirmed_inside)
 
-            # Check box-zone intersection (only use 'inside' result, ignore 'touches')
+            # Box–polygon intersection (inside = person in zone)
             intersection_result = check_box_zone_intersection(
                 track.bbox,
                 self.config_obj.zone_coordinates,
@@ -176,7 +161,6 @@ class RestrictedZoneScenario(BaseScenario):
                 print(f"[RESTRICTED_ZONE] 🔍 Track {track.track_id}: inside={inside}, "
                       f"ratio={intersection_result.get('intersection_ratio', 0):.2f}")
 
-            # Update track state with stability confirmation (touches_zone=False, only track inside)
             track_state = self.zone_state.update_track_state(
                 track.track_id,
                 touches_zone=False,  # Not used, kept for compatibility
@@ -185,7 +169,7 @@ class RestrictedZoneScenario(BaseScenario):
                 stability_frames=self.config_obj.stability_frames,
             )
 
-            # Detect exit: was inside, now outside -> save violation to DB (single record)
+            # On exit from zone: save violation to DB (entry/exit duration, etc.)
             if was_inside_before and entry_time_before and not track_state.entry_time:
                 exit_time = frame_context.timestamp
                 duration_sec = (exit_time - entry_time_before).total_seconds()
@@ -213,7 +197,7 @@ class RestrictedZoneScenario(BaseScenario):
             self._report_max_concurrent, len(inside_track_ids)
         )
 
-        # Step 5: Update state for visualization (pipeline uses in_zone_indices to draw red boxes)
+        # --- Set _state for pipeline (in_zone_indices = touch + inside; pipeline draws red/orange) ---
         self._state["track_to_detection"] = track_to_detection
         self._state["touch_indices"] = [
             track_to_detection[tid] for tid in touch_track_ids if tid in track_to_detection
@@ -233,30 +217,22 @@ class RestrictedZoneScenario(BaseScenario):
                 f"🟧 {n_touch} touching (orange) | total red boxes: {len(self._state['in_zone_indices'])}"
             )
 
-        # Step 6: Generate multi-level alerts
         events = self._generate_alerts(frame_context, tracked_objects, track_to_detection)
-        
-        # Step 7: Cleanup inactive tracks
+        # --- Remove state for tracks no longer active ---
         active_track_ids = {t.track_id for t in tracked_objects}
         self.zone_state.cleanup_inactive_tracks(active_track_ids)
         
         return events
     
     
+    # --------- Alerts: Level 1 touch (orange), Level 2 inside (red), Level 3 duration (frequent) ---------
     def _generate_alerts(
         self,
         frame_context: ScenarioFrameContext,
         tracked_objects: List[Track],
         track_to_detection: Dict[int, int],
     ) -> List[ScenarioEvent]:
-        """
-        Generate multi-level alerts based on track state.
-        
-        Alert Levels:
-        - Level 1 (Touch/Orange): Person touches boundary
-        - Level 2 (Inside/Red): Person fully inside zone
-        - Level 3 (Duration/Frequent): Person inside >2 seconds (frequent alerts)
-        """
+        """Emit events for touch, inside, or duration violation (with cooldown per track)."""
         events = []
         now = frame_context.timestamp
         
@@ -284,7 +260,7 @@ class RestrictedZoneScenario(BaseScenario):
                 if duration >= self.config_obj.duration_threshold_seconds:
                     duration_violation_track_ids.append(track_id)
         
-        # Generate Level 1 alerts (Touch - Orange)
+        # Level 1: touch (orange)
         if touch_track_ids:
             detection_indices = [
                 track_to_detection[tid] for tid in touch_track_ids if tid in track_to_detection
@@ -317,7 +293,7 @@ class RestrictedZoneScenario(BaseScenario):
                         track_state.alert_level = "touch"
                         break  # One alert per frame for touch
         
-        # Generate Level 2 alerts (Inside - Red)
+        # Level 2: inside (red)
         if inside_track_ids:
             detection_indices = [
                 track_to_detection[tid] for tid in inside_track_ids if tid in track_to_detection
@@ -350,7 +326,7 @@ class RestrictedZoneScenario(BaseScenario):
                         track_state.alert_level = "inside"
                         break  # One alert per frame for inside
         
-        # Generate Level 3 alerts (Duration Violation - Frequent)
+        # Level 3: duration (person inside > duration_threshold_seconds)
         if duration_violation_track_ids:
             detection_indices = [
                 track_to_detection[tid] for tid in duration_violation_track_ids if tid in track_to_detection

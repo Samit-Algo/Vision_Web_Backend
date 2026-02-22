@@ -1,23 +1,20 @@
 """
-Wall climb detection scenario
-------------------------------
+Wall Climb Detection Scenario
+-------------------------------
+Person "above" wall when head/shoulders (keypoints) are above wall line. Tracker for stable IDs; VLM confirmation before alert.
+Fallback: box top above line when keypoints missing. Pipeline draws red keypoints (no boxes) for confirmed.
 
-Keypoint-based: person "above" wall when head/shoulders (nose, L/R shoulder) are above
-the wall line. Tracking gives stable IDs; VLM confirmation before alerting.
-Fallback to box top above line when keypoints missing.
+Code layout:
+  - extract_pose_frame: get pose from frame_context for VLM buffer.
+  - WallClimbScenario: __init__, process (filter → track → above check → VLM defer/call → confirmed_detection_indices), get_overlay_data, reset.
 """
 
-# -----------------------------------------------------------------------------
-# Standard library
-# -----------------------------------------------------------------------------
+# -------- Imports --------
 import os
 import logging
 from typing import Any, Dict, List, Set, Optional
 from datetime import datetime
 
-# -----------------------------------------------------------------------------
-# Application
-# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
     ScenarioFrameContext,
@@ -43,6 +40,8 @@ from app.infrastructure.external.groq_vlm_service import GroqVLMService
 
 logger = logging.getLogger(__name__)
 
+
+# ========== Helper: Extract pose frame for VLM buffer ==========
 
 def extract_pose_frame(frame_context: ScenarioFrameContext) -> Optional[PoseFrame]:
     """
@@ -77,6 +76,8 @@ def extract_pose_frame(frame_context: ScenarioFrameContext) -> Optional[PoseFram
         frame_index=frame_context.frame_index,
     )
 
+
+# ========== Scenario: Wall climb (keypoints above line → VLM confirm → red keypoints) ==========
 
 @register_scenario("wall_climb_detection")
 class WallClimbScenario(BaseScenario):

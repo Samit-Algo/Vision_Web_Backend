@@ -1,20 +1,18 @@
 """
-Box count scenario
-------------------
+Box Count Scenario
+-------------------
+Same as class_count but default target class is "box". Simple per-frame or line-based entry/exit with tracking.
+Uses class_count counter, reporter, report_storage, calculate_iou.
 
-Counts target class (default "box"): simple per-frame or line-based with tracking.
-Reuses class_count counter, reporter, report_storage and calculate_iou.
+Code layout:
+  - BoxCountScenario: __init__, process → process_line_counting | process_simple_counting,
+    generate_line_count_label, match_tracks_to_detections, save_counting_event_to_db, reset.
 """
 
-# -----------------------------------------------------------------------------
-# Standard library
-# -----------------------------------------------------------------------------
+# -------- Imports --------
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-# -----------------------------------------------------------------------------
-# Application
-# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
     ScenarioFrameContext,
@@ -36,6 +34,8 @@ from app.processing.vision_tasks.tasks.class_count.report_storage import (
     finalize_report_session,
 )
 
+
+# ========== Scenario: Box count (simple or line-based, default class "box") ==========
 
 @register_scenario("box_count")
 class BoxCountScenario(BaseScenario):
@@ -71,6 +71,7 @@ class BoxCountScenario(BaseScenario):
         return self.process_simple_counting(frame_context)
 
     def process_line_counting(self, frame_context: ScenarioFrameContext) -> List[ScenarioEvent]:
+        """Line zone: filter by class → tracker → line touch → track_info, counts, report → event."""
         frame_height, frame_width = frame_context.frame.shape[:2]
         self.line_counter.update_frame_dimensions(frame_width, frame_height)
         class_detections = filter_detections_by_class(

@@ -1,19 +1,17 @@
 """
-Face detection scenario
+Face Detection Scenario
 ------------------------
+Loads embeddings from person_gallery (MongoDB). Runs face detection + recognition per frame (DeepFace; cosine similarity).
+When watch_names is set, alerts only for those persons. State: recognized_faces for overlay.
 
-Loads embeddings from person_gallery; runs face detection + recognition per frame.
-Alerts when a watched person is identified. Uses DeepFace; matching by cosine similarity.
+Code layout:
+  - load_gallery_embeddings: load (embedding, name) from person_gallery (active, same model).
+  - FaceDetectionScenario: __init__, load_gallery, process (detect faces → match → recognized_faces, events), get_overlay_data.
 """
-# -----------------------------------------------------------------------------
-# Standard library
-# -----------------------------------------------------------------------------
+# -------- Imports --------
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-# -----------------------------------------------------------------------------
-# Application
-# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
     ScenarioFrameContext,
@@ -29,6 +27,8 @@ from app.utils.face_embedding import (
     DEFAULT_EMBEDDING_MODEL,
 )
 
+
+# ========== Helper: Load gallery embeddings from MongoDB ==========
 
 def load_gallery_embeddings() -> Tuple[List[List[float]], List[str]]:
     """
@@ -55,6 +55,8 @@ def load_gallery_embeddings() -> Tuple[List[List[float]], List[str]]:
                 known_names.append(name_str)
     return known_encodings, known_names
 
+
+# ========== Scenario: Face detection (gallery match; watch_names filter) ==========
 
 @register_scenario("face_detection")
 class FaceDetectionScenario(BaseScenario):

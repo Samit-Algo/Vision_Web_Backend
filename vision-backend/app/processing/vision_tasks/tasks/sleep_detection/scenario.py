@@ -1,19 +1,18 @@
 """
-Sleep detection scenario
+Sleep Detection Scenario
 -------------------------
+Pose → buffer → sleep posture analysis (lying/head-down) → VLM confirmation → person_sleeping event.
+Only emits when VLM confirms. Pipeline uses sleep_confirmed_indices for red boxes.
 
-Pose → buffer → posture analysis (lying/head-down) → VLM confirmation → alert. Uses pose + VLM.
+Code layout:
+  - box_iou: IoU of two boxes (for matching).
+  - SleepDetectionScenario: __init__, process (extract pose → buffer → deferred VLM → events), get_overlay_data.
 """
 
-# -----------------------------------------------------------------------------
-# Standard library
-# -----------------------------------------------------------------------------
+# -------- Imports --------
 import os
 from typing import Any, Dict, List, Optional
 
-# -----------------------------------------------------------------------------
-# Application
-# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
     ScenarioFrameContext,
@@ -51,6 +50,8 @@ def box_iou(box_a: List[float], box_b: List[float]) -> float:
     return inter / union if union > 0 else 0.0
 
 
+# ========== Scenario: Sleep detection (pose → buffer → VLM confirm) ==========
+
 @register_scenario("sleep_detection")
 class SleepDetectionScenario(BaseScenario):
     """
@@ -78,19 +79,14 @@ class SleepDetectionScenario(BaseScenario):
         Process one frame. Returns a list of events (usually 0 or 1: person_sleeping).
         """
         events = []
-
-        # Step 1: Get pose data (person + keypoints). Skip if no pose.
         pose_frame = extract_pose_frame(frame_context)
         if not pose_frame:
             return events
-
-        # Step 2: Add this frame to the buffer
         self.state.add_pose_frame(pose_frame)
         print(f"[SleepDetection Scenario] 📦 Buffer size: {len(self.state.pose_buffer)} (frame_index={frame_context.frame_index})")
 
         vlm_service = self.get_vlm_service()
-
-        # Step 3: Process deferred VLM calls (we deferred last frame; now we have 3 frames)
+        # --- Process deferred VLM when we have 3 frames ---
         to_remove = []
         for analysis, suspicious_frame_index in list(self.state.deferred_vlm):
             if frame_context.frame_index != suspicious_frame_index + 1:

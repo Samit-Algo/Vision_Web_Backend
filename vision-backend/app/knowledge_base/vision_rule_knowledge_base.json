@@ -15,10 +15,11 @@
       
         "detectable_classes": [
           "person",
-          "person_without_helmet",
-          "dog",
           "car",
-          "chair"
+          "bicycle",
+          "truck",
+          "bus"
+
         ],
       
         "required_fields_from_user": [
@@ -354,7 +355,8 @@
           "head_down_angle_deg": 25,
           "min_nose_below_shoulder_px": 10,
           "head_down_majority_ratio": 0.5,
-          "motion_threshold_px": 25
+          "motion_threshold_px": 25,
+          "detectable_classes": ["person"]
         }
       },
 
@@ -383,8 +385,8 @@
           "car",
           "truck",
           "bicycle",
-          "dog",
-          "cat"
+          "bus",
+          "motorcycle"
         ],
       
         "required_fields_from_user": [
@@ -459,11 +461,7 @@
         "model": "box_detection.pt",
       
         "detectable_classes": [
-          "box",
-          "package",
-          "container",
-          "bag",
-          "suitcase"
+          "box"
         ],
       
         "required_fields_from_user": [
@@ -516,7 +514,8 @@
         "defaults": {
           "fps": 10,
           "confidence": 0.7,
-          "run_mode": "continuous"
+          "run_mode": "continuous",
+          "detectable_classes": ["box"]
         }
       },
 
@@ -540,8 +539,7 @@
           "car",
           "truck",
           "bicycle",
-          "motorcycle",
-          "dog"
+          "motorcycle"
         ],
       
         "required_fields_from_user": [
@@ -678,7 +676,8 @@
           "fps": 10,
           "confidence": 0.7,
           "run_mode": "continuous",
-          "alert_cooldown_seconds": 10
+          "alert_cooldown_seconds": 10,
+          "detectable_class": "person"
         }
       },
 
@@ -764,7 +763,8 @@
           "hip_drop_threshold": 15,
           "height_drop_ratio": 0.25,
           "min_height_for_standing": 300,
-          "confirm_frames": 3
+          "confirm_frames": 3,
+          "detectable_class": "person"
         }
       },
 
@@ -846,10 +846,10 @@
           "fps": 5,
           "confidence": 0.5,
           "run_mode": "continuous",
-          "classes": ["fire", "flame", "smoke"],
           "alert_cooldown_seconds": 10,
           "confidence_threshold": 0.5,
-          "confirm_frames": 2
+          "confirm_frames": 2,
+          "detectable_classes": ["fire", "flame", "smoke"]
         }
       },
       {
@@ -886,6 +886,142 @@
           "run_mode": "continuous",
           "alert_cooldown_seconds": 10,
           "tolerance": 0.55
+        }
+      },
+
+      {
+        "rule_id": "loom_machine_state",
+        "rule_name": "Machine Idle Alert",
+        "description": "Notifies when a machine (e.g. loom) is idle for longer than a configurable threshold (in minutes). Uses industrial-grade motion detection: OpenCV MOG2 background subtraction plus morphological cleanup and a rolling-window motion ratio. No YOLO—model is 'none'. User draws one motion ROI (polygon) per machine around the moving parts; the system samples frames per minute, computes motion ratio per ROI, and uses a 15-second rolling average with hysteresis (RUNNING when avg motion > 0.02, STOPPED when < 0.005). When idle duration exceeds the user-specified threshold, an alert is sent (email/Kafka) and the machine is highlighted. The idle threshold must be provided by the user during agent creation.",
+        "intent_examples": [
+          "Notify me if the machine is idle for more than 15 minutes",
+          "Alert when a machine stops for more than 15 min",
+          "Tell me if the loom has been idle for too long",
+          "Machine idle detection",
+          "Alert if machine on idle state for more than 15 min"
+        ],
+        "model": "none",
+        "required_fields_from_user": [
+          "idle_threshold_minutes"
+        ],
+        "time_window": { "supported": true, "required": true },
+        "zone_support": {
+          "supported": true,
+          "required": true,
+          "zone_type": "motion_rois",
+          "description": "User must draw one polygon (motion ROI) per machine around the moving parts. Each ROI defines where to measure pixel movement. Draw at least one polygon; multiple machines = multiple polygons. The system converts each polygon to a bounding box and uses these regions to decide if the machine is running or idle."
+        },
+        "execution_modes": {
+          "continuous": {
+            "description": "Continuously monitors machine motion and alerts when idle too long",
+            "required_fields": [],
+            "forbidden_fields": ["interval_minutes", "check_duration_seconds"],
+            "zone_required": true
+          },
+          "patrol": {
+            "description": "Checks machine state periodically",
+            "required_fields": ["interval_minutes", "check_duration_seconds"],
+            "zone_required": true
+          }
+        },
+        "rules_config_fields": [
+          "idle_threshold_minutes",
+          "analysis_window_minutes",
+          "frames_per_minute",
+          "notify_on_idle",
+          "alert_cooldown_minutes",
+          "rolling_window_seconds",
+          "motion_ratio_running",
+          "motion_ratio_stopped",
+          "debounce_seconds",
+          "mog2_history",
+          "mog2_var_threshold",
+          "mog2_detect_shadows",
+          "preprocess_blur_ksize",
+          "morph_ksize"
+        ],
+        "defaults": {
+          "fps": 5,
+          "run_mode": "continuous",
+          "analysis_window_minutes": 15,
+          "frames_per_minute": 5,
+          "notify_on_idle": true,
+          "alert_cooldown_minutes": 30,
+          "rolling_window_seconds": 15,
+          "motion_ratio_running": 0.02,
+          "motion_ratio_stopped": 0.005,
+          "debounce_seconds": 5,
+          "mog2_history": 500,
+          "mog2_var_threshold": 16,
+          "mog2_detect_shadows": false,
+          "preprocess_blur_ksize": 5,
+          "morph_ksize": 3
+        }
+      },
+      {
+        "rule_id": "person_near_machine",
+        "rule_name": "Person Near Machine Monitoring",
+        "description": "Monitors whether an operator (or configured object class) is present in a user-drawn polygon zone. The class to detect is set via agent config (e.g. class: person). Only that YOLO class is used; other classes are filtered out. Zone is stored exactly as drawn (polygon with 3+ points, like Restricted Zone). Processes 5 frames per second. If the target class appears and stays inside the zone for 5 seconds, zone is marked ATTENDED (green). If none in zone (after grace time), marked UNATTENDED (red). Alert when unattended for user-specified minutes (absence_threshold_minutes required). Independent of machine motion. Only the configured class detections are shown and evaluated.",
+        "intent_examples": [
+          "Alert if no operator near machine for 15 minutes",
+          "Notify when loom machine is unattended",
+          "Monitor operator presence near loom",
+          "Alert if person not near machine for more than 15 minutes",
+          "Detect unattended loom machines"
+        ],
+        "model": "yolov8m.pt",
+        "required_fields_from_user": [
+          "absence_threshold_minutes"
+        ],
+        "time_window": { "supported": true, "required": true },
+        "zone_support": {
+          "supported": true,
+          "required": true,
+          "zone_type": "polygon",
+          "description": "User draws one polygon (operator zone) exactly like Restricted Zone: free-form polygon with 3+ points. Stored as zone.type 'polygon' and zone.coordinates [[x,y], ...]. No ROI/rectangle; exact user-drawn shape. Red = unattended, green = attended. Only the configured class (e.g. person, from agent config) is detected inside the zone; other classes are filtered out."
+        },
+        "execution_modes": {
+          "continuous": {
+            "description": "Continuously monitors operator presence and alerts when unattended too long",
+            "required_fields": [],
+            "forbidden_fields": ["interval_minutes", "check_duration_seconds"],
+            "zone_required": true
+          },
+          "patrol": {
+            "description": "Checks operator presence periodically",
+            "required_fields": ["interval_minutes", "check_duration_seconds"],
+            "zone_required": true
+          }
+        },
+        "rules_config_fields": [
+          "class",
+          "absence_threshold_minutes",
+          "grace_time_seconds",
+          "min_presence_seconds",
+          "confidence_threshold",
+          "tracker_max_age",
+          "tracker_min_hits",
+          "tracker_iou_threshold",
+          "notify_on_absence",
+          "alert_cooldown_minutes",
+          "emit_state_transitions",
+          "emit_periodic_updates",
+          "fps"
+        ],
+        "defaults": {
+          "class": "person",
+          "fps": 5,
+          "run_mode": "continuous",
+          "grace_time_seconds": 10.0,
+          "min_presence_seconds": 5.0,
+          "confidence_threshold": 0.5,
+          "tracker_max_age": 30,
+          "tracker_min_hits": 3,
+          "tracker_iou_threshold": 0.3,
+          "notify_on_absence": true,
+          "alert_cooldown_minutes": 30.0,
+          "emit_state_transitions": false,
+          "emit_periodic_updates": false
         }
       }
       

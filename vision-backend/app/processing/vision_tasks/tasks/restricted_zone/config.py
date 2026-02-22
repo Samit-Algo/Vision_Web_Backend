@@ -1,15 +1,16 @@
 """
-Restricted zone configuration
+Restricted Zone Configuration
 ------------------------------
+Parses rule: target class, confidence, alert cooldown, polygon zone, duration thresholds, tracker config.
 
-Parses target class, confidence, alert cooldown, polygon zone coordinates, and tracking parameters.
+Code layout:
+  - RestrictedZoneConfig.__init__: target_class, zone (polygon), duration_*, stability_frames, tracker_config.
 """
 
-# -----------------------------------------------------------------------------
-# Standard library
-# -----------------------------------------------------------------------------
 from typing import Any, Dict, List, Optional
 
+
+# ========== Config: target class, zone polygon, cooldown, duration, tracker ==========
 
 class RestrictedZoneConfig:
     """Config for restricted zone: target class, zone polygon, cooldown, tracking."""
@@ -19,8 +20,7 @@ class RestrictedZoneConfig:
         self.custom_label = config.get("label")
         self.alert_cooldown_seconds = float(config.get("alert_cooldown_seconds", 10))
         self.confidence_threshold = float(config.get("confidence_threshold", 0.4))
-        
-        # Zone configuration
+        # --- Polygon zone from rule/task ---
         zone = config.get("zone") or task.get("zone")
         self.zone_coordinates: Optional[List[List[float]]] = None
         if zone and isinstance(zone, dict):
@@ -28,15 +28,12 @@ class RestrictedZoneConfig:
             coords = zone.get("coordinates")
             if zone_type == "polygon" and isinstance(coords, list) and len(coords) >= 3:
                 self.zone_coordinates = coords
-        
-        # Duration-based alerting
+        # --- Duration: inside > N seconds triggers Level 3; repeat alert interval ---
         self.duration_threshold_seconds = float(config.get("duration_threshold_seconds", 2.0))
         self.duration_alert_interval_seconds = float(config.get("duration_alert_interval_seconds", 1.0))
         
-        # Instant trigger: 1 = no anti-flicker wait (alert as soon as person in zone)
         self.stability_frames = int(config.get("stability_frames", 1))
-        
-        # Tracker: min_hits=1 so new detections get a track immediately (instant zone check)
+        # --- Tracker (min_hits=1 for instant zone check) ---
         tracker_config = config.get("tracker_config") or {}
         self.tracker_max_age = int(tracker_config.get("max_age", 30))
         self.tracker_min_hits = int(tracker_config.get("min_hits", 1))

@@ -1,30 +1,24 @@
 """
-Fall detection scenario
+Fall Detection Scenario
 ------------------------
+State machine: NORMAL → FALL_SUSPECTED → [VLM] → RECOVERED or CONFIRMED_FALL. FPS-independent pose metrics.
+Suspected = drop + (height collapse or horizontal torso). VLM confirms; recovery = standing again.
+State: fall_suspected_indices (orange), fall_confirmed_indices (red) for pipeline/UI.
 
-Real-time fall detection using a state machine and FPS-independent metrics with VLM confirmation:
-
-  NORMAL → FALL_SUSPECTED → [VLM Analysis] → (RECOVERED → NORMAL) or (VLM_CONFIRMED → CONFIRMED_FALL → ALERT)
-
-- Fall suspected: sudden downward movement (A) + (height collapse (B) or horizontal torso (C)).
-- VLM confirmation: sends 5 frames to VLM for confirmation (API limit).
-- Recovery: height increased, torso vertical, or hip/head moved up.
-- Confirmed fall: VLM confirms fall → emit alert.
-
-Keypoints: FALL_SUSPECTED → orange, CONFIRMED_FALL → red (set in state for pipeline/UI).
+Code layout:
+  - Keypoint helpers: get_keypoint, midpoint, angle_from_vertical, keypoint_bbox, get_head_point.
+  - analyze_person_metrics: pose metrics + fall signals (hip_drop, torso_horizontal, etc.).
+  - check_recovery: true if person standing again.
+  - filter_detections_by_class_with_indices, calculate_iou, extract_pose_frame.
+  - FallDetectionScenario: __init__, process (filter → track → metrics → state transitions → VLM defer/call → events), generate_label, reset.
 """
 
-# -----------------------------------------------------------------------------
-# Standard library
-# -----------------------------------------------------------------------------
+# -------- Imports --------
 import math
 import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-# -----------------------------------------------------------------------------
-# Application
-# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
     ScenarioEvent,
@@ -38,17 +32,12 @@ from .state import FallDetectionState
 from .vlm_handler import should_call_vlm, call_vlm
 from app.infrastructure.external.groq_vlm_service import GroqVLMService
 
-# -----------------------------------------------------------------------------
-# State labels (for readability)
-# -----------------------------------------------------------------------------
+# --------- State labels ---------
 STATE_NORMAL = "normal"
 STATE_FALL_SUSPECTED = "fall_suspected"
 STATE_CONFIRMED_FALL = "confirmed_fall"
 
-# -----------------------------------------------------------------------------
-# Keypoint helpers (COCO 17: 0=nose, 5/6=shoulders, 11/12=hips, etc.)
-# -----------------------------------------------------------------------------
-
+# ========== Keypoint helpers (COCO 17: 0=nose, 5/6=shoulders, 11/12=hips) ==========
 
 def get_keypoint(
     person_keypoints: List[List[float]],
@@ -301,10 +290,7 @@ def check_recovery(
     return False
 
 
-# -----------------------------------------------------------------------------
-# Scenario
-# -----------------------------------------------------------------------------
-
+# ========== Helpers: filter by class with indices, IoU, extract pose frame ==========
 
 def filter_detections_by_class_with_indices(
     detections, target_class: str
@@ -391,6 +377,8 @@ def extract_pose_frame(frame_context: ScenarioFrameContext) -> Optional[PoseFram
         frame_index=frame_context.frame_index,
     )
 
+
+# ========== Scenario: Fall detection (pose → state machine → VLM confirm) ==========
 
 @register_scenario("fall_detection")
 class FallDetectionScenario(BaseScenario):

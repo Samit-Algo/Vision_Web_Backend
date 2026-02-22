@@ -1,19 +1,17 @@
 """
-Class presence scenario
+Class Presence Scenario
 ------------------------
+Detects if target class(es) are present anywhere in the frame (no zone). Match mode: any or all.
+Alerts with cooldown when configured classes detected.
 
-Detects if target class(es) are present in the frame (no zone). Match mode: any or all.
+Code layout:
+  - ClassPresenceScenario: __init__, process (find_matching_detections → state → event if cooldown ok), find_matching_detections, generate_label, reset.
 """
 
-# -----------------------------------------------------------------------------
-# Standard library
-# -----------------------------------------------------------------------------
+# -------- Imports --------
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-# -----------------------------------------------------------------------------
-# Application
-# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
     ScenarioFrameContext,
@@ -28,6 +26,8 @@ from .detector import (
     generate_label,
 )
 
+
+# ========== Scenario: Class presence (target classes in frame, no zone) ==========
 
 @register_scenario("class_presence")
 class ClassPresenceScenario(BaseScenario):
@@ -54,30 +54,22 @@ class ClassPresenceScenario(BaseScenario):
         
         Filters detections by user-specified class(es) and triggers alert if detected.
         """
-        # Early exit: No target classes configured
         if not self.config_obj.target_classes:
             self._state["class_detected"] = False
             self._state["detected_classes"] = []
             return []
-
-        # Find detections matching the target class(es)
         matched_indices, matched_classes, matched_scores = self.find_matching_detections(
             frame_context
         )
-
-        # Update state
         if matched_indices:
             self._state["class_detected"] = True
             self._state["detected_classes"] = matched_classes
         else:
             self._state["class_detected"] = False
             self._state["detected_classes"] = []
-
-        # If no matches, return empty list (no event)
         if not matched_indices:
             return []
-
-        # Check alert cooldown
+        # --- Emit event if not in cooldown ---
         now = frame_context.timestamp
         last_alert_time = self._state.get("last_alert_time")
         if last_alert_time and isinstance(last_alert_time, datetime):

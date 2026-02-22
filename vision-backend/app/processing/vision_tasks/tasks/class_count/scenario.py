@@ -1,19 +1,18 @@
 """
-Class count scenario
+Class Count Scenario
 ---------------------
+Counts target class: (1) simple per-frame count (no zone), or (2) line-based entry/exit with tracker.
+Uses counter, reporter, report_storage for DB. Pipeline uses track_info for drawing.
 
-Counts target class: simple per-frame or line-based (tracker + line crossing). Uses counter, reporter, report_storage.
+Code layout:
+  - ClassCountScenario: __init__ (config, tracker, line_counter), process → process_line_counting | process_simple_counting,
+    generate_line_count_label, match_tracks_to_detections, initialize_report_session, save_counting_event_to_db, finalize_report_session, reset.
 """
 
-# -----------------------------------------------------------------------------
-# Standard library
-# -----------------------------------------------------------------------------
+# -------- Imports --------
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-# -----------------------------------------------------------------------------
-# Application
-# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
     ScenarioFrameContext,
@@ -36,6 +35,8 @@ from .report_storage import (
 from app.processing.vision_tasks.tracking import SimpleTracker, LineCrossingCounter
 
 
+# ========== Scenario: Class count (simple or line-based) ==========
+
 @register_scenario("class_count")
 class ClassCountScenario(BaseScenario):
     """
@@ -48,11 +49,7 @@ class ClassCountScenario(BaseScenario):
 
     def __init__(self, config: Dict[str, Any], pipeline_context):
         super().__init__(config, pipeline_context)
-
-        # Load configuration
         self.config_obj = ClassCountConfig(config, pipeline_context.task)
-
-        # Initialize tracker and line counter for line-based counting
         self.tracker: Optional[SimpleTracker] = None
         self.line_counter: Optional[LineCrossingCounter] = None
 
@@ -69,8 +66,6 @@ class ClassCountScenario(BaseScenario):
                 direction=self.config_obj.zone_direction,
                 count_mode="entry_exit",
             )
-
-        # Initialize report session when agent starts
         self._report_initialized = False
         self.initialize_report_session()
 
@@ -82,11 +77,8 @@ class ClassCountScenario(BaseScenario):
         1. Simple counting (no zone)
         2. Line-based counting with tracking (line zone)
         """
-        # Early exit: No target class configured
         if not self.config_obj.target_class:
             return []
-
-        # Line-based counting (with tracking)
         if self.config_obj.zone_type == "line" and self.tracker and self.line_counter:
             return self.process_line_counting(frame_context)
 
@@ -94,10 +86,9 @@ class ClassCountScenario(BaseScenario):
         return self.process_simple_counting(frame_context)
 
     def process_line_counting(self, frame_context: ScenarioFrameContext) -> List[ScenarioEvent]:
-        """Process line-based counting with tracking."""
+        """Line zone: filter by class → tracker update → line touch check → track_info + counts → event."""
         frame_height, frame_width = frame_context.frame.shape[:2]
         self.line_counter.update_frame_dimensions(frame_width, frame_height)
-
         class_detections = filter_detections_by_class(
             frame_context.detections,
             self.config_obj.target_class
@@ -105,7 +96,7 @@ class ClassCountScenario(BaseScenario):
 
         active_tracks = self.tracker.update(class_detections)
         all_active_tracks = self.tracker.get_all_active_tracks()
-
+        # --- Which tracks touched the line this frame; save events to DB ---
         touched_track_ids = []
         for track in all_active_tracks:
             touch_result = self.line_counter.check_touch(track)
@@ -127,7 +118,7 @@ class ClassCountScenario(BaseScenario):
                 )
 
         self._state["current_frame_touched_tracks"] = touched_track_ids
-
+        # --- Build track_info for pipeline (center, bbox, touching_line, counted, direction) ---
         track_info = []
         for track in all_active_tracks:
             touching_line = self.line_counter.is_track_touching(track) if self.line_counter else False
@@ -193,7 +184,7 @@ class ClassCountScenario(BaseScenario):
         ]
 
     def process_simple_counting(self, frame_context: ScenarioFrameContext) -> List[ScenarioEvent]:
-        """Process simple per-frame counting (no zone)."""
+        """No zone: count detections of target_class this frame; return one event with count and report."""
         matched_count, matched_indices = count_class_detections(
             frame_context.detections,
             self.config_obj.target_class

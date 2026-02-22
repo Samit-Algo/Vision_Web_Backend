@@ -1,14 +1,16 @@
 """
 Person Near Machine Monitoring Scenario (Industrial-Grade)
 -----------------------------------------------------------
+Polygon zone (like restricted_zone). Target class from agent config (e.g. person).
+ATTENDED = someone in zone > min_presence_seconds. UNATTENDED = no one for > grace_time_seconds.
+Zone color: green = attended, red = unattended, gray = unknown. Process at 5 FPS.
 
-- Uses polygon zone (same as restricted_zone): exact user-drawn coordinates.
-- Person detection only (YOLO person class + tracking).
-- ATTENDED when person in zone for > min_presence_seconds (e.g. 5s).
-- UNATTENDED when no person for > grace_time_seconds. Red zone.
-- Green zone when attended. Process at 5 FPS.
+Code layout:
+  - _point_in_polygon_pixel: helper to test if point is inside zone (normalized or pixel coords)
+  - PersonNearMachineScenario: requires_yolo, __init__, process, update_internal_state, get_overlay_data, reset
 """
 
+# -------- Imports --------
 from typing import Any, Dict, List, Optional
 
 from app.processing.vision_tasks.data_models import (
@@ -24,6 +26,8 @@ from .config import PersonNearMachineConfig
 from .state import PersonNearMachineStateManager, ZONE_ID
 from .types import PersonPresenceAnalysis
 
+
+# ========== Helper: Point-in-polygon (normalized or pixel coordinates) ==========
 
 def _point_in_polygon_pixel(
     center_x: float, center_y: float,
@@ -42,10 +46,12 @@ def _point_in_polygon_pixel(
     return point_in_polygon((center_x, center_y), zone_coordinates)
 
 
+# ========== Scenario: Person Near Machine (zone attended / unattended) ==========
+
 @register_scenario("person_near_machine")
 class PersonNearMachineScenario(BaseScenario):
     """
-    Person Near Machine: polygon zone (like restricted_zone), person-only detection.
+    Person Near Machine: polygon zone (like restricted_zone), target-class-only detection (class from agent config).
     Green = attended, Red = unattended.
     """
 
@@ -56,10 +62,9 @@ class PersonNearMachineScenario(BaseScenario):
         super().__init__(config, pipeline_context)
         task = getattr(pipeline_context, "task", None) or {}
         self.config_obj = PersonNearMachineConfig(config, task)
-
+        # Require polygon zone (at least 3 points)
         if not self.config_obj.zone_coordinates or len(self.config_obj.zone_coordinates) < 3:
             raise ValueError("person_near_machine requires zone with type 'polygon' and at least 3 coordinates")
-
         fps = getattr(pipeline_context, "fps", None) or self.config_obj.fps
         fps = max(1, fps)
         self.state_manager = PersonNearMachineStateManager(self.config_obj, fps)
@@ -71,7 +76,7 @@ class PersonNearMachineScenario(BaseScenario):
         )
         self.previous_state = "UNKNOWN"
         print(
-            f"[PersonNearMachine] polygon zone ({len(self.config_obj.zone_coordinates)} points), "
+            f"[PersonNearMachine] target_class={self.config_obj.target_class}, polygon zone ({len(self.config_obj.zone_coordinates)} points), "
             f"absence_threshold={self.config_obj.absence_threshold_minutes}min, "
             f"grace_time={self.config_obj.grace_time_seconds}s, min_presence={self.config_obj.min_presence_seconds}s, fps={fps}"
         )
@@ -83,11 +88,12 @@ class PersonNearMachineScenario(BaseScenario):
         timestamp = frame_context.timestamp
         detections = frame_context.detections
         h, w = frame.shape[:2]
-
-        person_detections, person_indices = filter_detections_by_class_with_indices(detections, "person")
+        # --- Filter by target class and update tracker ---
+        target_class = self.config_obj.target_class
+        person_detections, person_indices = filter_detections_by_class_with_indices(detections, target_class)
         tracker_detections = [(bbox, score) for bbox, score in person_detections]
         tracked_persons = self.tracker.update(tracker_detections)
-
+        # --- Check which tracked persons are inside the polygon zone ---
         person_in_zone = False
         person_count = 0
         max_confidence = 0.0
@@ -98,6 +104,7 @@ class PersonNearMachineScenario(BaseScenario):
                 person_count += 1
                 max_confidence = max(max_confidence, track.score)
 
+        # --- Update state (ATTENDED / UNATTENDED) and emit transition event if enabled ---
         analysis = PersonPresenceAnalysis(
             loom_id=ZONE_ID,
             person_detected=person_in_zone,
@@ -109,7 +116,6 @@ class PersonNearMachineScenario(BaseScenario):
         previous_state = self.state_manager.add_presence_analysis(analysis)
         zone_state = self.state_manager.get_loom_state(ZONE_ID)
         current_state = zone_state.current_state if zone_state else "UNATTENDED"
-
         if self.config_obj.emit_state_transitions and previous_state and previous_state != current_state:
             events.append(
                 ScenarioEvent(
@@ -129,7 +135,7 @@ class PersonNearMachineScenario(BaseScenario):
                 )
             )
             print(f"[PersonNearMachineScenario] {previous_state} -> {current_state}")
-
+        # --- Emit unattended alert if zone has been empty too long ---
         absence_alert = self.state_manager.check_absence_alert(ZONE_ID, "Zone", timestamp)
         if absence_alert:
             events.append(
@@ -150,6 +156,7 @@ class PersonNearMachineScenario(BaseScenario):
             print(f"[PersonNearMachineScenario] Unattended alert: {absence_alert['absence_duration_minutes']:.1f} min")
 
         self.previous_state = current_state
+        # --- Optional: emit periodic presence update (e.g. every 10 seconds at 5 FPS) ---
         if self.config_obj.emit_periodic_updates and frame_index % (getattr(self.pipeline_context, "fps", 5) * 10) == 0:
             events.append(
                 ScenarioEvent(
@@ -164,9 +171,10 @@ class PersonNearMachineScenario(BaseScenario):
             )
 
         self.state_manager.cleanup_old_data(timestamp)
-        self.update_internal_state()
+        self.update_internal_state()  # Expose state for pipeline (zone color, etc.)
         return events
 
+    # --------- Expose state for pipeline / UI (zone state, config) ---------
     def update_internal_state(self) -> None:
         all_states = self.state_manager.get_all_states()
         state = all_states.get(ZONE_ID)
@@ -187,8 +195,9 @@ class PersonNearMachineScenario(BaseScenario):
             },
         }
 
+    # --------- Overlay: polygon + color for stream/UI (green/red/gray) ---------
     def get_overlay_data(self, frame_context=None) -> Optional[Dict[str, Any]]:
-        """Return polygon zone with color: gray = UNKNOWN (initial), green = ATTENDED, red = UNATTENDED (same flow as loom_machine_state)."""
+        """Return polygon and color: gray=UNKNOWN, green=ATTENDED, red=UNATTENDED."""
         all_states = self.state_manager.get_all_states()
         state = all_states.get(ZONE_ID)
         current_state = state.current_state if state else "UNKNOWN"

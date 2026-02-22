@@ -5,14 +5,17 @@ Event Notifier
 Utility to send event notifications with annotated frames.
 - Saves events to MongoDB (for API queries)
 - Publishes event notifications to Kafka (for real-time via FastAPI consumer)
+- Triggers email notifications (separate service; async, configurable)
 
-Dual write approach: DB + Kafka.
+Kafka and email are independent; both are triggered at the same time when an event occurs.
 """
+import asyncio
 import base64
 import json
 import os
+import threading
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime
 import numpy as np
 
@@ -33,6 +36,7 @@ except ImportError:
 from .datetime_utils import now, utc_now, ensure_utc, now_iso, parse_iso
 from .db import get_collection
 from ..domain.constants.event_fields import EventFields
+from ..domain.constants.user_fields import UserFields
 from ..core.config import get_settings
 
 # Base directory for storing event images (same pattern as event_storage.py)
@@ -195,6 +199,64 @@ def _infer_severity(label: str) -> str:
         return "info"
 
 
+def _get_event_notification_recipients(owner_user_id: Optional[str]) -> List[str]:
+    """
+    Build list of email recipients for event notification.
+    Combines config default recipients with optional camera/agent owner email.
+    """
+    settings = get_settings()
+    recipients: List[str] = []
+    if settings.email_notification_recipients:
+        for part in settings.email_notification_recipients.split(","):
+            email = part.strip()
+            if email and "@" in email and email not in recipients:
+                recipients.append(email)
+    if settings.email_notification_include_owner and owner_user_id:
+        try:
+            users_collection = get_collection("users")
+            user_doc = users_collection.find_one({"id": owner_user_id})
+            if not user_doc:
+                from bson import ObjectId
+                from bson.errors import InvalidId
+                try:
+                    user_doc = users_collection.find_one({"_id": ObjectId(owner_user_id)})
+                except (InvalidId, ValueError, TypeError):
+                    pass
+            if user_doc:
+                email = (user_doc.get(UserFields.EMAIL) or "").strip()
+                if email and "@" in email and email not in recipients:
+                    recipients.append(email)
+        except Exception as e:
+            print(f"[event_notifier] ⚠️  Could not resolve owner email: {e}")
+    return recipients
+
+
+def _run_email_notification_async(
+    to_emails: List[str], payload: Dict[str, Any], frame_base64: Optional[str]
+) -> None:
+    """
+    Run async email send in a dedicated thread (non-blocking for the pipeline).
+    """
+    try:
+        from .email_service import send_event_notification_email_async
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            ok = loop.run_until_complete(
+                send_event_notification_email_async(to_emails, payload, frame_base64)
+            )
+            if ok:
+                print("[event_notifier] ✅ Email notification completed successfully")
+            else:
+                print("[event_notifier] ❌ Email notification completed but send failed (check [email_service] logs above)")
+        finally:
+            loop.close()
+    except Exception as e:
+        print(f"[event_notifier] ❌ Email notification error (thread): {e}")
+        import traceback
+        traceback.print_exc()
+
+
 def send_event_to_backend_sync(
     event: Dict[str, Any],
     annotated_frame: np.ndarray,
@@ -206,11 +268,12 @@ def send_event_to_backend_sync(
     session_id: Optional[str] = None
 ) -> bool:
     """
-    Send event notification - DB write + Kafka publish.
+    Send event notification - DB write + Kafka publish + optional email.
     
     This function:
     1. Saves event to MongoDB (for API queries)
     2. Publishes event to Kafka (FastAPI consumes and broadcasts to WebSocket)
+    3. Triggers email notification if enabled (async, non-blocking)
     
     Args:
         event: Event dict with 'label' and optionally 'rule_index'
@@ -330,52 +393,49 @@ def send_event_to_backend_sync(
         except Exception as e:
             print(f"[event_notifier] ❌ Error saving event to MongoDB: {e}")
             db_success = False
-        
+
+        # Encode frame once (used for Kafka and for email evidence)
+        frame_base64 = encode_frame_to_base64(annotated_frame)
+        # Build event payload once (same structure for Kafka and for email)
+        payload = {
+            "event": {
+                "label": label,
+                "event_type": event_type,
+                "rule_index": event.get("rule_index"),
+                "timestamp": now_iso(),
+            },
+            "agent": {
+                "agent_id": agent_id,
+                "agent_name": agent_name,
+                "camera_id": camera_id,
+            },
+            "camera": {
+                "owner_user_id": owner_user_id,
+                "device_id": device_id,
+            },
+            "frame": {
+                "image_base64": frame_base64,
+                "format": "jpeg",
+            },
+            "metadata": {
+                "video_timestamp": video_timestamp,
+                "detections": _serialize_for_json(detections) if detections else None,
+                "session_id": session_id,
+                "event_id": event_id,
+                "image_path": image_path,
+            },
+        }
+
         # 2. Publish to Kafka (FastAPI consumes and broadcasts to WebSocket)
         producer = get_kafka_producer()
         if producer:
             try:
-                # Encode frame to base64 for Kafka
-                frame_base64 = encode_frame_to_base64(annotated_frame)
-                
-                # Build Kafka payload (same structure as original); event_type for UI (e.g. red alert for fall_detected)
-                payload = {
-                    "event": {
-                        "label": label,
-                        "event_type": event_type,
-                        "rule_index": event.get("rule_index"),
-                        "timestamp": now_iso(),
-                    },
-                    "agent": {
-                        "agent_id": agent_id,
-                        "agent_name": agent_name,
-                        "camera_id": camera_id,
-                    },
-                    "camera": {
-                        "owner_user_id": owner_user_id,
-                        "device_id": device_id,
-                    },
-                    "frame": {
-                        "image_base64": frame_base64,
-                        "format": "jpeg",
-                    },
-                    "metadata": {
-                        "video_timestamp": video_timestamp,
-                        "detections": _serialize_for_json(detections) if detections else None,
-                        "session_id": session_id,
-                        "event_id": event_id,  # Include MongoDB event ID
-                        "image_path": image_path,  # Include image path for frontend to fetch
-                    }
-                }
-                
                 settings = get_settings()
                 future = producer.send(
                     settings.kafka_topic,
                     value=payload,
-                    key=agent_id.encode('utf-8') if agent_id else None
+                    key=agent_id.encode("utf-8") if agent_id else None,
                 )
-                
-                # Wait for send confirmation
                 record_metadata = future.get(timeout=10)
                 kafka_success = True
                 print(
@@ -390,9 +450,25 @@ def send_event_to_backend_sync(
                 print(f"[event_notifier] ❌ Error sending event to Kafka: {e}")
                 kafka_success = False
         else:
-            # Kafka is optional, don't log as warning
             kafka_success = False
-        
+
+        # 3. Trigger email notification (separate from Kafka; async, non-blocking)
+        settings = get_settings()
+        if settings.email_notification_enabled:
+            to_emails = _get_event_notification_recipients(owner_user_id)
+            if to_emails:
+                thread = threading.Thread(
+                    target=_run_email_notification_async,
+                    args=(to_emails, payload, frame_base64),
+                    name="EventEmailNotification",
+                    daemon=True,
+                )
+                thread.start()
+                print(
+                    f"[event_notifier] 📧 Email notification triggered (async) | "
+                    f"recipients={len(to_emails)} | event_id={event_id}"
+                )
+
         # Return True if at least DB write succeeded
         return db_success
         

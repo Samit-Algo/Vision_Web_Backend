@@ -72,6 +72,28 @@ class Settings:
             "http://localhost:8000"
         ).split('#')[0].strip()
         
+        # Email notification (separate from Kafka; triggered on same event)
+        self.email_notification_enabled: Final[bool] = os.getenv(
+            "EMAIL_NOTIFICATION_ENABLED", "true"
+        ).strip().lower() in ("true", "1", "yes")
+        # Comma-separated default recipients (e.g. "admin@company.com,ops@company.com")
+        self.email_notification_recipients: Final[str] = os.getenv(
+            "EMAIL_NOTIFICATION_RECIPIENTS", ""
+        ).strip()
+        # Include camera/agent owner's email when available
+        self.email_notification_include_owner: Final[bool] = os.getenv(
+            "EMAIL_NOTIFICATION_INCLUDE_OWNER", "true"
+        ).strip().lower() in ("true", "1", "yes")
+        # SMTP
+        self.smtp_host: Final[str] = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
+        self.smtp_port: Final[int] = int(os.getenv("SMTP_PORT", "587").strip())
+        # True for port 465 (implicit TLS); False for port 587 (STARTTLS is automatic)
+        self.smtp_use_tls: Final[bool] = os.getenv("SMTP_USE_TLS", "false").strip().lower() in ("true", "1", "yes")
+        self.smtp_user: Final[str] = os.getenv("SMTP_USER", "").strip()
+        self.smtp_password: Final[str] = os.getenv("SMTP_PASSWORD", "").strip()
+        self.email_from: Final[str] = os.getenv("EMAIL_FROM", self.smtp_user or "noreply@vision.local").strip()
+        self.email_from_name: Final[str] = os.getenv("EMAIL_FROM_NAME", "Vision Alerts").strip()
+
         # Kafka Configuration
         self.kafka_bootstrap_servers: Final[str] = os.getenv(
             "KAFKA_BOOTSTRAP_SERVERS",

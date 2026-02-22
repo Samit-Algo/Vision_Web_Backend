@@ -1,22 +1,19 @@
 """
-Fire detection scenario
+Fire Detection Scenario
 ------------------------
+Detects fire/flame/smoke anywhere in frame (no zone). Alert when fire confirmed for confirm_frames
+and not in alert_cooldown. State: consecutive_fire_frames, fire_detected, last_alert_time.
 
-Detects fire/flame/smoke anywhere in the frame. No zone: any fire in the feed triggers
-the rule. Alert is raised based on user settings: confirm_frames, confidence_threshold,
-alert_cooldown_seconds, and optional custom label.
+Code layout:
+  - FireDetectionScenario: __init__ (state), process (find_fire → update state → emit event if alert),
+    find_fire_detections, generate_label, reset.
 """
 
-# -----------------------------------------------------------------------------
-# Standard library
-# -----------------------------------------------------------------------------
+# -------- Imports --------
 from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-# -----------------------------------------------------------------------------
-# Application
-# -----------------------------------------------------------------------------
 from app.processing.vision_tasks.data_models import (
     BaseScenario,
     ScenarioEvent,
@@ -49,16 +46,15 @@ class FireDetectionScenario(BaseScenario):
         self._state["detection_counts"] = defaultdict(int)
 
     def process(self, frame_context: ScenarioFrameContext) -> List[ScenarioEvent]:
-        # Step 1: Find fire-related detections (fire, flame, smoke) above confidence threshold
+        # --- Find fire-like classes (fire, flame, smoke) above confidence ---
         fire_detections = self.find_fire_detections(frame_context)
         if not fire_detections:
-            # No fire this frame: decay consecutive counter, clear fire_detected when zero
             if self._state["consecutive_fire_frames"] > 0:
                 self._state["consecutive_fire_frames"] -= 1
             if self._state["consecutive_fire_frames"] == 0:
                 self._state["fire_detected"] = False
             return []
-        # Step 2: Update state (consecutive frames, total count, fire_detected)
+        # --- Update state: consecutive_fire_frames, fire_detected ---
         self._state["consecutive_fire_frames"] += 1
         self._state["total_fire_detections"] += 1
         matched_indices, matched_classes, matched_scores = fire_detections
@@ -67,7 +63,7 @@ class FireDetectionScenario(BaseScenario):
         self._state["fire_detected"] = True
         now = frame_context.timestamp
         is_confirmed = self._state["consecutive_fire_frames"] >= self.config_obj.confirm_frames
-        # Step 3: Decide if we should emit an alert (confirmed + not in cooldown)
+        # --- Emit alert only if confirmed and not in cooldown ---
         is_alert = False
         if is_confirmed:
             last_alert_time = self._state.get("last_alert_time")
@@ -89,7 +85,6 @@ class FireDetectionScenario(BaseScenario):
                 })
                 if len(self._state["fire_detection_history"]) > 100:
                     self._state["fire_detection_history"] = self._state["fire_detection_history"][-100:]
-        # Step 4: Build label and event (critical if alert, else detection/warning/info)
         if is_alert:
             label = self.generate_label(len(matched_indices), matched_classes)
             alert_type = "critical"
@@ -126,7 +121,7 @@ class FireDetectionScenario(BaseScenario):
     def find_fire_detections(
         self, frame_context: ScenarioFrameContext
     ) -> Optional[Tuple[List[int], List[str], List[float]]]:
-        """Return (matched_indices, matched_classes, matched_scores) for fire-like classes anywhere in frame, or None."""
+        """Return (indices, classes, scores) for detections matching target_classes (fire/flame/smoke) above confidence, or None."""
         detections = frame_context.detections
         classes = detections.classes
         scores = detections.scores

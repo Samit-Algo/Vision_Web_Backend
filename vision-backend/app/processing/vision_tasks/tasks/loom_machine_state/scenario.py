@@ -1,12 +1,15 @@
 """
-Loom machine state scenario (industrial-grade)
------------------------------------------------
+Loom Machine State Scenario
+----------------------------
+No YOLO; raw frames only. MOG2 background subtraction + motion ratio over rolling window.
+RUNNING when motion > threshold, STOPPED when below. Idle alert after idle_threshold_minutes.
+Overlay: polygons + colors (green=RUNNING, red=STOPPED) per loom ROI.
 
-MOG2 background subtraction + morphological cleanup + rolling-window motion ratio.
-Hysteresis: RUNNING when avg motion_ratio > threshold, STOPPED when < threshold.
-No YOLO; raw frames only. Idle alert when no motion for >= idle_threshold_minutes.
+Code layout:
+  - LoomMachineStateScenario: requires_yolo_detections=False, __init__ (config, state_manager, MOG2 per loom), process, get_overlay_data, reset.
 """
 
+# -------- Imports --------
 from typing import Any, Dict, List, Optional
 
 from app.processing.vision_tasks.data_models import (
@@ -19,6 +22,8 @@ from .config import LoomMachineStateConfig
 from .state import LoomMachineStateManager
 from .motion_detector import create_mog2_subtractor, detect_motion
 
+
+# ========== Scenario: Loom machine state (MOG2 motion → RUNNING/STOPPED) ==========
 
 @register_scenario("loom_machine_state")
 class LoomMachineStateScenario(BaseScenario):
@@ -74,8 +79,7 @@ class LoomMachineStateScenario(BaseScenario):
         frame = frame_context.frame
         frame_index = frame_context.frame_index
         timestamp = frame_context.timestamp
-        
-        # Check if we should process this frame (update interval)
+        # --- Process at update_interval_frames (e.g. once per N frames) ---
         self.frame_counter += 1
         if self.frame_counter % self.config_obj.update_interval_frames != 0:
             return events  # Skip this frame

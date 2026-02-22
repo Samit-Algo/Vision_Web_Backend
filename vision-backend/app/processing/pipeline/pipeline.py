@@ -1,22 +1,34 @@
 """
 Pipeline Runner and Stages
 --------------------------
+Orchestrates the vision processing pipeline in 4 stages:
+  1. Acquire frame from camera/video
+  2. Run YOLO (or other) model inference
+  3. Merge detections from multiple models
+  4. Evaluate rules (scenarios) and draw/publish
 
-Orchestrates the processing pipeline: acquire frame → inference → merge → evaluate rules → draw/publish.
-Manages the main loop (continuous or patrol), FPS pacing, and stage sequencing.
+Supports continuous mode (run at target FPS) and patrol mode (sleep N min, process M sec).
+
+Code layout (block-by-block):
+  - Imports (standard lib, processing, utils)
+  - Stage 1: acquire_frame_stage() — read one frame from source
+  - any_scenario_requires_yolo() — skip inference if no rule needs detections
+  - Stage 2: inference_stage() — run models, return list of DetectionPackets
+  - Stage 3: merge_detections_stage() — merge into one DetectionPacket
+  - overlay_data_to_dict_list() — normalize scenario overlays for UI
+  - Stage 4: evaluate_rules_stage() — run scenarios, return RuleMatch + matched indices
+  - format_video_time_ms(), should_use_camera_fps() — utilities
+  - PipelineRunner — main loop (run_continuous / run_patrol), process_one_frame,
+    draw_and_publish_frame, filter_* helpers, calculate_iou, handle_event
 """
 
-# -----------------------------------------------------------------------------
-# Standard library
-# -----------------------------------------------------------------------------
+# -------- IMPORTS: Standard library --------
 import dataclasses
 import time
 import traceback
 from typing import Any, Dict, List, Optional, Tuple
 
-# -----------------------------------------------------------------------------
-# Processing (stages, context, data models, drawing)
-# -----------------------------------------------------------------------------
+# -------- IMPORTS: Processing (data models, context, merger, drawing) --------
 from app.processing.processing_output.data_models import DetectionPacket
 from app.processing.models.data_models import Model
 from app.processing.pipeline.context import PipelineContext
@@ -37,26 +49,28 @@ from app.processing.drawing.frame_processor import (
     draw_boxes_in_zone_red,
     draw_loom_machine_polygons,
 )
-# Trigger scenario registration (decorators run on import)
+# Load all scenario types (decorators register them on import)
 from app.processing.vision_tasks import scenario_registry  # noqa: F401
 
-# -----------------------------------------------------------------------------
-# Utils (DB, datetime, events)
-# -----------------------------------------------------------------------------
+# -------- IMPORTS: Utils (DB, time, events) --------
 from app.utils.db import get_collection
 from app.utils.datetime_utils import utc_now, now
 from app.utils.event_session_manager import get_event_session_manager
 
-# -----------------------------------------------------------------------------
-# Pipeline stages (Stage 1–4)
-# -----------------------------------------------------------------------------
+
+# =============================================================================
+# STAGE 1: Acquire frame from source (camera or video file)
+# =============================================================================
 
 def acquire_frame_stage(source: Source) -> Optional[FramePacket]:
-    """Stage 1: Acquire frame from source."""
+    """Read one frame from the source. Returns None if no frame (e.g. EOF or no camera)."""
     return source.read_frame()
 
 def any_scenario_requires_yolo(context: PipelineContext) -> bool:
-    """Check if any scenario in the rules requires YOLO detections."""
+    """
+    Return True if any active rule needs YOLO detections (boxes/classes/keypoints).
+    Used to skip inference when no rule needs it (saves compute).
+    """
     if not context.rules:
         return False
 
@@ -68,36 +82,38 @@ def any_scenario_requires_yolo(context: PipelineContext) -> bool:
     for rule_idx, rule in enumerate(context.rules):
         rule_type = str(rule.get("type", "")).strip().lower()
         scenario_class = get_scenario_class(rule_type)
-
         if scenario_class is None:
             continue
-
         if hasattr(context, '_scenario_instances') and rule_idx in context._scenario_instances:
             if context._scenario_instances[rule_idx].requires_yolo_detections():
                 return True
-        else:
-            try:
-                scenario_config = {k: v for k, v in rule.items() if k != "type"}
-                temp_instance = scenario_class(scenario_config, context)
-                if temp_instance.requires_yolo_detections():
-                    return True
-            except Exception:
+        try:
+            scenario_config = {k: v for k, v in rule.items() if k != "type"}
+            temp_instance = scenario_class(scenario_config, context)
+            if temp_instance.requires_yolo_detections():
                 return True
-
+        except Exception:
+            return True
     return False
+
+
+# =============================================================================
+# STAGE 2: Run model inference on the frame
+# =============================================================================
 
 def inference_stage(
     context: PipelineContext,
     frame_packet: FramePacket,
     models: List[Model]
 ) -> List[DetectionPacket]:
-    """Stage 2: Run model inference on frame."""
+    """
+    Run each model on the frame and collect DetectionPackets (boxes, classes, scores, keypoints).
+    Skips inference entirely if no rule needs YOLO. Returns empty list on skip or error.
+    """
     if not any_scenario_requires_yolo(context):
         return []
-
     frame = frame_packet.frame
     detection_packets: List[DetectionPacket] = []
-
     for model in models:
         try:
             results = model(frame, verbose=False)
@@ -105,21 +121,26 @@ def inference_stage(
             print(f"[worker {context.task_id}] ⚠️ YOLO error: {exc}")
             continue
         if results:
-            first_result = results[0]
-            packet = convert_from_yolo_result(first_result, now())
+            packet = convert_from_yolo_result(results[0], now())
             detection_packets.append(packet)
-
     return detection_packets
 
+
+# =============================================================================
+# STAGE 3: Merge detections from all models into one packet
+# =============================================================================
+
 def merge_detections_stage(detection_packets: List[DetectionPacket]) -> DetectionPacket:
-    """Stage 3: Merge detections from multiple models."""
+    """Combine boxes, classes, scores, keypoints from multiple models into a single DetectionPacket."""
     return DetectionMerger.merge(detection_packets, now())
 
 
+# -------- Helper: Normalize scenario overlay data for UI/frontend --------
+
 def overlay_data_to_dict_list(overlay_data: Any) -> List[Dict[str, Any]]:
     """
-    Normalize scenario overlay output for UI.
-    Converts dataclass/dict from scenarios into a list of dicts with boxes, labels, colors.
+    Convert scenario overlay output (dataclass or dict) into a list of dicts.
+    UI expects items with 'boxes', 'labels', 'colors' or 'polygon'/'color' for zones.
     """
     if isinstance(overlay_data, list):
         out = []
@@ -170,16 +191,18 @@ def overlay_data_to_dict_list(overlay_data: Any) -> List[Dict[str, Any]]:
     return []
 
 
+# =============================================================================
+# STAGE 4: Evaluate rules (scenarios) against merged detections
+# =============================================================================
+
 def evaluate_rules_stage(
     context: PipelineContext,
     merged_packet: DetectionPacket,
     frame_packet: Optional[FramePacket] = None
 ) -> tuple[Optional[RuleMatch], List[int]]:
     """
-    Stage 4: Evaluate rules against detections.
-
-    All rules now use scenario implementations.
-    Each rule type must have a corresponding scenario registered.
+    Run each rule's scenario (e.g. fall_detection, intrusion, line counting) on this frame.
+    Returns the first matching event as RuleMatch, plus all detection indices that matched any rule.
     """
     if not context.rules:
         return None, []
@@ -277,13 +300,13 @@ def evaluate_rules_stage(
 
     return rule_match, all_matched_indices
 
-# -----------------------------------------------------------------------------
-# Utilities (time format, FPS helper)
-# -----------------------------------------------------------------------------
 
+# =============================================================================
+# UTILITIES: Time format and FPS decision
+# =============================================================================
 
 def format_video_time_ms(milliseconds: float) -> str:
-    """Convert milliseconds to H:MM:SS.mmm string (for event timestamps)."""
+    """Convert milliseconds to H:MM:SS.mmm (e.g. for event timestamps in UI)."""
     if milliseconds < 0:
         milliseconds = 0
     total_seconds, milliseconds_remainder = divmod(int(milliseconds), 1000)
@@ -292,12 +315,8 @@ def format_video_time_ms(milliseconds: float) -> str:
     return f"{hours:d}:{minutes:02d}:{seconds:02d}.{milliseconds_remainder:03d}"
 
 
-# -----------------------------------------------------------------------------
-# FPS helper
-# -----------------------------------------------------------------------------
-
 def should_use_camera_fps(context: PipelineContext) -> bool:
-    """True if any rule is box_count or class_count (use camera FPS instead of configured FPS)."""
+    """True if any rule is box_count or class_count — use camera FPS for accurate line counting."""
     if not context.rules:
         return False
     for rule in context.rules:
@@ -306,19 +325,16 @@ def should_use_camera_fps(context: PipelineContext) -> bool:
             return True
     return False
 
-# -----------------------------------------------------------------------------
-# Pipeline runner (main loop and helpers)
-# -----------------------------------------------------------------------------
-
+# =============================================================================
+# PIPELINE RUNNER: Main loop (continuous or patrol) and frame processing
+# =============================================================================
 
 class PipelineRunner:
     """
-    Orchestrates the processing pipeline.
-
-    Runs the main loop: acquire frame → inference → merge → evaluate rules → draw/publish.
-    Supports two modes: continuous (run at target FPS until stop) and patrol (sleep then process window).
+    Runs the full pipeline: acquire frame → inference → merge → evaluate rules → draw/publish.
+    Modes: continuous (run at target FPS until stop) or patrol (sleep N min, process M sec, repeat).
     """
-    
+
     def __init__(
         self,
         context: PipelineContext,
@@ -326,24 +342,14 @@ class PipelineRunner:
         models: List[Model],
         shared_store: Optional[Dict[str, Any]] = None
     ):
-        """
-        Initialize pipeline runner.
-        
-        Args:
-            context: Pipeline context (task config and state)
-            source: Source instance for frame acquisition
-            models: List of loaded models
-            shared_store: Optional shared memory dict for publishing frames
-        """
+        """Store context, frame source, models, and optional shared_store for publishing frames."""
         self.context = context
         self.source = source
         self.models = models
         self.shared_store = shared_store
         self.tasks_collection = get_collection()
 
-    # -------------------------------------------------------------------------
-    # Private: process one frame (main loop logic)
-    # -------------------------------------------------------------------------
+    # --------- Process one frame: pacing, stages 2–4, draw, event, heartbeat ---------
 
     def process_one_frame(
         self,
@@ -356,10 +362,10 @@ class PipelineRunner:
         skipped_in_window: int,
     ) -> Tuple[float, float, int, int]:
         """
-        Run stages 2–4 on an acquired frame: inference → merge → evaluate → draw/publish → event → heartbeat.
-        Updates context (frame_index, last_seen_hub_index) and returns updated pacing counters.
+        Run inference → merge → evaluate rules → draw/publish → event handling → heartbeat.
+        Returns (next_tick, last_status, processed_in_window, skipped_in_window) for pacing.
         """
-        # FPS pacing: wait until next_tick then advance
+        # Wait until next_tick for FPS pacing, then advance
         now_ts = time.time()
         if now_ts < next_tick:
             time.sleep(max(0.0, next_tick - now_ts))
@@ -373,7 +379,7 @@ class PipelineRunner:
         self.context.frame_index += 1
         processed_in_window += 1
 
-        # Status log once per second (then reset window counters)
+        # Log FPS/sampling stats once per second and reset window counters
         if (time.time() - last_status) >= 1.0:
             base_fps = frame_packet.fps if frame_packet.fps is not None else 0.0
             hub_status = self.context.last_seen_hub_index or 0
@@ -385,19 +391,12 @@ class PipelineRunner:
             skipped_in_window = 0
             last_status = time.time()
 
-        # Stage 2: Inference
+        # Stage 2: Run models on frame
         detection_packets = inference_stage(self.context, frame_packet, self.models)
-        # Stage 3: Merge
+        # Stage 3: Merge all model outputs into one packet
         merged_packet = merge_detections_stage(detection_packets)
 
-        # Debug: keypoints (pose) on first frame and every 30th
-        if self.context.frame_index == 1 or self.context.frame_index % 30 == 0:
-            if merged_packet.keypoints:
-                print(f"[worker {self.context.task_id}] ✅ Keypoints extracted: {len(merged_packet.keypoints)} person(s) with pose data")
-            else:
-                print(f"[worker {self.context.task_id}] ⚠️ No keypoints extracted! Check if model is a pose model (e.g., yolov8n-pose.pt)")
-
-        # Stage 4: Evaluate rules (scenario-based)
+        # Stage 4: Run each rule's scenario and get first match + all matched indices
         rule_match = None
         all_matched_indices: List[int] = []
         if self.context.rules:
@@ -412,7 +411,7 @@ class PipelineRunner:
         if rule_match:
             self.handle_event(rule_match, processed_frame, frame_packet, detections, fps)
 
-        # Heartbeat (so DB knows task is still running)
+        # Update task updated_at in DB so we know the worker is alive
         try:
             from bson import ObjectId
             self.tasks_collection.update_one(
@@ -424,12 +423,10 @@ class PipelineRunner:
 
         return (next_tick, last_status, processed_in_window, skipped_in_window)
 
-    # -------------------------------------------------------------------------
-    # Public: run pipeline in continuous mode
-    # -------------------------------------------------------------------------
+    # --------- Run pipeline: continuous mode (until stop or video EOF) ---------
 
     def run_continuous(self) -> None:
-        """Run pipeline in continuous mode (process frames indefinitely at target FPS)."""
+        """Loop: check stop → acquire frame → process_one_frame. Uses target FPS or camera FPS for counting rules."""
         use_camera_fps = should_use_camera_fps(self.context)
         fps = self.context.fps
         min_interval = 1.0 / max(1, fps)
@@ -440,7 +437,7 @@ class PipelineRunner:
         skipped_in_window = 0
 
         while True:
-            # 1. Check if we should stop (user cancelled, task deleted, end_time)
+            # Check stop (user cancel, task deleted, end_time)
             stop_reason = self.context.get_stop_condition(self.tasks_collection)
             if stop_reason:
                 status = "cancelled" if stop_reason == "stop_requested" else "completed"
@@ -448,7 +445,7 @@ class PipelineRunner:
                 print(f"[worker {self.context.task_id}] ⏹️ Stopping (reason={stop_reason})")
                 return
 
-            # 2. Stage 1: Acquire frame from source
+            # Stage 1: Get next frame
             frame_packet = acquire_frame_stage(self.source)
             if frame_packet is None:
                 if self.context.is_video_file:
@@ -458,12 +455,12 @@ class PipelineRunner:
                 time.sleep(0.05)
                 continue
 
-            # 3. For counting rules, use camera FPS when available
+            # For box_count/class_count use camera FPS when available
             if use_camera_fps and frame_packet.fps is not None and frame_packet.fps > 0:
                 fps = int(frame_packet.fps)
                 min_interval = 1.0 / max(1, fps)
 
-            # 4. Run stages 2–4 and draw/publish/event/heartbeat (shared logic)
+            # Run inference → merge → evaluate → draw/publish → event → heartbeat
             try:
                 next_tick, last_status, processed_in_window, skipped_in_window = self.process_one_frame(
                     frame_packet, fps, min_interval, next_tick, last_status, processed_in_window, skipped_in_window
@@ -473,12 +470,10 @@ class PipelineRunner:
                 traceback.print_exc()
                 next_tick = max(next_tick + min_interval, time.time())
 
-    # -------------------------------------------------------------------------
-    # Public: run pipeline in patrol mode
-    # -------------------------------------------------------------------------
+    # --------- Run pipeline: patrol mode (sleep N min, process M sec, repeat) ---------
 
     def run_patrol(self) -> None:
-        """Run pipeline in patrol mode: sleep N minutes, then process for M seconds, repeat."""
+        """Loop: sleep interval_seconds (with heartbeat) → process frames for window_seconds → repeat."""
         interval_seconds = max(0, int(self.context.interval_minutes) * 60)
         window_seconds = max(1, int(self.context.check_duration_seconds))
         use_camera_fps = should_use_camera_fps(self.context)
@@ -535,12 +530,8 @@ class PipelineRunner:
 
             print(f"[worker {self.context.task_id}] 💤 Patrol window ended; going back to sleep")
     
-    # -------------------------------------------------------------------------
-    # Private: sleep with heartbeat (patrol mode)
-    # -------------------------------------------------------------------------
-
     def sleep_with_heartbeat(self, seconds: int) -> bool:
-        """Sleep for given seconds with periodic heartbeat and stop checks. Returns True if should stop."""
+        """Sleep for `seconds`, sending heartbeat and checking stop every second. Returns True if caller should stop."""
         from bson import ObjectId
         
         end_time = time.time() + max(0, seconds)
@@ -565,9 +556,7 @@ class PipelineRunner:
             time.sleep(1)
         return False
 
-    # -------------------------------------------------------------------------
-    # Private: draw annotations and publish frame to shared_store
-    # -------------------------------------------------------------------------
+    # --------- Draw annotations and publish frame to shared_store (for stream/UI) ---------
 
     def draw_and_publish_frame(
         self,
@@ -577,18 +566,17 @@ class PipelineRunner:
         all_matched_indices: List[int],
         rule_match: Optional[RuleMatch] = None,
     ) -> Optional[Any]:
-        """Draw bounding boxes and publish processed frame to shared_store."""
+        """
+        Draw boxes/keypoints/zones per scenario type, then write frame + detections + overlays
+        to shared_store under agent_id. Returns the drawn frame or None on error.
+        """
         if self.shared_store is None or not self.context.rules:
-            if self.shared_store is None:
-                print(f"[worker {self.context.task_id}] ⚠️ draw_and_publish_frame: shared_store is None, skip publish")
             return None
 
         try:
             frame = frame_packet.frame.copy()
-            
-            # For restricted zone scenarios: show ALL person detections, not just those in zone
-            # For class_count/box_count with line: show ALL detections of target class
-            # For other scenarios: show only matched detections
+
+            # --- Determine which scenario types are active and collect their state ---
             zone_violated = False
             target_class = None
             line_crossed_indices = []  # Indices of objects that crossed the line
@@ -615,8 +603,8 @@ class PipelineRunner:
             fall_red_indices: List[int] = []  # Confirmed fall (red keypoints/boxes); set in fall_detection branch
             fall_suspected_indices: List[int] = []  # Suspected fall (orange keypoints); set in fall_detection branch
             face_recognitions: List[Dict[str, Any]] = []  # Face detection: [{ "box": [...], "name": "..." }]
-            is_person_near_machine = False  # Polygon zone; show only person detections
-            
+            is_person_near_machine = False
+
             if hasattr(self.context, '_scenario_instances'):
                 for rule_idx, scenario_instance in self.context._scenario_instances.items():
                     scenario_type = getattr(scenario_instance, 'scenario_id', '')
@@ -747,8 +735,8 @@ class PipelineRunner:
                                                     if idx not in line_crossed_indices:
                                                         line_crossed_indices.append(idx)
                                                     break
-            
-            # For restricted_zone, wall_climb, and person_near_machine: draw only target class (person for person_near_machine).
+
+            # --- Choose which detections to draw (filter by class for zone/line/pose scenarios) ---
             detections_for_draw = None
             if (is_restricted_zone or is_wall_climb_detection) and target_class:
                 kp_src = getattr(merged_packet, "keypoints", None) or []
@@ -759,21 +747,22 @@ class PipelineRunner:
                 )
                 detections_for_draw = {"boxes": fd_boxes, "classes": fd_classes, "scores": fd_scores}
             elif is_person_near_machine:
-                # Person near machine: draw ONLY person detections (no truck or other classes)
+                # Person near machine: draw ONLY target_class detections (from agent config)
                 kp_src = getattr(merged_packet, "keypoints", None) or []
                 pnm_conf = 0.5
+                pnm_target_class = "person"
                 for _si in (self.context._scenario_instances or {}).values():
                     if getattr(_si, "scenario_id", "") == "person_near_machine" and hasattr(_si, "config_obj"):
                         pnm_conf = getattr(_si.config_obj, "confidence_threshold", 0.5)
+                        pnm_target_class = getattr(_si.config_obj, "target_class", "person") or "person"
                         break
                 fd_boxes, fd_classes, fd_scores, _ = self.filter_detections_by_class(
-                    "person", merged_packet.boxes, merged_packet.classes, merged_packet.scores,
+                    pnm_target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores,
                     kp_src, confidence_threshold=pnm_conf,
                 )
                 detections_for_draw = {"boxes": fd_boxes, "classes": fd_classes, "scores": fd_scores}
 
-            # Fall detection: pass suspected/confirmed indices so keypoints can be drawn orange/red
-            # Use original indices from scenario state (they match merged_packet keypoints order)
+            # Fall detection: pass suspected/confirmed indices for orange/red keypoint drawing
             if is_fall_detection and fall_detection_scenario and hasattr(fall_detection_scenario, "_state"):
                 fall_suspected_orig_for_draw = fall_detection_scenario._state.get("fall_suspected_indices") or []
                 fall_confirmed_orig_for_draw = fall_detection_scenario._state.get("fall_confirmed_indices") or []
@@ -785,8 +774,7 @@ class PipelineRunner:
                 detections["fall_suspected_indices"] = fall_suspected_orig_for_draw
                 detections["fall_confirmed_indices"] = fall_confirmed_orig_for_draw
             
-            # Wall climb detection: pass confirmed indices so keypoints can be drawn red (VLM-confirmed)
-            # Use original indices from scenario state (they match merged_packet keypoints order)
+            # Wall climb: pass VLM-confirmed indices for red keypoint drawing
             if is_wall_climb_detection and wall_climb_scenario and hasattr(wall_climb_scenario, "_state"):
                 wall_climb_confirmed_orig_for_draw = wall_climb_scenario._state.get("confirmed_detection_indices") or []
                 # Ensure indices are valid (within keypoints range)
@@ -794,9 +782,7 @@ class PipelineRunner:
                 if keypoints_count > 0:
                     wall_climb_confirmed_orig_for_draw = [i for i in wall_climb_confirmed_orig_for_draw if 0 <= i < keypoints_count]
                 detections["wall_climb_confirmed_indices"] = wall_climb_confirmed_orig_for_draw
-            # Draw annotations based on scenario type
-            # For line-based counting (box_count/class_count), frontend handles drawing
-            # Backend only draws for pose keypoints or regular bounding boxes
+            # --- Draw on frame: pose keypoints, or boxes, or leave for line-counting (frontend draws) ---
             if detections.get("keypoints"):
                 processed_frame = draw_pose_keypoints(frame, detections, self.context.rules)
             elif is_line_counting:
@@ -806,9 +792,7 @@ class PipelineRunner:
                 draw_det = detections_for_draw if detections_for_draw else detections
                 processed_frame = draw_bounding_boxes(frame, draw_det, self.context.rules)
             
-            # For line-based counting (class_count or box_count): draw track_info + ADD/OUT/TRACKING
-            # Use track_info from state (like old code) so colors update properly when box crosses line
-            # Same behavior for both box_count and class_count: green/orange/yellow by counted + direction
+            # Line counting: draw track_info and entry/exit counts on frame
             if is_line_counting and track_info:
                 draw_counts = counts or {}
                 processed_frame = draw_box_count_annotations(
@@ -823,7 +807,7 @@ class PipelineRunner:
                     active_tracks_count,
                 )
             elif rule_match and rule_match.report:
-                # Fallback: draw from report when state track_info not used (e.g. single rule)
+                # Fallback: use track_info from report when not using line-counting state
                 rule_index = getattr(rule_match, "rule_index", None)
                 if rule_index is not None and rule_index < len(self.context.rules):
                     rule = self.context.rules[rule_index]
@@ -855,14 +839,12 @@ class PipelineRunner:
 
             height, width = processed_frame.shape[0], processed_frame.shape[1]
 
-            # For restricted zone: indices into filtered detections that are inside the zone (for per-box red coloring)
             in_zone_indices: List[int] = []
-            # Wall climb: confirmed violations (VLM-confirmed) for red keypoints (no bounding boxes)
             wall_climb_confirmed_indices: List[int] = []
-            wall_climb_red_indices: List[int] = []  # Deprecated: kept for backward compatibility
-            wall_climb_orange_indices: List[int] = []  # Unused; kept for payload compatibility
+            wall_climb_red_indices: List[int] = []   # Legacy; kept for UI compatibility
+            wall_climb_orange_indices: List[int] = []  # Legacy; kept for UI compatibility
 
-            # Filter detections based on scenario type (include keypoints for fall_detection/pose)
+            # --- Build filtered lists (f_boxes, f_classes, etc.) per scenario for payload ---
             keypoints_src = getattr(merged_packet, "keypoints", None) or []
             if is_restricted_zone and target_class:
                 # Get scenario's confidence threshold (must match for index mapping to work)
@@ -894,14 +876,16 @@ class PipelineRunner:
                                 in_zone_indices.append(filtered_idx)
                             filtered_idx += 1
             elif is_person_near_machine:
-                # Person near machine: show only person detections (no truck/other classes)
+                # Person near machine: show only target_class detections (from agent config)
                 scenario_conf = 0.5
+                pnm_target_class = "person"
                 for scenario_instance in (self.context._scenario_instances or {}).values():
                     if getattr(scenario_instance, 'scenario_id', '') == 'person_near_machine' and hasattr(scenario_instance, 'config_obj'):
                         scenario_conf = getattr(scenario_instance.config_obj, 'confidence_threshold', 0.5)
+                        pnm_target_class = getattr(scenario_instance.config_obj, 'target_class', 'person') or 'person'
                         break
                 f_boxes, f_classes, f_scores, f_keypoints = self.filter_detections_by_class(
-                    "person", merged_packet.boxes, merged_packet.classes, merged_packet.scores,
+                    pnm_target_class, merged_packet.boxes, merged_packet.classes, merged_packet.scores,
                     keypoints_src, confidence_threshold=scenario_conf,
                 )
             elif is_wall_climb_detection and target_class:
@@ -984,8 +968,8 @@ class PipelineRunner:
                 )
             else:
                 f_boxes, f_classes, f_scores, f_keypoints = [], [], [], []
-            
-            # Sleep detection: which person boxes are VLM-confirmed sleeping (same box, UI draws red)
+
+            # Sleep: indices of person boxes that are VLM-confirmed sleeping (UI draws red)
             sleep_confirmed_indices: List[int] = []
             if is_sleep_detection and sleep_detection_scenario and hasattr(sleep_detection_scenario, 'state'):
                 emitted = getattr(sleep_detection_scenario.state, 'emitted_event_boxes', {})
@@ -997,20 +981,14 @@ class PipelineRunner:
                             sleep_confirmed_indices.append(i)
                             break
 
-            # Fall detection: red = confirmed fall (per-person); set above in fall_detection branch; legacy fallback below
             if is_fall_detection and rule_match and getattr(rule_match, "event_type", None) == "fall_detected" and f_boxes and not fall_red_indices:
                 fall_red_indices = list(range(len(f_boxes)))
 
-            # Draw restricted zone polygon, zone line, and red boxes for in-zone detections (on processed frame)
+            # Draw zone polygon, line, and red boxes for in-zone detections
             draw_zone_polygon(processed_frame, restricted_zone_coordinates, width, height)
             draw_zone_line(processed_frame, line_zone, width, height)
             draw_boxes_in_zone_red(processed_frame, f_boxes, f_classes, f_scores, in_zone_indices)
-            # Wall climb: NO bounding boxes - only red keypoints are drawn after VLM confirmation
-            # Bounding boxes removed for wall climb detection as per requirement
-            # Fall detection: NO bounding boxes - only keypoints are drawn (orange/red)
-            # Bounding boxes removed for fall detection as per requirement
-
-            # Collect scenario overlays (e.g., face boxes, loom ROI) before encoding so we can draw them on the frame
+            # Collect scenario overlays (face boxes, loom ROI, etc.) and draw them on the frame
             scenario_overlays = []
             if hasattr(self.context, '_scenario_instances'):
                 frame_timestamp = utc_now()
@@ -1029,12 +1007,10 @@ class PipelineRunner:
                         scenario_overlays.extend(
                             overlay_data_to_dict_list(overlay_data)
                         )
-                        # Any scenario returning polygons + colors: draw zone polygons (e.g. green/red by state)
                         if isinstance(overlay_data, dict):
                             polygons = overlay_data.get("polygons", [])
                             colors = overlay_data.get("colors", [])
                             if polygons and colors:
-                                # person_near_machine: very light fill (gray/green/red by state); others e.g. loom_machine_state: 0.3 fill
                                 fill_alpha = 0.10 if scenario_type == "person_near_machine" else 0.3
                                 draw_loom_machine_polygons(
                                     processed_frame,
@@ -1045,7 +1021,6 @@ class PipelineRunner:
                                     thickness=2,
                                     fill_alpha=fill_alpha
                                 )
-                        # Face detection: use same overlay for face_recognitions so UI and stream both get boxes
                         if scenario_type == "face_detection":
                             face_recognitions = []
                             for item in overlay_data:
@@ -1059,16 +1034,13 @@ class PipelineRunner:
                                         "box": item["box"],
                                         "name": item.get("label", item.get("name", "Unknown")) or "Unknown",
                                     })
-            # Draw face recognition boxes on the frame so they appear in the agent stream (JPEG)
             draw_face_recognitions(processed_frame, face_recognitions)
             frame_bytes = processed_frame.tobytes()
 
-            # Zone for UI overlay (restricted_zone and wall_climb both use polygon)
             zone_for_payload = None
             if restricted_zone_coordinates and len(restricted_zone_coordinates) >= 3:
                 zone_for_payload = {"type": "polygon", "coordinates": restricted_zone_coordinates}
 
-            # Publish to shared_store (key must be string so overlay/ws can read by agent_id from URL)
             store_key = str(self.context.agent_id)
             payload = {
                 "shape": (height, width, 3),
@@ -1086,32 +1058,28 @@ class PipelineRunner:
                     "scores": f_scores,
                     "keypoints": f_keypoints,  # For fall_detection/pose UI (skeleton overlay)
                 },
-                "scenario_overlays": scenario_overlays,  # Add scenario overlays
+                "scenario_overlays": scenario_overlays,
                 "rules": self.context.rules,
                 "camera_id": self.context.camera_id,
-                "zone": zone_for_payload,  # Polygon zone for UI (restricted_zone / wall_climb)
-                "zone_violated": zone_violated,  # Zone violation status
-                "line_zone": line_zone,  # Line zone data for visualization
-                "line_crossed": len(line_crossed_indices) > 0,  # Whether any object crossed the line
-                "line_crossed_indices": line_crossed_indices,  # Indices of filtered detections that crossed the line
-                "track_info": track_info,  # Track information (center points, track IDs) for visualization
-                "fire_detected": fire_detected,  # Fire detection status (for red bounding boxes)
-                "in_zone_indices": in_zone_indices,  # Restricted zone: indices of filtered detections inside zone (red box only these)
-                "sleep_confirmed_indices": sleep_confirmed_indices,  # Sleep: same person box, red when VLM confirmed
-                "wall_climb_confirmed_indices": wall_climb_confirmed_indices,  # Wall climb: VLM-confirmed violations (red keypoints only, no bounding boxes)
-                "wall_climb_red_indices": wall_climb_red_indices,  # Deprecated: kept for backward compatibility
-                "wall_climb_orange_indices": wall_climb_orange_indices,  # Unused; kept for UI compatibility
-                "fall_detected": bool(is_fall_detection and fall_red_indices),  # Fall: show red alert on UI
-                "fall_red_indices": fall_red_indices,  # Fall: confirmed fall (red keypoints/boxes)
-                "fall_suspected_indices": fall_suspected_indices,  # Fall: suspected fall (orange keypoints)
-                "face_recognitions": face_recognitions,  # Face detection: [{ "box": [x1,y1,x2,y2], "name": "..." }]
+                "zone": zone_for_payload,
+                "zone_violated": zone_violated,
+                "line_zone": line_zone,
+                "line_crossed": len(line_crossed_indices) > 0,
+                "line_crossed_indices": line_crossed_indices,
+                "track_info": track_info,
+                "fire_detected": fire_detected,
+                "in_zone_indices": in_zone_indices,
+                "sleep_confirmed_indices": sleep_confirmed_indices,
+                "wall_climb_confirmed_indices": wall_climb_confirmed_indices,
+                "wall_climb_red_indices": wall_climb_red_indices,
+                "wall_climb_orange_indices": wall_climb_orange_indices,
+                "fall_detected": bool(is_fall_detection and fall_red_indices),
+                "fall_red_indices": fall_red_indices,
+                "fall_suspected_indices": fall_suspected_indices,
+                "face_recognitions": face_recognitions,
             }
             try:
                 self.shared_store[store_key] = payload
-                # Debug: log every 30th frame (and first 3) so we see writes without flooding
-                idx = frame_packet.frame_index
-                if idx <= 3 or (idx % 30 == 0):
-                    print(f"[worker {self.context.task_id}] 📤 shared_store WRITE ok | store_key={store_key!r} frame_index={idx}")
             except Exception as write_exc:  # noqa: BLE001
                 print(f"[worker {self.context.task_id}] ⚠️ shared_store write failed (stream may be stale): {write_exc}")
             return processed_frame
@@ -1120,7 +1088,7 @@ class PipelineRunner:
             return None
     
     def calculate_iou(self, box1: List[float], box2: List[float]) -> float:
-        """Calculate Intersection over Union between two boxes."""
+        """Intersection over Union of two [x1, y1, x2, y2] boxes (e.g. for matching track to detection)."""
         x1_1, y1_1, x2_1, y2_1 = box1
         x1_2, y1_2, x2_2, y2_2 = box2
         
@@ -1142,9 +1110,7 @@ class PipelineRunner:
         
         return intersection / union
 
-    # -------------------------------------------------------------------------
-    # Private: filter detections by indices, class, or fire classes
-    # -------------------------------------------------------------------------
+    # --------- Filter detections by indices, class, or fire classes (for draw/payload) ---------
 
     def filter_detections_by_indices(
         self,
@@ -1154,8 +1120,7 @@ class PipelineRunner:
         scores: List[float],
         keypoints: Optional[List[List[List[float]]]] = None,
     ) -> tuple[List[List[float]], List[str], List[float], List[List[List[float]]]]:
-        """Filter detections to only those at specified indices with confidence >= 0.7.
-        When keypoints is provided (e.g. for fall_detection/pose), returns aligned f_keypoints."""
+        """Keep only detections at the given indices (confidence >= 0.7). Returns aligned keypoints if provided."""
         if not indices:
             return [], [], [], []
         f_boxes: List[List[float]] = []
@@ -1185,9 +1150,7 @@ class PipelineRunner:
         keypoints: Optional[List[List[List[float]]]] = None,
         confidence_threshold: Optional[float] = None,
     ) -> tuple[List[List[float]], List[str], List[float], List[List[List[float]]]]:
-        """Filter detections to only those matching target class (e.g., 'person') with confidence >= threshold.
-        When keypoints is provided (e.g. for fall_detection/pose), returns aligned f_keypoints.
-        confidence_threshold: default 0.7; use 0.5 for wall_climb_detection."""
+        """Keep only detections of target_class with score >= confidence_threshold (default 0.7). Returns aligned keypoints if provided."""
         f_boxes: List[List[float]] = []
         f_classes: List[str] = []
         f_scores: List[float] = []
@@ -1196,30 +1159,13 @@ class PipelineRunner:
         conf = 0.7 if confidence_threshold is None else float(confidence_threshold)
         kp_list = keypoints if keypoints else []
 
-        # Debug: Log all detected classes
-        if len(classes) > 0:
-            unique_classes = set(cls.lower() if isinstance(cls, str) else str(cls) for cls in classes)
-            print(f"[worker {self.context.task_id}] 🔍 YOLO detected classes: {unique_classes} (total: {len(classes)} objects)")
-        
-        filtered_count = 0
         for idx, (box, cls, score) in enumerate(zip(boxes, classes, scores)):
-            if isinstance(cls, str) and cls.lower() == target_lower:
-                # Apply confidence threshold
-                if score >= conf:
-                    f_boxes.append(box)
-                    f_classes.append(cls)
-                    f_scores.append(score)
-                    if idx < len(kp_list):
-                        f_keypoints.append(kp_list[idx])
-                else:
-                    filtered_count += 1
-        
-        # Debug: Log filtering results
-        if len(f_boxes) > 0:
-            print(f"[worker {self.context.task_id}] ✅ Found {len(f_boxes)} '{target_class}' detections (confidence >= {conf})")
-        if filtered_count > 0:
-            print(f"[worker {self.context.task_id}] 🔽 Filtered out {filtered_count} low-confidence '{target_class}' detections (< {conf})")
-        
+            if isinstance(cls, str) and cls.lower() == target_lower and score >= conf:
+                f_boxes.append(box)
+                f_classes.append(cls)
+                f_scores.append(score)
+                if idx < len(kp_list):
+                    f_keypoints.append(kp_list[idx])
         return f_boxes, f_classes, f_scores, f_keypoints
     
     def filter_detections_by_fire_classes(
@@ -1230,11 +1176,7 @@ class PipelineRunner:
         scores: List[float],
         keypoints: Optional[List[List[List[float]]]] = None,
     ) -> tuple[List[List[float]], List[str], List[float], List[List[List[float]]]]:
-        """
-        Filter detections to only fire-related classes (fire, flame, smoke, etc.).
-        Uses a lower confidence threshold (0.5) for fire detection since it's safety-critical.
-        When keypoints is provided, returns aligned f_keypoints (usually empty for fire).
-        """
+        """Keep only detections whose class is in fire_classes (e.g. fire, flame, smoke). Uses 0.5 confidence threshold."""
         f_boxes: List[List[float]] = []
         f_classes: List[str] = []
         f_scores: List[float] = []
@@ -1257,13 +1199,9 @@ class PipelineRunner:
                     if idx < len(kp_list):
                         f_keypoints.append(kp_list[idx])
 
-        if len(f_boxes) > 0:
-            print(f"[worker {self.context.task_id}] 🔥 Found {len(f_boxes)} fire-related detections (confidence >= {confidence_threshold})")
         return f_boxes, f_classes, f_scores, f_keypoints
 
-    # -------------------------------------------------------------------------
-    # Private: handle rule match event (session manager, notifications)
-    # -------------------------------------------------------------------------
+    # --------- Handle rule match: log, pass to session manager for notifications ---------
 
     def handle_event(
         self,
@@ -1273,7 +1211,7 @@ class PipelineRunner:
         detections: Dict[str, Any],
         fps: int
     ) -> None:
-        """Handle rule match event (drawing, notifications). DEPRECATED: Use scenarios instead."""
+        """Log the event and send frame + detections to session manager for notifications/storage."""
         event_label = rule_match.label
         video_ms = (self.context.frame_index / float(max(1, self.context.fps))) * 1000.0
         video_ts = format_video_time_ms(video_ms)
